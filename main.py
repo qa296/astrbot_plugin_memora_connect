@@ -98,7 +98,7 @@ class SimpleModel(MemoryModel):
     async def extract_themes(self, text: str) -> List[str]:
         return list(set(re.split(r'\s+|,|;', text)))
 
-    async def are_memories_similar(self, mem1: Memory, mem2: Memory, threshold: float) -> bool:
+    async def are_memories_similar(self, mem1: Memory, mem2: Memory, threshold: float = 0.7) -> bool:
         words1 = set(mem1.content.split())
         words2 = set(mem2.content.split())
         if not words1 or not words2:
@@ -160,7 +160,13 @@ class EmbeddingModel(MemoryModel):
 
 from astrbot.api import AstrBotConfig
 
-@register("memora_connect", "qa296", "一个模仿生物海ма体，构建核心记忆系统的插件。", "0.1.0")
+@register(
+    "memora_connect",
+    "qa296",
+    "一个模仿生物海ма体，构建核心记忆系统的插件。",
+    "0.1.0",
+    "https://github.com/qa296/astrbot_plugin_reply_directly",
+)
 class MemoraConnectPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -234,7 +240,7 @@ class MemoraConnectPlugin(Star):
             return
 
         # 将对话本身作为一条记忆，存入第一个主题
-        primary_theme = themes
+        primary_theme = themes[0] if isinstance(themes, list) else themes
         self.knowledge_graph.add_memory(primary_theme, conversation)
         logger.info(f"为主题 '{primary_theme}' 添加了新记忆: {conversation}")
 
@@ -263,7 +269,7 @@ class MemoraConnectPlugin(Star):
 
         # 提取最相关的记忆
         relevant_memories = []
-        for theme, activation_score in sorted(activated_themes.items(), key=lambda item: item, reverse=True):
+        for theme, activation_score in sorted(activated_themes.items(), key=lambda item: item[1], reverse=True):
             if theme in self.knowledge_graph.nodes:
                 relevant_memories.extend(self.knowledge_graph.nodes[theme].memories)
         
@@ -354,11 +360,11 @@ class MemoraConnectPlugin(Star):
         for m in all_memories:
             # 50% 概率选择近期记忆
             if random.random() < 0.5:
-                if recent_peak <= m.timestamp <= recent_peak:
+                if recent_peak[0] <= m.timestamp <= recent_peak[1]:
                     selected_memories.append(m)
             # 50% 概率选择远期记忆
             else:
-                if distant_peak <= m.timestamp <= distant_peak:
+                if distant_peak[0] <= m.timestamp <= distant_peak[1]:
                     selected_memories.append(m)
         
         return selected_memories
