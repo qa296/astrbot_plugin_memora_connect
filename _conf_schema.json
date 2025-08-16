@@ -1,0 +1,55 @@
+{
+  "model_type": {
+    "description": "选择用于处理记忆的模型",
+    "type": "string",
+    "default": "simple",
+    "options": [
+      "simple",
+      "llm",
+      "embedding"
+    ],
+    "hint": "simple: 基础模型，无需额外配置。\nllm: 使用大型语言模型，效果更好。\nembedding: 使用 Embedding 模型进行高精度相似度判断，效果最佳。"
+  },
+  "auto_memory_min_length": {
+    "description": "自动形成记忆的最小消息长度",
+    "type": "int",
+    "default": 10,
+    "hint": "当收到的消息长度（字符数）超过此值时，插件会自动学习并形成记忆。"
+  },
+  "recall_max_results": {
+    "description": "回忆时返回的最大记忆条数",
+    "type": "int",
+    "default": 3,
+    "hint": "当使用 /recall 指令时，返回的最相关记忆的数量。"
+  },
+  "forgetting_threshold_days": {
+    "description": "记忆遗忘阈值（天）",
+    "type": "int",
+    "default": 30,
+    "hint": "一条记忆如果超过这个天数没有被回顾或关联，将会被遗忘。"
+  },
+  "consolidation_similarity_threshold": {
+    "description": "合并记忆的相似度阈值",
+    "type": "float",
+    "default": 0.7,
+    "hint": "用于 simple 模型。当两条记忆的相似度高于此值时，它们将被合并。取值范围 0.0 - 1.0。"
+  },
+  "embedding_similarity_threshold": {
+    "description": "Embedding 模型合并记忆的相似度阈值",
+    "type": "float",
+    "default": 0.8,
+    "hint": "用于 embedding 模型。当两条记忆的向量余弦相似度高于此值时，它们将被合并。取值范围 0.0 - 1.0。"
+  },
+  "forgetting_interval_hours": {
+    "description": "执行遗忘检查的周期（小时）",
+    "type": "int",
+    "default": 6,
+    "hint": "插件每隔多少小时检查一次是否有需要遗忘的记忆。"
+  },
+  "consolidation_interval_days": {
+    "description": "执行巩固检查的周期（天）",
+    "type": "int",
+    "default": 1,
+    "hint": "插件每隔多少天检查一次是否有可以合并的相似记忆。"
+  }
+}
