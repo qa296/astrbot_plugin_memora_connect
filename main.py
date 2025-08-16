@@ -196,7 +196,7 @@ class MemoraConnectPlugin(Star):
 
         logger.info("Memora Connect 插件初始化完成。")
 
-    @filter.on_message()
+    @filter.event_message_type(filter.EventMessageType.ALL)
     async def handle_message(self, event: AstrMessageEvent):
         """处理消息，自动形成记忆"""
         message_str = event.message_str.strip()
