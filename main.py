@@ -1,8 +1,3 @@
-"""
-AstrBot 记忆插件 - 模仿人类海马体的记忆系统
-基于知识图谱的记忆网络，实现概念节点和关系连接的记忆存储
-"""
-
 import asyncio
 import json
 import sqlite3
