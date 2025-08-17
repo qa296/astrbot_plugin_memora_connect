@@ -1,11 +1,10 @@
 import asyncio
 import json
-import sqlite3
 import time
 import random
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
-import logging
+import os
 from dataclasses import dataclass, asdict
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
@@ -93,7 +92,7 @@ class MemorySystem:
         await self.load_memory_state()
         asyncio.create_task(self.memory_maintenance_loop())
         
-    async def load_memory_state(self):
+    def load_memory_state(self):
         """从数据库加载记忆状态"""
         try:
             logger.info(f"正在加载记忆数据库: {self.db_path}")
@@ -178,7 +177,7 @@ class MemorySystem:
         except Exception as e:
             logger.error(f"加载记忆系统失败: {e}")
             
-    async def save_memory_state(self):
+    def save_memory_state(self):
         """保存记忆状态到数据库"""
         try:
             logger.info(f"正在保存记忆到数据库: {self.db_path}")
@@ -202,7 +201,7 @@ class MemorySystem:
                 cursor.execute('''
                     INSERT INTO memories (id, concept_id, content, created_at, last_accessed, access_count, strength)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (memory.id, memory.concept_id, memory.content, memory.created_at, 
+                ''', (memory.id, memory.concept_id, memory.content, memory.created_at,
                       memory.last_accessed, memory.access_count, memory.strength))
             
             # 保存连接
@@ -210,7 +209,7 @@ class MemorySystem:
                 cursor.execute('''
                     INSERT INTO connections (id, from_concept, to_concept, strength, last_strengthened)
                     VALUES (?, ?, ?, ?, ?)
-                ''', (connection.id, connection.from_concept, connection.to_concept, 
+                ''', (connection.id, connection.from_concept, connection.to_concept,
                       connection.strength, connection.last_strengthened))
             
             conn.commit()
@@ -364,13 +363,13 @@ class MemorySystem:
                 await asyncio.sleep(3600)  # 每小时检查一次
                 
                 # 遗忘机制
-                await self.forget_memories()
+                self.forget_memories()
                 
                 # 记忆整理
-                await self.consolidate_memories()
+                self.consolidate_memories()
                 
                 # 保存状态
-                await self.save_memory_state()
+                self.save_memory_state()
                 
             except Exception as e:
                 logger.error(f"记忆维护失败: {e}")
