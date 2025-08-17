@@ -34,7 +34,7 @@
     "description": "回忆触发概率",
     "type": "float",
     "hint": "对话中触发回忆的概率(0-1)",
-    "default": 0.2
+    "default": 0.6
   },
   "enable_forgetting": {
     "description": "启用遗忘机制",
@@ -53,6 +53,12 @@
     "type": "bool",
     "hint": "是否启用双峰时间分布的回忆模式",
     "default": true
+  },
+  "llm_provider": {
+    "description": "LLM服务提供商",
+    "type": "string",
+    "hint": "选择用于记忆形成的LLM服务提供商，将使用AstrBot配置的对应提供商",
+    "default": "openai"
   },
   "llm_system_prompt": {
     "description": "LLM系统提示词",

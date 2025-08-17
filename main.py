@@ -85,6 +85,7 @@ class MemorySystem:
                 "enable_forgetting": config.get("enable_forgetting", True),
                 "enable_consolidation": config.get("enable_consolidation", True),
                 "bimodal_recall": config.get("bimodal_recall", True),
+                "llm_provider": config.get("llm_provider", "openai"),
                 "llm_system_prompt": config.get("llm_system_prompt", "你是一个记忆总结助手，请将对话内容总结成简洁自然的记忆。"),
                 "embedding_provider": config.get("embedding_provider", "openai"),
                 "embedding_model": config.get("embedding_model", "")
@@ -100,6 +101,7 @@ class MemorySystem:
                 "enable_forgetting": True,
                 "enable_consolidation": True,
                 "bimodal_recall": True,
+                "llm_provider": "openai",
                 "llm_system_prompt": "你是一个记忆总结助手，请将对话内容总结成简洁自然的记忆。",
                 "embedding_provider": "openai",
                 "embedding_model": ""
@@ -298,16 +300,18 @@ class MemorySystem:
             4. 不超过50字
             """
             
-            if self.memory_config["recall_mode"] == "llm" and self.context.get_using_provider():
-                response = await self.context.get_using_provider().text_chat(
-                    prompt=prompt,
-                    contexts=[],
-                    system_prompt="你是一个记忆总结助手"
-                )
-                return response.completion_text.strip()
-            else:
-                # 简单总结
-                return f"我记得我们聊过关于{theme}的事情"
+            if self.memory_config["recall_mode"] == "llm":
+                provider = await self.get_llm_provider()
+                if provider:
+                    response = await provider.text_chat(
+                        prompt=prompt,
+                        contexts=[],
+                        system_prompt=self.memory_config["llm_system_prompt"]
+                    )
+                    return response.completion_text.strip()
+            
+            # 简单总结
+            return f"我记得我们聊过关于{theme}的事情"
                 
         except Exception as e:
             logger.error(f"形成记忆失败: {e}")
@@ -424,6 +428,40 @@ class MemorySystem:
         嵌入提供商: {self.memory_config['embedding_provider']}
         """
 
+    async def get_llm_provider(self):
+        """获取LLM服务提供商"""
+        try:
+            provider_name = self.memory_config['llm_provider']
+            if provider_name == "openai":
+                # 使用AstrBot配置的OpenAI提供商
+                providers = self.context.get_all_providers()
+                for provider in providers:
+                    if "openai" in provider.id.lower() and hasattr(provider, 'text_chat'):
+                        return provider
+            elif provider_name == "azure":
+                # 使用Azure OpenAI
+                providers = self.context.get_all_providers()
+                for provider in providers:
+                    if "azure" in provider.id.lower() and hasattr(provider, 'text_chat'):
+                        return provider
+            elif provider_name == "zhipu":
+                # 使用智谱AI
+                providers = self.context.get_all_providers()
+                for provider in providers:
+                    if "zhipu" in provider.id.lower() and hasattr(provider, 'text_chat'):
+                        return provider
+            else:
+                # 通过ID获取指定提供商
+                provider = self.context.get_provider_by_id(provider_name)
+                if provider and hasattr(provider, 'text_chat'):
+                    return provider
+                    
+            # 如果没有找到指定提供商，使用当前正在使用的提供商
+            return self.context.get_using_provider()
+        except Exception as e:
+            logger.error(f"获取LLM提供商失败: {e}")
+            return self.context.get_using_provider()
+
     async def get_embedding_provider(self):
         """获取嵌入模型提供商"""
         try:
@@ -439,6 +477,12 @@ class MemorySystem:
                 providers = self.context.get_all_providers()
                 for provider in providers:
                     if "azure" in provider.id.lower():
+                        return provider
+            elif provider_name == "zhipu":
+                # 使用智谱AI
+                providers = self.context.get_all_providers()
+                for provider in providers:
+                    if "zhipu" in provider.id.lower():
                         return provider
             else:
                 # 通过ID获取指定提供商
