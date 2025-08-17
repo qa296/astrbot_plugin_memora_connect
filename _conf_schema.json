@@ -1,0 +1,81 @@
+{
+  "recall_mode": {
+    "description": "记忆回忆模式",
+    "type": "string",
+    "hint": "选择记忆回忆的工作模式",
+    "options": ["simple", "llm", "embedding"],
+    "default": "simple"
+  },
+  "forget_threshold_days": {
+    "description": "遗忘阈值天数",
+    "type": "int",
+    "hint": "多少天后开始遗忘不活跃的记忆",
+    "default": 30
+  },
+  "consolidation_interval_hours": {
+    "description": "记忆整理间隔小时",
+    "type": "int",
+    "hint": "多久进行一次记忆整理和合并",
+    "default": 24
+  },
+  "max_memories_per_topic": {
+    "description": "每个主题最大记忆数",
+    "type": "int",
+    "hint": "单个主题下最多保留多少条记忆",
+    "default": 10
+  },
+  "memory_formation_probability": {
+    "description": "记忆形成概率",
+    "type": "float",
+    "hint": "每条消息形成记忆的概率(0-1)",
+    "default": 0.3
+  },
+  "recall_trigger_probability": {
+    "description": "回忆触发概率",
+    "type": "float",
+    "hint": "对话中触发回忆的概率(0-1)",
+    "default": 0.6
+  },
+  "enable_forgetting": {
+    "description": "启用遗忘机制",
+    "type": "bool",
+    "hint": "是否启用记忆的遗忘机制",
+    "default": true
+  },
+  "enable_consolidation": {
+    "description": "启用记忆整理",
+    "type": "bool",
+    "hint": "是否启用记忆的整理和合并",
+    "default": true
+  },
+  "bimodal_recall": {
+    "description": "双峰时间回忆",
+    "type": "bool",
+    "hint": "是否启用双峰时间分布的回忆模式",
+    "default": true
+  },
+  "llm_provider": {
+    "description": "LLM服务提供商",
+    "type": "string",
+    "hint": "选择用于记忆形成的LLM服务提供商，将使用AstrBot配置的对应提供商",
+    "default": "openai"
+  },
+  "llm_system_prompt": {
+    "description": "LLM系统提示词",
+    "type": "text",
+    "hint": "用于指导LLM形成记忆的系统提示词",
+    "default": "你是一个记忆总结助手，请将对话内容总结成简洁自然的记忆。"
+  },
+  "embedding_provider": {
+    "description": "嵌入模型服务提供商",
+    "type": "string",
+    "hint": "选择嵌入模型的服务提供商，将使用AstrBot配置的对应提供商",
+    "default": "openai"
+  },
+  "embedding_model": {
+    "description": "嵌入模型名称",
+    "type": "string",
+    "hint": "指定要使用的嵌入模型名称，留空将使用提供商的默认模型",
+    "default": ""
+  }
+}
