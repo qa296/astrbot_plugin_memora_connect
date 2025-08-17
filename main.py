@@ -50,6 +50,39 @@ class MemoraConnectPlugin(Star):
         await self.memory_system.save_memory_state()
         logger.info("记忆系统已保存并关闭")
 
+    # ---------- LLM 函数工具 ----------
+    @filter.llm_tool(name="create_memory")
+    async def create_memory_tool(self, event: AstrMessageEvent, content: str, topic: str) -> MessageEventResult:
+        """主动把一段对话内容记为记忆。
+        Args:
+            content(string): 需要记录的完整对话内容
+            topic(string): 该记忆所属的主题或关键词
+        """
+        try:
+            concept_id = self.memory_system.memory_graph.add_concept(topic)
+            memory_id = self.memory_system.memory_graph.add_memory(content, concept_id)
+            logger.info(f"LLM 工具创建记忆：{topic} -> {content}")
+            yield event.plain_result(f"已记录关于“{topic}”的记忆。")
+        except Exception as e:
+            logger.error(f"LLM 工具创建记忆失败：{e}")
+            yield event.plain_result("记录记忆时出错，请联系管理员。")
+
+    @filter.llm_tool(name="recall_memory")
+    async def recall_memory_tool(self, event: AstrMessageEvent, keyword: str) -> MessageEventResult:
+        """主动查询与关键词相关的记忆。
+        Args:
+            keyword(string): 要查询的关键词
+        """
+        try:
+            memories = await self.memory_system.recall_memories(keyword, event)
+            if memories:
+                yield event.plain_result(f"相关记忆：\n" + "\n".join(memories))
+            else:
+                yield event.plain_result("没有找到相关记忆。")
+        except Exception as e:
+            logger.error(f"LLM 工具回忆记忆失败：{e}")
+            yield event.plain_result("查询记忆时出错，请联系管理员。")
+
 
 class MemorySystem:
     """核心记忆系统，模仿人类海马体功能"""
@@ -75,10 +108,11 @@ class MemorySystem:
         config = config or {}
         self.memory_config = {
             "recall_mode": config.get("recall_mode", "llm"),
+            "enable_associative_recall": config.get("enable_associative_recall", True),
             "forget_threshold_days": config.get("forget_threshold_days", 30),
             "consolidation_interval_hours": config.get("consolidation_interval_hours", 24),
             "max_memories_per_topic": config.get("max_memories_per_topic", 10),
-            "memory_formation_probability": config.get("memory_formation_probability", 0.3),
+            "memory_formation_every_n": config.get("memory_formation_every_n", 5),
             "recall_trigger_probability": config.get("recall_trigger_probability", 0.2),
             "enable_forgetting": config.get("enable_forgetting", True),
             "enable_consolidation": config.get("enable_consolidation", True),
@@ -273,7 +307,14 @@ class MemorySystem:
         if not history:
             return []
             
-        # 简单的关键词提取，实际使用LLM会更准确
+        # 根据配置选择提取方式
+        if self.memory_config["recall_mode"] in ["llm", "embedding"]:
+            return await self._extract_themes_by_llm(history)
+        else:
+            return await self._extract_themes_simple(history)
+    
+    async def _extract_themes_simple(self, history: List[str]) -> List[str]:
+        """简单的关键词提取"""
         text = " ".join(str(item) if not isinstance(item, str) else item for item in history)
         keywords = []
         
@@ -287,6 +328,41 @@ class MemorySystem:
         # 返回频率最高的前5个关键词
         sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
         return [str(word) for word, freq in sorted_words[:5]]
+    
+    async def _extract_themes_by_llm(self, history: List[str]) -> List[str]:
+        """使用LLM从对话历史中提取主题"""
+        try:
+            if not history:
+                return []
+                
+            prompt = f"""请从以下对话中提取3-5个核心主题或关键词。这些主题将用于构建记忆网络。
+
+对话内容：
+{" ".join(history)}
+
+要求：
+1. 提取的主题应该是对话的核心内容
+2. 每个主题2-4个汉字
+3. 返回格式：主题1,主题2,主题3
+4. 不要包含解释，只返回主题列表
+"""
+            
+            provider = await self.get_llm_provider()
+            if provider:
+                response = await provider.text_chat(
+                    prompt=prompt,
+                    contexts=[],
+                    system_prompt="你是一个主题提取助手，请准确提取对话的核心主题。"
+                )
+                
+                themes_text = response.completion_text.strip()
+                # 清理和分割主题
+                themes = [theme.strip() for theme in themes_text.replace("，", ",").split(",") if theme.strip()]
+                return themes[:5]  # 最多返回5个主题
+                
+        except Exception as e:
+            logger.error(f"LLM主题提取失败: {e}")
+            return await self._extract_themes_simple(history)  # 回退到简单模式
     
     async def form_memory(self, theme: str, history: List[str], event: AstrMessageEvent) -> str:
         """形成记忆内容"""
@@ -337,13 +413,22 @@ class MemorySystem:
         """回忆相关记忆"""
         try:
             recall_mode = self.memory_config["recall_mode"]
+            enable_associative = self.memory_config.get("enable_associative_recall", True)
             
             if recall_mode == "simple":
                 return await self._recall_simple(keyword)
             elif recall_mode == "llm":
-                return await self._recall_llm(keyword, event)
+                core_memories = await self._recall_llm(keyword, event)
+                if enable_associative and core_memories:
+                    associative_memories = await self._get_associative_memories(core_memories)
+                    return self._merge_memories_with_associative(core_memories, associative_memories)
+                return core_memories
             elif recall_mode == "embedding":
-                return await self._recall_embedding(keyword)
+                core_memories = await self._recall_embedding(keyword)
+                if enable_associative and core_memories:
+                    associative_memories = await self._get_associative_memories(core_memories)
+                    return self._merge_memories_with_associative(core_memories, associative_memories)
+                return core_memories
             else:
                 logger.warning(f"未知的回忆模式: {recall_mode}，使用simple模式")
                 return await self._recall_simple(keyword)
@@ -392,37 +477,49 @@ class MemorySystem:
                 return random.sample(all_memories, min(3, len(all_memories)))
             
             # 使用LLM进行智能回忆
-            prompt = f"""请从以下记忆中找出与"{keyword}"最相关的3-5条记忆，按相关性排序：
+            prompt = f"""请从以下记忆列表中，找出与用户提问“{keyword}”最相关的3-5条记忆。
 
 记忆列表：
-{chr(10).join(f"{i+1}. {mem}" for i, mem in enumerate(all_memories))}
+{chr(10).join(f"- {mem}" for mem in all_memories)}
 
-要求：
-1. 只返回最相关的记忆内容
-2. 保持原记忆的完整性
-3. 最多返回5条
-4. 直接返回记忆内容，不要添加编号或其他标记"""
+严格按照以下JSON格式返回结果，不要有任何多余的解释：
+{{
+  "recalled_memories": [
+    "记忆1",
+    "记忆2",
+    ...
+  ]
+}}
+
+如果找不到任何相关记忆，或记忆列表为空，请返回一个空列表：
+{{
+  "recalled_memories": []
+}}
+"""
 
             provider = await self.get_llm_provider()
             if provider:
                 response = await provider.text_chat(
                     prompt=prompt,
                     contexts=[],
-                    system_prompt="你是一个记忆检索助手，请准确找出相关记忆。"
+                    system_prompt="你是一个记忆检索助手，你的任务是严格按照JSON格式返回检索到的记忆。"
                 )
                 
-                # 解析LLM返回的记忆
-                recalled_memories = []
-                lines = response.completion_text.strip().split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if line and not line.startswith(('1.', '2.', '3.', '4.', '5.')):
-                        recalled_memories.append(line)
-                    elif line and line.startswith(('1.', '2.', '3.', '4.', '5.')):
-                        # 移除编号
-                        recalled_memories.append(line[2:].strip())
-                
-                return recalled_memories[:5]
+                try:
+                    # 提取并解析JSON
+                    completion_text = response.completion_text.strip()
+                    json_match = re.search(r'\{.*\}', completion_text, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(0)
+                        data = json.loads(json_str)
+                        recalled = data.get("recalled_memories", [])
+                        # 确保返回的是列表
+                        if isinstance(recalled, list):
+                            return recalled[:5]
+                    return [] # 如果没有找到JSON或解析失败
+                except json.JSONDecodeError:
+                    logger.error("LLM返回的不是有效的JSON格式")
+                    return [] # JSON解析失败
             
             # LLM不可用，回退到简单模式
             return await self._recall_simple(keyword)
@@ -482,6 +579,226 @@ class MemorySystem:
             return dot_product / (magnitude1 * magnitude2)
         except Exception:
             return 0.0
+    
+    async def _get_associative_memories(self, core_memories: List[str]) -> List[str]:
+        """基于核心记忆获取联想记忆"""
+        try:
+            if not core_memories or not self.memory_graph.memories:
+                return []
+            
+            # 找到核心记忆对应的概念节点
+            core_concepts = set()
+            for memory_content in core_memories:
+                for memory in self.memory_graph.memories.values():
+                    if memory.content == memory_content:
+                        core_concepts.add(memory.concept_id)
+                        break
+            
+            if not core_concepts:
+                return []
+            
+            # 收集与核心概念直接相连的相邻概念
+            adjacent_concepts = set()
+            for concept_id in core_concepts:
+                neighbors = self.memory_graph.get_neighbors(concept_id)
+                for neighbor_id, strength in neighbors:
+                    if neighbor_id not in core_concepts and strength > 0.3:
+                        adjacent_concepts.add(neighbor_id)
+            
+            # 收集相邻概念下的记忆
+            associative_memories = []
+            for concept_id in adjacent_concepts:
+                concept_memories = [
+                    m for m in self.memory_graph.memories.values()
+                    if m.concept_id == concept_id
+                ]
+                
+                # 按记忆强度和时间排序
+                concept_memories.sort(
+                    key=lambda m: (m.strength, m.last_accessed),
+                    reverse=True
+                )
+                
+                # 每个相邻概念最多添加1条记忆
+                if concept_memories:
+                    associative_memories.append(concept_memories[0].content)
+            
+            return associative_memories
+            
+        except Exception as e:
+            logger.error(f"获取联想记忆失败: {e}")
+            return []
+    
+    def _merge_memories_with_associative(self, core_memories: List[str], associative_memories: List[str]) -> List[str]:
+        """合并核心记忆和联想记忆"""
+        try:
+            # 去重并合并
+            all_memories = []
+            seen = set()
+            
+            # 核心记忆在前
+            for memory in core_memories:
+                if memory not in seen:
+                    seen.add(memory)
+                    all_memories.append(memory)
+            
+            # 联想记忆在后
+            for memory in associative_memories:
+                if memory not in seen:
+                    seen.add(memory)
+                    all_memories.append(memory)
+            
+            # 限制总数量
+            return all_memories[:5]
+            
+        except Exception as e:
+            logger.error(f"合并记忆失败: {e}")
+            return core_memories
+    
+    async def _recall_by_activation(self, keyword: str) -> List[str]:
+        """基于激活扩散的回忆算法"""
+        try:
+            if not self.memory_graph.concepts or not self.memory_graph.memories:
+                return []
+            
+            # 如果没有关键词，随机回忆
+            if not keyword:
+                memories = list(self.memory_graph.memories.values())
+                if memories:
+                    selected = random.sample(memories, min(3, len(memories)))
+                    return [m.content for m in selected]
+                return []
+            
+            # 找到初始激活的概念节点
+            initial_concepts = []
+            for concept in self.memory_graph.concepts.values():
+                if keyword.lower() in concept.name.lower():
+                    initial_concepts.append(concept)
+            
+            if not initial_concepts:
+                # 如果没有直接匹配，使用简单关键词匹配
+                return await self._recall_simple(keyword)
+            
+            # 激活扩散算法
+            activation_map = {}  # concept_id -> activation_energy
+            visited = set()
+            
+            # 初始化激活
+            for concept in initial_concepts:
+                activation_map[concept.id] = 1.0  # 初始能量为1.0
+            
+            # 扩散参数
+            decay_factor = 0.7  # 能量衰减因子
+            min_threshold = 0.1  # 最小激活阈值
+            max_hops = 3  # 最大扩散步数
+            
+            # 进行扩散
+            for hop in range(max_hops):
+                new_activations = {}
+                
+                for concept_id, energy in activation_map.items():
+                    if concept_id in visited:
+                        continue
+                    
+                    # 获取该节点的所有连接
+                    related_connections = [
+                        conn for conn in self.memory_graph.connections
+                        if conn.from_concept == concept_id or conn.to_concept == concept_id
+                    ]
+                    
+                    for conn in related_connections:
+                        # 确定相邻节点
+                        neighbor_id = conn.to_concept if conn.from_concept == concept_id else conn.from_concept
+                        
+                        if neighbor_id in self.memory_graph.concepts:
+                            # 计算传递的能量
+                            transferred_energy = energy * conn.strength * decay_factor
+                            
+                            if transferred_energy > min_threshold:
+                                if neighbor_id not in new_activations:
+                                    new_activations[neighbor_id] = 0
+                                new_activations[neighbor_id] += transferred_energy
+                    
+                    visited.add(concept_id)
+                
+                # 合并新的激活
+                for concept_id, energy in new_activations.items():
+                    if concept_id not in activation_map:
+                        activation_map[concept_id] = 0
+                    activation_map[concept_id] += energy
+            
+            # 收集被激活的概念下的记忆
+            activated_memories = []
+            adjacent_memories = []
+            
+            # 获取高激活的核心概念
+            core_concepts = [
+                concept_id for concept_id, energy in activation_map.items()
+                if energy > min_threshold
+            ]
+            
+            # 收集核心概念下的记忆
+            for concept_id in core_concepts:
+                concept_memories = [
+                    m for m in self.memory_graph.memories.values()
+                    if m.concept_id == concept_id
+                ]
+                
+                # 按记忆强度和时间排序
+                concept_memories.sort(
+                    key=lambda m: (m.strength, m.last_accessed),
+                    reverse=True
+                )
+                
+                # 添加核心记忆
+                for memory in concept_memories[:2]:  # 每个概念最多2条记忆
+                    activated_memories.append(memory.content)
+            
+            # 收集相邻概念的记忆（与核心概念直接相连的概念）
+            adjacent_concepts = set()
+            for concept_id in core_concepts:
+                for conn in self.memory_graph.connections:
+                    if conn.from_concept == concept_id:
+                        adjacent_concepts.add(conn.to_concept)
+                    elif conn.to_concept == concept_id:
+                        adjacent_concepts.add(conn.from_concept)
+            
+            # 收集相邻概念下的记忆
+            for adjacent_concept_id in adjacent_concepts:
+                if adjacent_concept_id in self.memory_graph.concepts:
+                    adjacent_concept_memories = [
+                        m for m in self.memory_graph.memories.values()
+                        if m.concept_id == adjacent_concept_id
+                    ]
+                    
+                    # 按记忆强度和时间排序
+                    adjacent_concept_memories.sort(
+                        key=lambda m: (m.strength, m.last_accessed),
+                        reverse=True
+                    )
+                    
+                    # 添加相邻记忆
+                    for memory in adjacent_concept_memories[:1]:  # 每个相邻概念最多1条记忆
+                        adjacent_memories.append(memory.content)
+            
+            # 合并结果：核心记忆在前，相邻记忆在后
+            final_memories = activated_memories + adjacent_memories
+            
+            # 去重并限制数量
+            seen = set()
+            unique_memories = []
+            for memory in final_memories:
+                if memory not in seen:
+                    seen.add(memory)
+                    unique_memories.append(memory)
+                    if len(unique_memories) >= 5:  # 最多返回5条
+                        break
+            
+            return unique_memories
+            
+        except Exception as e:
+            logger.error(f"激活扩散回忆失败: {e}")
+            return await self._recall_simple(keyword)
     
     async def memory_maintenance_loop(self):
         """记忆维护循环"""
@@ -589,7 +906,7 @@ class MemorySystem:
         if consolidation_count > 0:
             logger.info(f"记忆整理：合并了{consolidation_count}条相似记忆")
     
-    async def _merge_memories(self, memories: List[Memory]) -> str:
+    async def _merge_memories(self, memories: List['Memory']) -> str:
         """智能合并多条相似记忆"""
         if len(memories) == 1:
             return memories[0].content
@@ -767,6 +1084,7 @@ class MemoryGraph:
         self.concepts: Dict[str, Concept] = {}
         self.memories: Dict[str, Memory] = {}
         self.connections: List[Connection] = []
+        self.adjacency_list: Dict[str, List[Tuple[str, float]]] = {}  # 邻接表优化
         
     def add_concept(self, name: str, concept_id: str = None, created_at: float = None,
                    last_accessed: float = None, access_count: int = 0) -> str:
@@ -783,6 +1101,8 @@ class MemoryGraph:
                 access_count=access_count
             )
             self.concepts[concept_id] = concept
+            if concept_id not in self.adjacency_list:
+                self.adjacency_list[concept_id] = []
         
         return concept_id
     
@@ -828,16 +1148,53 @@ class MemoryGraph:
             last_strengthened=last_strengthened or time.time()
         )
         self.connections.append(connection)
+        
+        # 更新邻接表
+        if from_concept not in self.adjacency_list:
+            self.adjacency_list[from_concept] = []
+        if to_concept not in self.adjacency_list:
+            self.adjacency_list[to_concept] = []
+        
+        # 添加双向连接
+        self.adjacency_list[from_concept].append((to_concept, strength))
+        self.adjacency_list[to_concept].append((from_concept, strength))
+        
         return connection_id
     
     def remove_connection(self, connection_id: str):
         """移除连接"""
-        self.connections = [c for c in self.connections if c.id != connection_id]
+        # 找到要移除的连接
+        conn_to_remove = None
+        for conn in self.connections:
+            if conn.id == connection_id:
+                conn_to_remove = conn
+                break
+        
+        if conn_to_remove:
+            # 从连接列表中移除
+            self.connections = [c for c in self.connections if c.id != connection_id]
+            
+            # 更新邻接表
+            if conn_to_remove.from_concept in self.adjacency_list:
+                self.adjacency_list[conn_to_remove.from_concept] = [
+                    (neighbor, strength) for neighbor, strength in self.adjacency_list[conn_to_remove.from_concept]
+                    if neighbor != conn_to_remove.to_concept
+                ]
+            
+            if conn_to_remove.to_concept in self.adjacency_list:
+                self.adjacency_list[conn_to_remove.to_concept] = [
+                    (neighbor, strength) for neighbor, strength in self.adjacency_list[conn_to_remove.to_concept]
+                    if neighbor != conn_to_remove.from_concept
+                ]
     
     def remove_memory(self, memory_id: str):
         """移除记忆"""
         if memory_id in self.memories:
             del self.memories[memory_id]
+    
+    def get_neighbors(self, concept_id: str) -> List[Tuple[str, float]]:
+        """获取概念节点的邻居及其连接强度"""
+        return self.adjacency_list.get(concept_id, [])
 
 
 @dataclass

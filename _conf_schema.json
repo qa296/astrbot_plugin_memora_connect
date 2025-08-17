@@ -6,6 +6,12 @@
     "options": ["simple", "llm", "embedding"],
     "default": "simple"
   },
+  "enable_associative_recall": {
+    "description": "启用联想回忆",
+    "type": "bool",
+    "hint": "是否在llm和embedding模式下启用基于知识图谱的联想回忆功能，会智能补充相关记忆",
+    "default": true
+  },
   "forget_threshold_days": {
     "description": "遗忘阈值天数",
     "type": "int",
