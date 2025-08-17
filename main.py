@@ -56,8 +56,9 @@ class MemorySystem:
         
         # 使用AstrBot标准数据目录
         import os
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        data_dir = os.path.join(base_dir, "..", "..", "data", "plugins_data", "memora_connect")
+        # 获取AstrBot根目录（插件所在目录的上一级）
+        astrbot_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        data_dir = os.path.join(astrbot_root, "data", "plugins_data", "memora_connect")
         os.makedirs(data_dir, exist_ok=True)
         self.db_path = os.path.abspath(os.path.join(data_dir, "memory.db"))
         
