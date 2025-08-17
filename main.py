@@ -96,6 +96,7 @@ class MemorySystem:
         
     def load_memory_state(self):
         """从数据库加载记忆状态"""
+        import sqlite3
         try:
             logger.info(f"正在加载记忆数据库: {self.db_path}")
             conn = sqlite3.connect(self.db_path)
@@ -181,6 +182,7 @@ class MemorySystem:
             
     def save_memory_state(self):
         """保存记忆状态到数据库"""
+        import sqlite3
         try:
             logger.info(f"正在保存记忆到数据库: {self.db_path}")
             conn = sqlite3.connect(self.db_path)
@@ -667,9 +669,9 @@ class MemorySystem:
         """根据关键词查找提供商"""
         providers = self.context.get_all_providers()
         for provider in providers:
-            provider_id = str(getattr(provider, 'id', str(provider))).lower()
+            provider_name = str(getattr(provider, 'name', str(provider))).lower()
             for keyword in keywords:
-                if keyword in provider_id:
+                if keyword in provider_name:
                     if capability_check is None or capability_check(provider):
                         return provider
         return None
