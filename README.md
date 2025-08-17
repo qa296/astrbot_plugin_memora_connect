@@ -187,22 +187,4 @@ A: 降低max_memories_per_topic和forget_threshold_days的值
 ### Q: 如何切换LLM提供商？
 A: 在WebUI中修改llm_provider配置，支持openai、azure、zhipu等
 
-## 📈 未来计划
-
-- [ ] 支持图片和文件记忆
-- [ ] 多用户记忆隔离
-- [ ] 记忆可视化界面
-- [ ] 情感记忆标记
-- [ ] 时间线回忆模式
-
-## 🤝 贡献
-
-欢迎提交Issue和PR！请遵循以下规范：
-1. 代码风格符合PEP8
-2. 添加适当的注释
-3. 更新相关文档
-4. 包含测试用例
-
-## 📄 许可证
-
 MIT License - 详见LICENSE文件
