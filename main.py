@@ -58,7 +58,13 @@ class MemorySystem:
     
     def __init__(self, context: Context, config=None):
         self.context = context
-        self.db_path = "data/plugins/memora_connect/memory.db"
+        
+        # 确保数据目录存在
+        import os
+        data_dir = "data/plugins/memora_connect"
+        os.makedirs(data_dir, exist_ok=True)
+        self.db_path = os.path.join(data_dir, "memory.db")
+        
         self.memory_graph = MemoryGraph()
         self.llm_provider = None
         self.embedding_provider = None
