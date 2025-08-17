@@ -1,55 +1,75 @@
 {
-  "model_type": {
-    "description": "选择用于处理记忆的模型",
+  "recall_mode": {
+    "description": "记忆回忆模式",
     "type": "string",
-    "default": "simple",
-    "options": [
-      "simple",
-      "llm",
-      "embedding"
-    ],
-    "hint": "simple: 基础模型，无需额外配置。\nllm: 使用大型语言模型，效果更好。\nembedding: 使用 Embedding 模型进行高精度相似度判断，效果最佳。"
+    "hint": "选择记忆回忆的工作模式",
+    "options": ["simple", "llm", "embedding"],
+    "default": "simple"
   },
-  "auto_memory_min_length": {
-    "description": "自动形成记忆的最小消息长度",
+  "forget_threshold_days": {
+    "description": "遗忘阈值天数",
     "type": "int",
-    "default": 10,
-    "hint": "当收到的消息长度（字符数）超过此值时，插件会自动学习并形成记忆。"
+    "hint": "多少天后开始遗忘不活跃的记忆",
+    "default": 30
   },
-  "recall_max_results": {
-    "description": "回忆时返回的最大记忆条数",
+  "consolidation_interval_hours": {
+    "description": "记忆整理间隔小时",
     "type": "int",
-    "default": 3,
-    "hint": "当使用 /recall 指令时，返回的最相关记忆的数量。"
+    "hint": "多久进行一次记忆整理和合并",
+    "default": 24
   },
-  "forgetting_threshold_days": {
-    "description": "记忆遗忘阈值（天）",
+  "max_memories_per_topic": {
+    "description": "每个主题最大记忆数",
     "type": "int",
-    "default": 30,
-    "hint": "一条记忆如果超过这个天数没有被回顾或关联，将会被遗忘。"
+    "hint": "单个主题下最多保留多少条记忆",
+    "default": 10
   },
-  "consolidation_similarity_threshold": {
-    "description": "合并记忆的相似度阈值",
+  "memory_formation_probability": {
+    "description": "记忆形成概率",
     "type": "float",
-    "default": 0.7,
-    "hint": "用于 simple 模型。当两条记忆的相似度高于此值时，它们将被合并。取值范围 0.0 - 1.0。"
+    "hint": "每条消息形成记忆的概率(0-1)",
+    "default": 0.3
   },
-  "embedding_similarity_threshold": {
-    "description": "Embedding 模型合并记忆的相似度阈值",
+  "recall_trigger_probability": {
+    "description": "回忆触发概率",
     "type": "float",
-    "default": 0.8,
-    "hint": "用于 embedding 模型。当两条记忆的向量余弦相似度高于此值时，它们将被合并。取值范围 0.0 - 1.0。"
+    "hint": "对话中触发回忆的概率(0-1)",
+    "default": 0.2
   },
-  "forgetting_interval_hours": {
-    "description": "执行遗忘检查的周期（小时）",
-    "type": "int",
-    "default": 6,
-    "hint": "插件每隔多少小时检查一次是否有需要遗忘的记忆。"
+  "enable_forgetting": {
+    "description": "启用遗忘机制",
+    "type": "bool",
+    "hint": "是否启用记忆的遗忘机制",
+    "default": true
   },
-  "consolidation_interval_days": {
-    "description": "执行巩固检查的周期（天）",
-    "type": "int",
-    "default": 1,
-    "hint": "插件每隔多少天检查一次是否有可以合并的相似记忆。"
+  "enable_consolidation": {
+    "description": "启用记忆整理",
+    "type": "bool",
+    "hint": "是否启用记忆的整理和合并",
+    "default": true
+  },
+  "bimodal_recall": {
+    "description": "双峰时间回忆",
+    "type": "bool",
+    "hint": "是否启用双峰时间分布的回忆模式",
+    "default": true
+  },
+  "llm_system_prompt": {
+    "description": "LLM系统提示词",
+    "type": "text",
+    "hint": "用于指导LLM形成记忆的系统提示词",
+    "default": "你是一个记忆总结助手，请将对话内容总结成简洁自然的记忆。"
+  },
+  "embedding_provider": {
+    "description": "嵌入模型服务提供商",
+    "type": "string",
+    "hint": "选择嵌入模型的服务提供商，将使用AstrBot配置的对应提供商",
+    "default": "openai"
+  },
+  "embedding_model": {
+    "description": "嵌入模型名称",
+    "type": "string",
+    "hint": "指定要使用的嵌入模型名称，留空将使用提供商的默认模型",
+    "default": ""
   }
 }
