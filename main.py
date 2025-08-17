@@ -54,16 +54,17 @@ class MemorySystem:
     def __init__(self, context: Context, config=None):
         self.context = context
         
-        # 使用绝对路径确保数据库文件可访问
+        # 使用AstrBot标准数据目录
         import os
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        data_dir = os.path.join(base_dir, "..", "..", "data", "plugins", "memora_connect")
+        data_dir = os.path.join(base_dir, "..", "..", "data", "plugins_data", "memora_connect")
         os.makedirs(data_dir, exist_ok=True)
         self.db_path = os.path.abspath(os.path.join(data_dir, "memory.db"))
         
         # 确保目录权限
         try:
             os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+            logger.info(f"记忆数据库路径: {self.db_path}")
         except Exception as e:
             logger.error(f"创建数据目录失败: {e}")
             # 使用当前目录作为备选
