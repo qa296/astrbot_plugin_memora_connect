@@ -11,13 +11,15 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api import AstrBotConfig
+from astrbot.api.star import StarTools
 import astrbot.api.message_components as Comp
 
 @register("astrbot_plugin_memora_connect", "qa296", "一个模仿人类记忆方式的记忆插件", "v0.1.0", "https://github.com/qa296/astrbot_plugin_memora_connect")
 class MemoraConnectPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
-        self.memory_system = MemorySystem(context, config)
+        data_dir = StarTools.get_data_dir() / "memora_connect"
+        self.memory_system = MemorySystem(context, config, data_dir)
         asyncio.create_task(self.memory_system.initialize())
         
     @filter.command("记忆")
@@ -51,63 +53,40 @@ class MemoraConnectPlugin(Star):
 class MemorySystem:
     """核心记忆系统，模仿人类海马体功能"""
     
-    def __init__(self, context: Context, config=None):
+    def __init__(self, context: Context, config=None, data_dir=None):
         self.context = context
         
         # 使用AstrBot标准数据目录
-        import os
-        # 获取AstrBot根目录（插件所在目录的上一级）
-        astrbot_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        data_dir = os.path.join(astrbot_root, "data", "plugins_data", "memora_connect")
-        os.makedirs(data_dir, exist_ok=True)
-        self.db_path = os.path.abspath(os.path.join(data_dir, "memory.db"))
+        if data_dir:
+            self.db_path = str(data_dir / "memory.db")
+        else:
+            data_dir = StarTools.get_data_dir() / "memora_connect"
+            self.db_path = str(data_dir / "memory.db")
         
-        # 确保目录权限
-        try:
-            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-            logger.info(f"记忆数据库路径: {self.db_path}")
-        except Exception as e:
-            logger.error(f"创建数据目录失败: {e}")
-            # 使用当前目录作为备选
-            self.db_path = os.path.join(os.getcwd(), "memora_connect.db")
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        logger.info(f"记忆数据库路径: {self.db_path}")
         
         self.memory_graph = MemoryGraph()
         self.llm_provider = None
         self.embedding_provider = None
         
-        # 加载配置
-        if config:
-            self.memory_config = {
-                "recall_mode": config.get("recall_mode", "llm"),
-                "forget_threshold_days": config.get("forget_threshold_days", 30),
-                "consolidation_interval_hours": config.get("consolidation_interval_hours", 24),
-                "max_memories_per_topic": config.get("max_memories_per_topic", 10),
-                "memory_formation_probability": config.get("memory_formation_probability", 0.3),
-                "recall_trigger_probability": config.get("recall_trigger_probability", 0.2),
-                "enable_forgetting": config.get("enable_forgetting", True),
-                "enable_consolidation": config.get("enable_consolidation", True),
-                "bimodal_recall": config.get("bimodal_recall", True),
-                "llm_provider": config.get("llm_provider", "openai"),
-                "llm_system_prompt": config.get("llm_system_prompt", "你是一个记忆总结助手，请将对话内容总结成简洁自然的记忆。"),
-                "embedding_provider": config.get("embedding_provider", "openai"),
-                "embedding_model": config.get("embedding_model", "")
-            }
-        else:
-            self.memory_config = {
-                "recall_mode": "llm",
-                "forget_threshold_days": 30,
-                "consolidation_interval_hours": 24,
-                "max_memories_per_topic": 10,
-                "memory_formation_probability": 0.3,
-                "recall_trigger_probability": 0.2,
-                "enable_forgetting": True,
-                "enable_consolidation": True,
-                "bimodal_recall": True,
-                "llm_provider": "openai",
-                "llm_system_prompt": "你是一个记忆总结助手，请将对话内容总结成简洁自然的记忆。",
-                "embedding_provider": "openai",
-                "embedding_model": ""
-            }
+        # 简化配置初始化
+        config = config or {}
+        self.memory_config = {
+            "recall_mode": config.get("recall_mode", "llm"),
+            "forget_threshold_days": config.get("forget_threshold_days", 30),
+            "consolidation_interval_hours": config.get("consolidation_interval_hours", 24),
+            "max_memories_per_topic": config.get("max_memories_per_topic", 10),
+            "memory_formation_probability": config.get("memory_formation_probability", 0.3),
+            "recall_trigger_probability": config.get("recall_trigger_probability", 0.2),
+            "enable_forgetting": config.get("enable_forgetting", True),
+            "enable_consolidation": config.get("enable_consolidation", True),
+            "bimodal_recall": config.get("bimodal_recall", True),
+            "llm_provider": config.get("llm_provider", "openai"),
+            "llm_system_prompt": config.get("llm_system_prompt", "你是一个记忆总结助手，请将对话内容总结成简洁自然的记忆。"),
+            "embedding_provider": config.get("embedding_provider", "openai"),
+            "embedding_model": config.get("embedding_model", "")
+        }
         
     async def initialize(self):
         """初始化记忆系统"""
@@ -161,17 +140,37 @@ class MemorySystem:
             cursor.execute("SELECT * FROM concepts")
             concepts = cursor.fetchall()
             for concept in concepts:
-                self.memory_graph.add_concept(concept[1], concept[0])
+                self.memory_graph.add_concept(
+                    name=concept[1],
+                    concept_id=concept[0],
+                    created_at=concept[2],
+                    last_accessed=concept[3],
+                    access_count=concept[4]
+                )
                 
             cursor.execute("SELECT * FROM memories")
             memories = cursor.fetchall()
             for memory in memories:
-                self.memory_graph.add_memory(memory[2], memory[1], memory[0])
+                self.memory_graph.add_memory(
+                    content=memory[2],
+                    concept_id=memory[1],
+                    memory_id=memory[0],
+                    created_at=memory[3],
+                    last_accessed=memory[4],
+                    access_count=memory[5],
+                    strength=memory[6]
+                )
                 
             cursor.execute("SELECT * FROM connections")
             connections = cursor.fetchall()
             for conn in connections:
-                self.memory_graph.add_connection(conn[1], conn[2], conn[3])
+                self.memory_graph.add_connection(
+                    from_concept=conn[1],
+                    to_concept=conn[2],
+                    strength=conn[3],
+                    connection_id=conn[0],
+                    last_strengthened=conn[4]
+                )
                 
             conn.close()
             logger.info(f"记忆系统已加载，包含 {len(concepts)} 个概念，{len(memories)} 条记忆")
@@ -416,8 +415,16 @@ class MemorySystem:
     def are_memories_similar(self, mem1, mem2) -> bool:
         """判断两条记忆是否相似"""
         # 简单的相似度判断
-        common_words = set(mem1.content.split()) & set(mem2.content.split())
-        similarity = len(common_words) / max(len(mem1.content.split()), len(mem2.content.split()))
+        words1 = mem1.content.split()
+        words2 = mem2.content.split()
+        
+        # 防止除零错误
+        denominator = max(len(words1), len(words2))
+        if denominator == 0:
+            return False
+        
+        common_words = set(words1) & set(words2)
+        similarity = len(common_words) / denominator
         return similarity > 0.5
     
     async def get_memory_stats(self) -> str:
@@ -430,35 +437,42 @@ class MemorySystem:
         嵌入提供商: {self.memory_config['embedding_provider']}
         """
 
+    def _find_provider_by_keywords(self, keywords: list, capability_check=None):
+        """根据关键词查找提供商"""
+        providers = self.context.get_all_providers()
+        for provider in providers:
+            provider_id = provider.id.lower()
+            for keyword in keywords:
+                if keyword in provider_id:
+                    if capability_check is None or capability_check(provider):
+                        return provider
+        return None
+
     async def get_llm_provider(self):
         """获取LLM服务提供商"""
         try:
-            provider_name = self.memory_config['llm_provider']
-            if provider_name == "openai":
-                # 使用AstrBot配置的OpenAI提供商
-                providers = self.context.get_all_providers()
-                for provider in providers:
-                    if "openai" in provider.id.lower() and hasattr(provider, 'text_chat'):
-                        return provider
-            elif provider_name == "azure":
-                # 使用Azure OpenAI
-                providers = self.context.get_all_providers()
-                for provider in providers:
-                    if "azure" in provider.id.lower() and hasattr(provider, 'text_chat'):
-                        return provider
-            elif provider_name == "zhipu":
-                # 使用智谱AI
-                providers = self.context.get_all_providers()
-                for provider in providers:
-                    if "zhipu" in provider.id.lower() and hasattr(provider, 'text_chat'):
-                        return provider
-            else:
-                # 通过ID获取指定提供商
-                provider = self.context.get_provider_by_id(provider_name)
-                if provider and hasattr(provider, 'text_chat'):
-                    return provider
-                    
-            # 如果没有找到指定提供商，使用当前正在使用的提供商
+            provider_name = self.memory_config['llm_provider'].lower()
+            keywords_map = {
+                "openai": ["openai"],
+                "azure": ["azure"],
+                "zhipu": ["zhipu", "glm"],
+                "moonshot": ["moonshot", "kimi"],
+                "anthropic": ["anthropic", "claude"],
+                "google": ["google", "gemini"]
+            }
+            
+            keywords = keywords_map.get(provider_name, [provider_name])
+            provider = self._find_provider_by_keywords(keywords, lambda p: hasattr(p, 'text_chat'))
+            
+            if provider:
+                return provider
+            
+            # 通过ID获取指定提供商
+            provider = self.context.get_provider_by_id(provider_name)
+            if provider and hasattr(provider, 'text_chat'):
+                return provider
+                
+            # 回退到当前使用的提供商
             return self.context.get_using_provider()
         except Exception as e:
             logger.error(f"获取LLM提供商失败: {e}")
@@ -467,28 +481,16 @@ class MemorySystem:
     async def get_embedding_provider(self):
         """获取嵌入模型提供商"""
         try:
-            provider_name = self.memory_config['embedding_provider']
-            if provider_name == "openai":
-                # 使用AstrBot配置的OpenAI提供商
-                providers = self.context.get_all_providers()
-                for provider in providers:
-                    if "openai" in provider.id.lower():
-                        return provider
-            elif provider_name == "azure":
-                # 使用Azure OpenAI
-                providers = self.context.get_all_providers()
-                for provider in providers:
-                    if "azure" in provider.id.lower():
-                        return provider
-            elif provider_name == "zhipu":
-                # 使用智谱AI
-                providers = self.context.get_all_providers()
-                for provider in providers:
-                    if "zhipu" in provider.id.lower():
-                        return provider
-            else:
-                # 通过ID获取指定提供商
-                return self.context.get_provider_by_id(provider_name)
+            provider_name = self.memory_config['embedding_provider'].lower()
+            keywords_map = {
+                "openai": ["openai"],
+                "azure": ["azure"],
+                "zhipu": ["zhipu", "glm"],
+                "google": ["google", "gemini"]
+            }
+            
+            keywords = keywords_map.get(provider_name, [provider_name])
+            return self._find_provider_by_keywords(keywords)
         except Exception as e:
             logger.error(f"获取嵌入提供商失败: {e}")
             return None
@@ -520,27 +522,49 @@ class MemoryGraph:
         self.memories: Dict[str, Memory] = {}
         self.connections: List[Connection] = []
         
-    def add_concept(self, name: str, concept_id: str = None) -> str:
+    def add_concept(self, name: str, concept_id: str = None, created_at: float = None,
+                   last_accessed: float = None, access_count: int = 0) -> str:
         """添加概念节点"""
         if concept_id is None:
             concept_id = f"concept_{int(time.time() * 1000)}"
         
         if concept_id not in self.concepts:
-            self.concepts[concept_id] = Concept(concept_id, name)
+            concept = Concept(
+                id=concept_id,
+                name=name,
+                created_at=created_at,
+                last_accessed=last_accessed,
+                access_count=access_count
+            )
+            self.concepts[concept_id] = concept
         
         return concept_id
     
-    def add_memory(self, content: str, concept_id: str, memory_id: str = None) -> str:
+    def add_memory(self, content: str, concept_id: str, memory_id: str = None,
+                   created_at: float = None, last_accessed: float = None,
+                   access_count: int = 0, strength: float = 1.0) -> str:
         """添加记忆"""
         if memory_id is None:
             memory_id = f"memory_{int(time.time() * 1000)}"
         
-        self.memories[memory_id] = Memory(memory_id, concept_id, content)
+        memory = Memory(
+            id=memory_id,
+            concept_id=concept_id,
+            content=content,
+            created_at=created_at,
+            last_accessed=last_accessed,
+            access_count=access_count,
+            strength=strength
+        )
+        self.memories[memory_id] = memory
         return memory_id
     
-    def add_connection(self, from_concept: str, to_concept: str, strength: float = 1.0) -> str:
+    def add_connection(self, from_concept: str, to_concept: str,
+                      strength: float = 1.0, connection_id: str = None,
+                      last_strengthened: float = None) -> str:
         """添加连接"""
-        connection_id = f"conn_{from_concept}_{to_concept}"
+        if connection_id is None:
+            connection_id = f"conn_{from_concept}_{to_concept}"
         
         # 检查是否已存在
         for conn in self.connections:
@@ -550,7 +574,13 @@ class MemoryGraph:
                 conn.last_strengthened = time.time()
                 return conn.id
         
-        connection = Connection(connection_id, from_concept, to_concept, strength)
+        connection = Connection(
+            id=connection_id,
+            from_concept=from_concept,
+            to_concept=to_concept,
+            strength=strength,
+            last_strengthened=last_strengthened or time.time()
+        )
         self.connections.append(connection)
         return connection_id
     

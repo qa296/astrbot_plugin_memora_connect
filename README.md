@@ -161,17 +161,6 @@
 - 遗忘和整理操作
 - 使用的LLM提供商信息
 
-### 手动操作
-```
-# 查看所有记忆
-/记忆 状态
-
-# 回忆特定主题
-/记忆 回忆 工作
-
-# 触发记忆整理
-/记忆 整理
-```
 
 ## 🐛 常见问题
 
@@ -186,5 +175,3 @@ A: 降低max_memories_per_topic和forget_threshold_days的值
 
 ### Q: 如何切换LLM提供商？
 A: 在WebUI中修改llm_provider配置，支持openai、azure、zhipu等
-
-MIT License - 详见LICENSE文件
