@@ -576,10 +576,15 @@ class MemorySystem:
                             newest_memory.last_accessed = time.time()
                             consolidation_count += len(similar_group) - 1
                             
-                            # 移除其他相似记忆
+                            # 收集需要移除的记忆ID
+                            memories_to_remove_in_group = []
                             for mem in similar_group:
                                 if mem.id != newest_memory.id:
-                                    self.memory_graph.remove_memory(mem.id)
+                                    memories_to_remove_in_group.append(mem.id)
+                            
+                            # 统一移除
+                            for mem_id in memories_to_remove_in_group:
+                                self.memory_graph.remove_memory(mem_id)
         
         if consolidation_count > 0:
             logger.info(f"记忆整理：合并了{consolidation_count}条相似记忆")
@@ -666,14 +671,24 @@ class MemorySystem:
 """
 
     def _find_provider_by_keywords(self, keywords: list, capability_check=None):
-        """根据关键词查找提供商"""
+        """根据关键词查找提供商，优先完全匹配"""
         providers = self.context.get_all_providers()
+        
+        # 优先完全匹配
         for provider in providers:
-            provider_name = str(getattr(provider, 'name', str(provider))).lower()
+            provider_name = str(getattr(provider, 'name', '')).lower()
+            if provider_name in keywords:
+                if capability_check is None or capability_check(provider):
+                    return provider
+
+        # 然后再进行模糊匹配
+        for provider in providers:
+            provider_name = str(getattr(provider, 'name', '')).lower()
             for keyword in keywords:
                 if keyword in provider_name:
                     if capability_check is None or capability_check(provider):
                         return provider
+        
         return None
 
     async def get_llm_provider(self):
