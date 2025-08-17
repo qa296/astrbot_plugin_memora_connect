@@ -2,7 +2,7 @@
   "recall_mode": {
     "description": "记忆回忆模式",
     "type": "string",
-    "hint": "选择记忆回忆的工作模式",
+    "hint": "选择记忆回忆的工作模式，simple：最方便，无需配置，效果最差, llm：允许使用llm工作, embedding：embedding和llm配合工作",
     "options": ["simple", "llm", "embedding"],
     "default": "simple"
   },

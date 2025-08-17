@@ -2,6 +2,8 @@ import asyncio
 import json
 import time
 import random
+import sqlite3
+import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 import os
@@ -270,11 +272,10 @@ class MemorySystem:
             return []
             
         # 简单的关键词提取，实际使用LLM会更准确
-        text = " ".join(history)
+        text = " ".join(str(item) if not isinstance(item, str) else item for item in history)
         keywords = []
         
         # 提取名词和关键词
-        import re
         words = re.findall(r'\b[\u4e00-\u9fff]{2,4}\b', text)
         word_freq = {}
         for word in words:
@@ -283,7 +284,7 @@ class MemorySystem:
         
         # 返回频率最高的前5个关键词
         sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
-        return [word for word, freq in sorted_words[:5]]
+        return [str(word) for word, freq in sorted_words[:5]]
     
     async def form_memory(self, theme: str, history: List[str], event: AstrMessageEvent) -> str:
         """形成记忆内容"""
@@ -333,6 +334,25 @@ class MemorySystem:
     async def recall_memories(self, keyword: str, event: AstrMessageEvent) -> List[str]:
         """回忆相关记忆"""
         try:
+            recall_mode = self.memory_config["recall_mode"]
+            
+            if recall_mode == "simple":
+                return await self._recall_simple(keyword)
+            elif recall_mode == "llm":
+                return await self._recall_llm(keyword, event)
+            elif recall_mode == "embedding":
+                return await self._recall_embedding(keyword)
+            else:
+                logger.warning(f"未知的回忆模式: {recall_mode}，使用simple模式")
+                return await self._recall_simple(keyword)
+                
+        except Exception as e:
+            logger.error(f"回忆记忆失败: {e}")
+            return []
+
+    async def _recall_simple(self, keyword: str) -> List[str]:
+        """简单关键词匹配回忆"""
+        try:
             if not keyword:
                 # 随机回忆
                 memories = list(self.memory_graph.memories.values())
@@ -344,8 +364,8 @@ class MemorySystem:
             # 基于关键词回忆
             related_memories = []
             for concept in self.memory_graph.concepts.values():
-                if keyword in concept.name:
-                    concept_memories = [m for m in self.memory_graph.memories.values() 
+                if keyword.lower() in concept.name.lower():
+                    concept_memories = [m for m in self.memory_graph.memories.values()
                                       if m.concept_id == concept.id]
                     for memory in concept_memories:
                         related_memories.append(memory.content)
@@ -353,23 +373,133 @@ class MemorySystem:
             return related_memories[:5]  # 最多返回5条
             
         except Exception as e:
-            logger.error(f"回忆记忆失败: {e}")
+            logger.error(f"简单回忆失败: {e}")
             return []
+
+    async def _recall_llm(self, keyword: str, event: AstrMessageEvent) -> List[str]:
+        """LLM智能回忆"""
+        try:
+            if not self.memory_graph.memories:
+                return []
+                
+            # 获取所有记忆内容
+            all_memories = [m.content for m in self.memory_graph.memories.values()]
+            
+            if not keyword:
+                # 随机选择3条记忆
+                return random.sample(all_memories, min(3, len(all_memories)))
+            
+            # 使用LLM进行智能回忆
+            prompt = f"""请从以下记忆中找出与"{keyword}"最相关的3-5条记忆，按相关性排序：
+
+记忆列表：
+{chr(10).join(f"{i+1}. {mem}" for i, mem in enumerate(all_memories))}
+
+要求：
+1. 只返回最相关的记忆内容
+2. 保持原记忆的完整性
+3. 最多返回5条
+4. 直接返回记忆内容，不要添加编号或其他标记"""
+
+            provider = await self.get_llm_provider()
+            if provider:
+                response = await provider.text_chat(
+                    prompt=prompt,
+                    contexts=[],
+                    system_prompt="你是一个记忆检索助手，请准确找出相关记忆。"
+                )
+                
+                # 解析LLM返回的记忆
+                recalled_memories = []
+                lines = response.completion_text.strip().split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if line and not line.startswith(('1.', '2.', '3.', '4.', '5.')):
+                        recalled_memories.append(line)
+                    elif line and line.startswith(('1.', '2.', '3.', '4.', '5.')):
+                        # 移除编号
+                        recalled_memories.append(line[2:].strip())
+                
+                return recalled_memories[:5]
+            
+            # LLM不可用，回退到简单模式
+            return await self._recall_simple(keyword)
+            
+        except Exception as e:
+            logger.error(f"LLM回忆失败: {e}")
+            return await self._recall_simple(keyword)
+
+    async def _recall_embedding(self, keyword: str) -> List[str]:
+        """基于嵌入向量的相似度回忆"""
+        try:
+            if not keyword or not self.memory_graph.memories:
+                # 随机回忆
+                memories = list(self.memory_graph.memories.values())
+                if memories:
+                    selected = random.sample(memories, min(3, len(memories)))
+                    return [m.content for m in selected]
+                return []
+            
+            # 获取关键词的嵌入向量
+            keyword_embedding = await self.get_embedding(keyword)
+            if not keyword_embedding:
+                logger.warning("无法获取关键词嵌入向量，回退到简单模式")
+                return await self._recall_simple(keyword)
+            
+            # 计算与所有记忆的相似度
+            memory_similarities = []
+            for memory in self.memory_graph.memories.values():
+                memory_embedding = await self.get_embedding(memory.content)
+                if memory_embedding:
+                    similarity = self._cosine_similarity(keyword_embedding, memory_embedding)
+                    memory_similarities.append((memory, similarity))
+            
+            # 按相似度排序
+            memory_similarities.sort(key=lambda x: x[1], reverse=True)
+            
+            # 返回最相似的5条记忆
+            return [mem.content for mem, sim in memory_similarities[:5] if sim > 0.3]
+            
+        except Exception as e:
+            logger.error(f"嵌入回忆失败: {e}")
+            return await self._recall_simple(keyword)
+
+    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+        """计算余弦相似度"""
+        try:
+            if len(vec1) != len(vec2):
+                return 0.0
+            
+            dot_product = sum(a * b for a, b in zip(vec1, vec2))
+            magnitude1 = sum(a * a for a in vec1) ** 0.5
+            magnitude2 = sum(b * b for b in vec2) ** 0.5
+            
+            if magnitude1 == 0 or magnitude2 == 0:
+                return 0.0
+            
+            return dot_product / (magnitude1 * magnitude2)
+        except Exception:
+            return 0.0
     
     async def memory_maintenance_loop(self):
         """记忆维护循环"""
         while True:
             try:
-                await asyncio.sleep(3600)  # 每小时检查一次
+                consolidation_interval = self.memory_config["consolidation_interval_hours"] * 3600
+                await asyncio.sleep(consolidation_interval)  # 按配置间隔检查
                 
                 # 遗忘机制
-                self.forget_memories()
+                if self.memory_config["enable_forgetting"]:
+                    await self.forget_memories()
                 
                 # 记忆整理
-                self.consolidate_memories()
+                if self.memory_config["enable_consolidation"]:
+                    await self.consolidate_memories()
                 
                 # 保存状态
                 self.save_memory_state()
+                
+                logger.info("记忆维护完成")
                 
             except Exception as e:
                 logger.error(f"记忆维护失败: {e}")
@@ -380,36 +510,129 @@ class MemorySystem:
         forget_threshold = self.memory_config["forget_threshold_days"] * 24 * 3600
         
         # 降低连接强度
+        connections_to_remove = []
         for connection in self.memory_graph.connections:
             if current_time - connection.last_strengthened > forget_threshold:
                 connection.strength *= 0.9
                 if connection.strength < 0.1:
-                    self.memory_graph.remove_connection(connection.id)
+                    connections_to_remove.append(connection.id)
+        
+        # 批量移除连接
+        for conn_id in connections_to_remove:
+            self.memory_graph.remove_connection(conn_id)
         
         # 移除不活跃的记忆
+        memories_to_remove = []
         for memory in list(self.memory_graph.memories.values()):
             if current_time - memory.last_accessed > forget_threshold:
                 memory.strength *= 0.8
                 if memory.strength < 0.1:
-                    self.memory_graph.remove_memory(memory.id)
+                    memories_to_remove.append(memory.id)
+        
+        # 批量移除记忆
+        for memory_id in memories_to_remove:
+            self.memory_graph.remove_memory(memory_id)
+        
+        logger.info(f"遗忘机制：移除{len(memories_to_remove)}条记忆，{len(connections_to_remove)}个连接")
     
     async def consolidate_memories(self):
-        """记忆整理机制"""
-        for concept in self.memory_graph.concepts.values():
-            concept_memories = [m for m in self.memory_graph.memories.values() 
+        """记忆整理机制 - 智能合并相似记忆"""
+        consolidation_count = 0
+        
+        for concept in list(self.memory_graph.concepts.values()):
+            concept_memories = [m for m in self.memory_graph.memories.values()
                               if m.concept_id == concept.id]
             
             if len(concept_memories) > self.memory_config["max_memories_per_topic"]:
-                # 合并相似记忆
-                for i in range(len(concept_memories)):
-                    for j in range(i+1, len(concept_memories)):
-                        if self.are_memories_similar(concept_memories[i], concept_memories[j]):
-                            # 保留更丰富的记忆
-                            if len(concept_memories[i].content) > len(concept_memories[j].content):
-                                self.memory_graph.remove_memory(concept_memories[j].id)
-                            else:
-                                self.memory_graph.remove_memory(concept_memories[i].id)
-                                break
+                # 按时间排序，优先合并旧记忆
+                concept_memories.sort(key=lambda m: m.created_at)
+                
+                # 使用更智能的合并策略
+                merged_memories = []
+                used_indices = set()
+                
+                for i, memory1 in enumerate(concept_memories):
+                    if i in used_indices:
+                        continue
+                        
+                    similar_group = [memory1]
+                    used_indices.add(i)
+                    
+                    # 找到所有相似的记忆
+                    for j, memory2 in enumerate(concept_memories):
+                        if j not in used_indices and self.are_memories_similar(memory1, memory2):
+                            similar_group.append(memory2)
+                            used_indices.add(j)
+                    
+                    # 如果找到相似记忆，合并它们
+                    if len(similar_group) > 1:
+                        merged_content = await self._merge_memories(similar_group)
+                        if merged_content:
+                            # 保留最新的记忆ID，更新内容
+                            newest_memory = max(similar_group, key=lambda m: m.last_accessed)
+                            newest_memory.content = merged_content
+                            newest_memory.last_accessed = time.time()
+                            consolidation_count += len(similar_group) - 1
+                            
+                            # 移除其他相似记忆
+                            for mem in similar_group:
+                                if mem.id != newest_memory.id:
+                                    self.memory_graph.remove_memory(mem.id)
+        
+        if consolidation_count > 0:
+            logger.info(f"记忆整理：合并了{consolidation_count}条相似记忆")
+    
+    async def _merge_memories(self, memories: List[Memory]) -> str:
+        """智能合并多条相似记忆"""
+        if len(memories) == 1:
+            return memories[0].content
+        
+        # 按时间排序
+        memories.sort(key=lambda m: m.created_at)
+        
+        # 提取关键信息
+        contents = [m.content for m in memories]
+        
+        # 使用LLM进行智能合并（如果可用）
+        try:
+            if self.memory_config["recall_mode"] == "llm":
+                provider = await self.get_llm_provider()
+                if provider:
+                    prompt = f"""请将以下{len(contents)}条相似记忆合并成一条更完整、更准确的记忆：
+
+{chr(10).join(f"{i+1}. {content}" for i, content in enumerate(contents))}
+
+要求：
+1. 保留所有重要信息
+2. 去除重复内容
+3. 保持简洁自然
+4. 不超过100字"""
+                    
+                    response = await provider.text_chat(
+                        prompt=prompt,
+                        contexts=[],
+                        system_prompt="你是一个记忆整理助手，请准确合并相似记忆。"
+                    )
+                    
+                    merged = response.completion_text.strip()
+                    if merged and len(merged) > 10:
+                        return merged
+        except Exception as e:
+            logger.warning(f"LLM合并记忆失败: {e}")
+        
+        # 简单合并策略
+        # 提取共同关键词，合并时间信息
+        words_list = [content.split() for content in contents]
+        common_words = set(words_list[0])
+        for words in words_list[1:]:
+            common_words &= set(words)
+        
+        if common_words:
+            key_phrase = " ".join(list(common_words)[:5])
+            return f"关于{key_phrase}的多次讨论"
+        
+        # 默认合并
+        return contents[-1]  # 返回最新的记忆
     
     def are_memories_similar(self, mem1, mem2) -> bool:
         """判断两条记忆是否相似"""
@@ -429,18 +652,22 @@ class MemorySystem:
     async def get_memory_stats(self) -> str:
         """获取记忆统计信息"""
         return f"""
-        概念节点: {len(self.memory_graph.concepts)}
-        记忆条目: {len(self.memory_graph.memories)}
-        关系连接: {len(self.memory_graph.connections)}
-        运行模式: {self.memory_config['recall_mode']}
-        嵌入提供商: {self.memory_config['embedding_provider']}
-        """
+记忆系统状态：
+- 概念节点: {len(self.memory_graph.concepts)}
+- 记忆条目: {len(self.memory_graph.memories)}
+- 关系连接: {len(self.memory_graph.connections)}
+- 回忆模式: {self.memory_config['recall_mode']}
+- LLM提供商: {self.memory_config['llm_provider']}
+- 嵌入提供商: {self.memory_config['embedding_provider']}
+- 遗忘机制: {'启用' if self.memory_config['enable_forgetting'] else '禁用'}
+- 记忆整理: {'启用' if self.memory_config['enable_consolidation'] else '禁用'}
+"""
 
     def _find_provider_by_keywords(self, keywords: list, capability_check=None):
         """根据关键词查找提供商"""
         providers = self.context.get_all_providers()
         for provider in providers:
-            provider_id = provider.id.lower()
+            provider_id = str(getattr(provider, 'id', str(provider))).lower()
             for keyword in keywords:
                 if keyword in provider_id:
                     if capability_check is None or capability_check(provider):
@@ -467,9 +694,12 @@ class MemorySystem:
                 return provider
             
             # 通过ID获取指定提供商
-            provider = self.context.get_provider_by_id(provider_name)
-            if provider and hasattr(provider, 'text_chat'):
-                return provider
+            try:
+                provider = self.context.get_provider_by_id(provider_name)
+                if provider and hasattr(provider, 'text_chat'):
+                    return provider
+            except:
+                pass
                 
             # 回退到当前使用的提供商
             return self.context.get_using_provider()
