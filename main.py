@@ -385,9 +385,11 @@ class MemorySystem:
             
             # 建立概念之间的连接
             if themes:
-                for concept_id in [self.memory_graph.concepts[cid].name for cid in self.memory_graph.concepts]:
-                    if concept_id in themes:
-                        self.establish_connections(concept_id, themes)
+                for theme in themes:
+                    for concept in self.memory_graph.concepts.values():
+                        if concept.name == theme:
+                            self.establish_connections(concept.id, themes)
+                            break
             
             # 触发回忆（降低频率以节省资源）
             if random.random() < 0.2:  # 20%概率触发回忆
