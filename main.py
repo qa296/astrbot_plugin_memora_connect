@@ -363,33 +363,55 @@ class MemorySystem:
             # 批量处理提取的记忆
             themes = []
             for memory_data in extracted_memories:
-                theme = memory_data["theme"]
-                memory_content = memory_data["memory_content"]
-                confidence = memory_data["confidence"]
-                
-                # 根据置信度调整记忆强度
-                base_strength = 1.0
-                adjusted_strength = base_strength * confidence
-                
-                # 添加概念和记忆
-                concept_id = self.memory_graph.add_concept(theme)
-                memory_id = self.memory_graph.add_memory(
-                    content=memory_content,
-                    concept_id=concept_id,
-                    strength=adjusted_strength
-                )
-                
-                themes.append(theme)
-                
-                logger.info(f"优化记忆创建: {theme} (置信度: {confidence})")
+                try:
+                    theme = str(memory_data.get("theme", "")).strip()
+                    memory_content = str(memory_data.get("memory_content", "")).strip()
+                    confidence = float(memory_data.get("confidence", 0.7))
+                    
+                    # 验证数据完整性
+                    if not theme or not memory_content:
+                        logger.warning(f"跳过无效的记忆数据: 主题或内容为空")
+                        continue
+                    
+                    # 根据置信度调整记忆强度
+                    base_strength = 1.0
+                    adjusted_strength = base_strength * max(0.0, min(1.0, confidence))
+                    
+                    # 添加概念和记忆
+                    concept_id = self.memory_graph.add_concept(theme)
+                    memory_id = self.memory_graph.add_memory(
+                        content=memory_content,
+                        concept_id=concept_id,
+                        strength=adjusted_strength
+                    )
+                    
+                    themes.append(theme)
+                    
+                    logger.info(f"优化记忆创建: {theme} (置信度: {confidence})")
+                    
+                except (KeyError, ValueError, TypeError) as e:
+                    logger.error(f"处理提取的记忆数据失败: {e}, 数据: {memory_data}")
+                    continue
             
             # 建立概念之间的连接
             if themes:
                 for theme in themes:
-                    for concept in self.memory_graph.concepts.values():
-                        if concept.name == theme:
-                            self.establish_connections(concept.id, themes)
-                            break
+                    try:
+                        # 找到对应的概念
+                        target_concept = None
+                        for concept in self.memory_graph.concepts.values():
+                            if concept.name == theme:
+                                target_concept = concept
+                                break
+                        
+                        if target_concept:
+                            self.establish_connections(target_concept.id, themes)
+                        else:
+                            logger.warning(f"未找到主题对应的概念: {theme}")
+                            
+                    except Exception as e:
+                        logger.error(f"建立概念连接失败: {e}, 主题: {theme}")
+                        continue
             
             # 触发回忆（降低频率以节省资源）
             if random.random() < 0.2:  # 20%概率触发回忆
@@ -398,7 +420,7 @@ class MemorySystem:
                     logger.info(f"优化模式触发了回忆: {len(recalled)}条")
                     
         except Exception as e:
-            logger.error(f"优化消息处理失败: {e}")
+            logger.error(f"优化消息处理失败: {e}", exc_info=True)
             # 回退到旧方法
             await self.process_message(event)
     
@@ -538,16 +560,26 @@ class MemorySystem:
     
     def establish_connections(self, concept_id: str, themes: List[str]):
         """建立概念之间的连接"""
-        for other_theme in themes:
-            if other_theme != self.memory_graph.concepts[concept_id].name:
-                other_concept = None
-                for concept in self.memory_graph.concepts.values():
-                    if concept.name == other_theme:
-                        other_concept = concept
-                        break
+        try:
+            if concept_id not in self.memory_graph.concepts:
+                logger.warning(f"概念ID不存在: {concept_id}")
+                return
                 
-                if other_concept:
-                    self.memory_graph.add_connection(concept_id, other_concept.id)
+            current_concept = self.memory_graph.concepts[concept_id]
+            
+            for other_theme in themes:
+                if other_theme != current_concept.name:
+                    other_concept = None
+                    for concept in self.memory_graph.concepts.values():
+                        if concept.name == other_theme:
+                            other_concept = concept
+                            break
+                    
+                    if other_concept and other_concept.id != concept_id:
+                        self.memory_graph.add_connection(concept_id, other_concept.id)
+                        
+        except Exception as e:
+            logger.error(f"建立概念连接时出错: {e}, 概念ID: {concept_id}, 主题: {themes}")
     
     async def recall_memories(self, keyword: str, event: AstrMessageEvent) -> List[str]:
         """回忆相关记忆"""
@@ -1500,14 +1532,24 @@ class BatchMemoryExtractor:
             # 过滤和验证记忆
             filtered_memories = []
             for mem in memories:
-                if isinstance(mem, dict) and mem.get("confidence", 0) > 0.6:
-                    # 确保必需字段存在
-                    if "theme" in mem and "memory_content" in mem:
-                        filtered_memories.append({
-                            "theme": str(mem["theme"]),
-                            "memory_content": str(mem["memory_content"]),
-                            "confidence": float(mem.get("confidence", 0.7))
-                        })
+                try:
+                    if isinstance(mem, dict) and float(mem.get("confidence", 0)) > 0.6:
+                        # 确保必需字段存在且为字符串
+                        theme = str(mem.get("theme", "")).strip()
+                        content = str(mem.get("memory_content", "")).strip()
+                        
+                        # 清理主题中的特殊字符
+                        theme = re.sub(r'[^\w\u4e00-\u9fff]', '', theme)
+                        
+                        if theme and content:
+                            filtered_memories.append({
+                                "theme": theme,
+                                "memory_content": content,
+                                "confidence": max(0.0, min(1.0, float(mem.get("confidence", 0.7))))
+                            })
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"跳过无效的记忆数据: {mem}, 错误: {e}")
+                    continue
             
             return filtered_memories
             
