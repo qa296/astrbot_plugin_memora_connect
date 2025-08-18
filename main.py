@@ -362,6 +362,8 @@ class MemorySystem:
             
             # 批量处理提取的记忆
             themes = []
+            concept_ids = []  # 存储创建的概念ID
+            
             for memory_data in extracted_memories:
                 try:
                     theme = str(memory_data.get("theme", "")).strip()
@@ -386,6 +388,7 @@ class MemorySystem:
                     )
                     
                     themes.append(theme)
+                    concept_ids.append(concept_id)  # 存储概念ID
                     
                     logger.info(f"优化记忆创建: {theme} (置信度: {confidence})")
                     
@@ -393,24 +396,13 @@ class MemorySystem:
                     logger.error(f"处理提取的记忆数据失败: {e}, 数据: {memory_data}")
                     continue
             
-            # 建立概念之间的连接
-            if themes:
-                for theme in themes:
+            # 建立概念之间的连接 - 使用存储的概念ID
+            if concept_ids:
+                for concept_id in concept_ids:
                     try:
-                        # 找到对应的概念
-                        target_concept = None
-                        for concept in self.memory_graph.concepts.values():
-                            if concept.name == theme:
-                                target_concept = concept
-                                break
-                        
-                        if target_concept:
-                            self.establish_connections(target_concept.id, themes)
-                        else:
-                            logger.warning(f"未找到主题对应的概念: {theme}")
-                            
+                        self.establish_connections(concept_id, themes)
                     except Exception as e:
-                        logger.error(f"建立概念连接失败: {e}, 主题: {theme}")
+                        logger.error(f"建立概念连接失败: {e}, 概念ID: {concept_id}")
                         continue
             
             # 触发回忆（降低频率以节省资源）
