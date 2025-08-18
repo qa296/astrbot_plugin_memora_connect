@@ -384,16 +384,11 @@ class SmartDatabaseMigration:
             
             # 获取源表结构
             source_cursor.execute(f"PRAGMA table_info({table_name})")
-            source_columns = [col[1] for col in source_cursor.fetchall()]
+            source_columns = [str(col[1]) for col in source_cursor.fetchall()]
             
             # 获取目标表结构
             target_cursor.execute(f"PRAGMA table_info({table_name})")
-            target_columns_info = target_cursor.fetchall()
-            target_columns = [col[1] for col in target_columns_info]
-            
-            # 确保所有列名都是字符串
-            target_columns = [str(col) for col in target_columns]
-            source_columns = [str(col) for col in source_columns]
+            target_columns = [str(col[1]) for col in target_cursor.fetchall()]
             
             # 构建字段映射
             field_mapping = self._build_field_mapping(
