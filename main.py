@@ -45,11 +45,14 @@ class MemoraConnectPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         """监听所有消息，形成记忆并注入相关记忆"""
-        # 1. 注入相关记忆到上下文
-        await self.memory_system.inject_memories_to_context(event)
-        
-        # 2. 处理消息形成新记忆
-        await self.memory_system.process_message(event)
+        try:
+            # 1. 注入相关记忆到上下文
+            await self.memory_system.inject_memories_to_context(event)
+            
+            # 2. 处理消息形成新记忆
+            await self.memory_system.process_message(event)
+        except Exception as e:
+            logger.error(f"on_message处理错误: {e}", exc_info=True)
     
     async def terminate(self):
         """插件卸载时保存记忆"""

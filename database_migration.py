@@ -51,6 +51,16 @@ class TableDiff:
     modified_fields: List[FieldChange] = field(default_factory=list)
     added_indexes: List[str] = field(default_factory=list)
     removed_indexes: List[str] = field(default_factory=list)
+    
+    def has_changes(self) -> bool:
+        """检查表是否有变化"""
+        return bool(
+            self.added_fields or
+            self.removed_fields or
+            self.modified_fields or
+            self.added_indexes or
+            self.removed_indexes
+        )
 
 @dataclass
 class SchemaDiff:
@@ -361,7 +371,7 @@ class SmartDatabaseMigration:
             source_conn.commit()
             target_conn.commit()
     
-    async def _migrate_table_data(self, source_cursor, target_cursor, 
+    async def _migrate_table_data(self, source_cursor, target_cursor,
                                 table_name: str, table_diff: TableDiff) -> None:
         """迁移单个表的数据"""
         try:
@@ -381,6 +391,10 @@ class SmartDatabaseMigration:
             target_columns_info = target_cursor.fetchall()
             target_columns = [col[1] for col in target_columns_info]
             
+            # 确保所有列名都是字符串
+            target_columns = [str(col) for col in target_columns]
+            source_columns = [str(col) for col in source_columns]
+            
             # 构建字段映射
             field_mapping = self._build_field_mapping(
                 source_columns, target_columns, table_diff
@@ -392,8 +406,9 @@ class SmartDatabaseMigration:
                 if new_row:
                     placeholders = ",".join(["?" for _ in new_row])
                     try:
+                        column_names = ",".join(str(col) for col in target_columns)
                         target_cursor.execute(
-                            f"INSERT INTO {table_name} ({','.join(target_columns)}) VALUES ({placeholders})",
+                            f"INSERT INTO {table_name} ({column_names}) VALUES ({placeholders})",
                             new_row
                         )
                     except sqlite3.IntegrityError as e:
@@ -472,7 +487,16 @@ class SmartDatabaseMigration:
 # 向后兼容的接口
 class DatabaseMigration(SmartDatabaseMigration):
     """向后兼容的迁移类"""
+    CURRENT_VERSION = "v0.2.0"
     
     async def run_migration_if_needed(self) -> bool:
-        """兼容旧接口"""
+        """兼容旧接口 - 完全跳过版本号检查"""
+        return await self.run_smart_migration()
+        
+    def _get_database_version(self) -> str:
+        """重写版本号获取 - 始终返回需要迁移的状态"""
+        return "legacy"
+        
+    async def _migrate_v0_1_0_to_v0_2_0(self) -> bool:
+        """重写旧版本迁移 - 直接调用智能迁移"""
         return await self.run_smart_migration()
