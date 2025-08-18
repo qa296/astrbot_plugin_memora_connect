@@ -396,7 +396,7 @@ class MemorySystem:
             prompt = f"""请从以下对话中提取3-5个核心主题或关键词。这些主题将用于构建记忆网络。
 
 对话内容：
-{" ".join(history)}
+{" ".join(map(str, history))}
 
 要求：
 1. 提取的主题应该是对话的核心内容
@@ -428,7 +428,7 @@ class MemorySystem:
             # 使用LLM总结记忆
             prompt = f"""请将以下关于"{theme}"的对话总结成一句口语化的记忆，就像亲身经历一样：
             
-            对话内容：{" ".join(history[-3:])}
+            对话内容：{" ".join(map(str, history[-3:]))}
             
             要求：
             1. 用第三人称

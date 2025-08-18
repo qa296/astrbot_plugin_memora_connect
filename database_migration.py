@@ -90,6 +90,8 @@ class SmartDatabaseMigration:
         try:
             if not os.path.exists(self.db_path):
                 logger.info("数据库不存在，将创建新数据库")
+                # 创建新数据库时，直接使用新结构，无需迁移
+                self._create_new_structure(self.db_path)
                 return True
                 
             # 1. 分析现有数据库结构
@@ -122,6 +124,9 @@ class SmartDatabaseMigration:
                 
         except Exception as e:
             logger.error(f"智能迁移失败: {e}", exc_info=True)
+            # 如果发生异常，也尝试回滚
+            if 'backup_path' in locals() and os.path.exists(backup_path):
+                self._rollback(backup_path)
             return False
     
     def _analyze_current_schema(self) -> DatabaseSchema:
@@ -141,21 +146,21 @@ class SmartDatabaseMigration:
                 table = TableSchema(name=table_name, create_sql=create_sql)
                 
                 # 分析字段
-                cursor.execute(f"PRAGMA table_info({table_name})")
+                cursor.execute(f"PRAGMA table_info('{table_name}')")
                 for col in cursor.fetchall():
                     field = FieldSchema(
-                        name=col[1],
-                        type=col[2],
-                        not_null=bool(col[3]),
-                        default_value=col[4],
-                        primary_key=bool(col[5])
+                        name=str(col),
+                        type=str(col),
+                        not_null=bool(col),
+                        default_value=col,
+                        primary_key=bool(col)
                     )
                     table.fields.append(field)
                 
                 # 分析索引
-                cursor.execute(f"PRAGMA index_list({table_name})")
+                cursor.execute(f"PRAGMA index_list('{table_name}')")
                 for idx in cursor.fetchall():
-                    table.indexes.append(idx[1])
+                    table.indexes.append(str(idx))
                 
                 schema.tables[table_name] = table
         
@@ -207,14 +212,12 @@ class SmartDatabaseMigration:
         """智能计算结构差异"""
         diff = SchemaDiff()
         
-        # 表级别差异
         current_tables = set(current.tables.keys())
         target_tables = set(target.tables.keys())
         
         diff.added_tables = list(target_tables - current_tables)
         diff.removed_tables = list(current_tables - target_tables)
         
-        # 共同表的字段差异
         for table_name in current_tables & target_tables:
             current_table = current.tables[table_name]
             target_table = target.tables[table_name]
@@ -230,27 +233,17 @@ class SmartDatabaseMigration:
         """计算单个表的差异"""
         diff = TableDiff()
         
-        # 字段差异
         current_fields = {f.name: f for f in current.fields}
         target_fields = {f.name: f for f in target.fields}
         
-        # 新增字段
-        for name, field in target_fields.items():
-            if name not in current_fields:
-                diff.added_fields.append(field)
+        diff.added_fields = [field for name, field in target_fields.items() if name not in current_fields]
+        diff.removed_fields = [name for name in current_fields if name not in target_fields]
         
-        # 删除字段
-        for name, field in current_fields.items():
-            if name not in target_fields:
-                diff.removed_fields.append(name)
-        
-        # 修改字段
         for name in set(current_fields.keys()) & set(target_fields.keys()):
             current_field = current_fields[name]
             target_field = target_fields[name]
             
-            # 检查字段定义是否相同
-            if (current_field.type != target_field.type or
+            if (current_field.type.upper() != target_field.type.upper() or
                 current_field.not_null != target_field.not_null or
                 current_field.primary_key != target_field.primary_key):
                 
@@ -284,16 +277,12 @@ class SmartDatabaseMigration:
     
     async def _execute_smart_migration(self, diff: SchemaDiff) -> bool:
         """执行智能迁移"""
+        temp_db_path = self.db_path + ".smart_migration"
         try:
-            # 创建临时数据库
-            temp_db_path = self.db_path + ".smart_migration"
             if os.path.exists(temp_db_path):
                 os.remove(temp_db_path)
             
-            # 创建新结构
             self._create_new_structure(temp_db_path)
-            
-            # 智能数据迁移
             await self._smart_data_migration(self.db_path, temp_db_path, diff)
             
             # 替换数据库
@@ -304,6 +293,8 @@ class SmartDatabaseMigration:
             
         except Exception as e:
             logger.error(f"智能迁移执行失败: {e}", exc_info=True)
+            if os.path.exists(temp_db_path):
+                os.remove(temp_db_path)
             return False
     
     def _create_new_structure(self, db_path: str):
@@ -311,43 +302,24 @@ class SmartDatabaseMigration:
         with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
             
-            # 创建概念表
-            cursor.execute('''
-                CREATE TABLE concepts (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    last_accessed REAL NOT NULL,
-                    access_count INTEGER DEFAULT 0
-                )
-            ''')
-            
-            # 创建记忆表
-            cursor.execute('''
-                CREATE TABLE memories (
-                    id TEXT PRIMARY KEY,
-                    concept_id TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    last_accessed REAL NOT NULL,
-                    access_count INTEGER DEFAULT 0,
-                    strength REAL DEFAULT 1.0,
-                    FOREIGN KEY (concept_id) REFERENCES concepts (id)
-                )
-            ''')
-            
-            # 创建连接表
-            cursor.execute('''
-                CREATE TABLE connections (
-                    id TEXT PRIMARY KEY,
-                    from_concept TEXT NOT NULL,
-                    to_concept TEXT NOT NULL,
-                    strength REAL DEFAULT 1.0,
-                    last_strengthened REAL NOT NULL,
-                    FOREIGN KEY (from_concept) REFERENCES concepts (id),
-                    FOREIGN KEY (to_concept) REFERENCES concepts (id)
-                )
-            ''')
+            target_schema = self._generate_target_schema()
+            for table_name, table_schema in target_schema.tables.items():
+                fields_sql = []
+                for field in table_schema.fields:
+                    sql = f'"{field.name}" {field.type}'
+                    if field.primary_key:
+                        sql += " PRIMARY KEY"
+                    if field.not_null:
+                        sql += " NOT NULL"
+                    if field.default_value is not None:
+                        if isinstance(field.default_value, str):
+                            sql += f" DEFAULT '{field.default_value}'"
+                        else:
+                            sql += f" DEFAULT {field.default_value}"
+                    fields_sql.append(sql)
+                
+                create_table_sql = f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(fields_sql)})"
+                cursor.execute(create_table_sql)
             
             conn.commit()
     
@@ -360,138 +332,146 @@ class SmartDatabaseMigration:
             source_cursor = source_conn.cursor()
             target_cursor = target_conn.cursor()
             
-            # 处理现有表的数据迁移
-            for table_name in diff.modified_tables.keys():
-                if table_name not in diff.removed_tables:
+            # 迁移未改变和已修改的表
+            current_schema = self._analyze_current_schema()
+            target_schema = self._generate_target_schema()
+            
+            for table_name in current_schema.tables:
+                if table_name in target_schema.tables:
+                    table_diff = diff.modified_tables.get(table_name, TableDiff())
                     await self._migrate_table_data(
-                        source_cursor, target_cursor, table_name, 
-                        diff.modified_tables.get(table_name, TableDiff())
+                        source_cursor, target_cursor, table_name, table_diff
                     )
             
-            source_conn.commit()
             target_conn.commit()
     
     async def _migrate_table_data(self, source_cursor, target_cursor,
                                 table_name: str, table_diff: TableDiff) -> None:
         """迁移单个表的数据"""
         try:
-            # 获取源数据
             source_cursor.execute(f"SELECT * FROM {table_name}")
             rows = source_cursor.fetchall()
             
             if not rows:
                 return
             
-            # 获取源表结构
-            source_cursor.execute(f"PRAGMA table_info({table_name})")
-            source_columns = [str(col[1]) for col in source_cursor.fetchall()]
+            source_cursor.execute(f"PRAGMA table_info('{table_name}')")
+            source_columns = [str(col) for col in source_cursor.fetchall()]
             
-            # 获取目标表结构
-            target_cursor.execute(f"PRAGMA table_info({table_name})")
-            target_columns = [str(col[1]) for col in target_cursor.fetchall()]
+            target_cursor.execute(f"PRAGMA table_info('{table_name}')")
+            target_columns_info = {str(col): col for col in target_cursor.fetchall()}
+            target_columns = list(target_columns_info.keys())
             
             # 构建字段映射
-            field_mapping = self._build_field_mapping(
+            field_mapping, final_target_columns = self._build_field_mapping(
                 source_columns, target_columns, table_diff
             )
             
             # 迁移数据
             for row in rows:
-                new_row = self._transform_row(row, field_mapping, source_columns)
-                if new_row:
-                    placeholders = ",".join(["?" for _ in new_row])
+                new_row_dict = self._transform_row(row, field_mapping, source_columns)
+                if new_row_dict:
+                    # 确保插入顺序与目标列一致
+                    ordered_row = [new_row_dict.get(col) for col in final_target_columns]
+                    placeholders = ",".join(["?" for _ in final_target_columns])
+                    column_names = ",".join(f'"{col}"' for col in final_target_columns)
+                    
                     try:
-                        column_names = ",".join(str(col) for col in target_columns)
                         target_cursor.execute(
                             f"INSERT INTO {table_name} ({column_names}) VALUES ({placeholders})",
-                            new_row
+                            tuple(ordered_row)
                         )
                     except sqlite3.IntegrityError as e:
-                        logger.warning(f"插入数据失败: {e}")
+                        logger.warning(f"插入数据失败 (表: {table_name}): {e}")
             
         except Exception as e:
-            logger.error(f"迁移表 {table_name} 数据失败: {e}")
+            logger.error(f"迁移表 {table_name} 数据失败: {e}", exc_info=True)
     
     def _build_field_mapping(self, source_columns: List[str], 
                            target_columns: List[str], 
-                           table_diff: TableDiff) -> Dict[str, Any]:
+                           table_diff: TableDiff) -> Tuple[Dict[str, Any], List[str]]:
         """构建字段映射关系"""
         mapping = {}
-        
-        # 直接映射存在的字段
+        final_target_columns = []
+
         for target_col in target_columns:
             if target_col in source_columns:
-                mapping[target_col] = {"type": "direct", "index": source_columns.index(target_col)}
+                mapping[target_col] = {"type": "direct", "source": target_col}
+                final_target_columns.append(target_col)
         
-        # 处理新增字段的默认值
         for added_field in table_diff.added_fields:
             if added_field.name in target_columns:
-                if added_field.default_value is not None:
-                    mapping[added_field.name] = {"type": "default", "value": added_field.default_value}
-                else:
-                    # 根据类型提供默认值
-                    default_value = self._get_default_value(added_field.type)
-                    mapping[added_field.name] = {"type": "default", "value": default_value}
+                default_value = added_field.default_value if added_field.default_value is not None else self._get_default_value(added_field.type)
+                mapping[added_field.name] = {"type": "default", "value": default_value}
+                final_target_columns.append(added_field.name)
         
-        return mapping
+        return mapping, final_target_columns
     
     def _get_default_value(self, field_type: str) -> Any:
         """根据字段类型获取默认值"""
         type_lower = field_type.upper()
-        
-        if "TEXT" in type_lower or "VARCHAR" in type_lower or "CHAR" in type_lower:
-            return ""
-        elif "INTEGER" in type_lower or "INT" in type_lower:
-            return 0
-        elif "REAL" in type_lower or "FLOAT" in type_lower or "DOUBLE" in type_lower:
-            return 0.0
-        elif "BOOLEAN" in type_lower or "BOOL" in type_lower:
-            return False
-        else:
-            return None
+        if "TEXT" in type_lower or "CHAR" in type_lower: return ""
+        if "INT" in type_lower: return 0
+        if "REAL" in type_lower or "FLOAT" in type_lower: return 0.0
+        if "BOOL" in type_lower: return False
+        return None
     
     def _transform_row(self, row: Tuple, field_mapping: Dict[str, Any], 
-                      source_columns: List[str]) -> Optional[Tuple]:
+                      source_columns: List[str]) -> Optional[Dict[str, Any]]:
         """转换单行数据"""
         try:
-            new_row = []
-            target_columns = list(field_mapping.keys())
+            source_row_dict = dict(zip(source_columns, row))
+            new_row_dict = {}
             
-            for target_col in target_columns:
-                mapping = field_mapping[target_col]
-                
-                if mapping["type"] == "direct":
-                    new_row.append(row[mapping["index"]])
-                elif mapping["type"] == "default":
-                    new_row.append(mapping["value"])
-                else:
-                    new_row.append(None)
+            for target_col, mapping_info in field_mapping.items():
+                if mapping_info["type"] == "direct":
+                    new_row_dict[target_col] = source_row_dict.get(mapping_info["source"])
+                elif mapping_info["type"] == "default":
+                    new_row_dict[target_col] = mapping_info["value"]
             
-            return tuple(new_row)
+            return new_row_dict
             
         except Exception as e:
-            logger.error(f"转换数据行失败: {e}")
+            logger.error(f"转换数据行失败: {e}", exc_info=True)
             return None
     
     def _rollback(self, backup_path: str):
         """从备份回滚"""
         if os.path.exists(backup_path):
-            shutil.copy2(backup_path, self.db_path)
-            logger.info(f"已从备份 {backup_path} 回滚")
+            try:
+                shutil.copy2(backup_path, self.db_path)
+                logger.info(f"已从备份 {backup_path} 回滚")
+            except Exception as e:
+                logger.error(f"回滚失败: {e}")
 
 # 向后兼容的接口
 class DatabaseMigration(SmartDatabaseMigration):
-    """向后兼容的迁移类"""
-    CURRENT_VERSION = "v0.2.0"
+    """
+    向后兼容的迁移类。
+    这个类现在完全依赖于 SmartDatabaseMigration 的智能迁移逻辑，
+    旧的版本号检查和迁移方法已被重写，以确保所有路径都使用新的、更可靠的系统。
+    """
+    CURRENT_VERSION = "v0.2.0"  # 保持版本号用于识别，但不再用于迁移逻辑
     
     async def run_migration_if_needed(self) -> bool:
-        """兼容旧接口 - 完全跳过版本号检查"""
+        """
+        兼容旧的启动接口。
+        现在直接调用智能迁移，完全跳过版本号检查。
+        """
+        logger.info("调用兼容接口 run_migration_if_needed()，将执行智能迁移。")
         return await self.run_smart_migration()
         
     def _get_database_version(self) -> str:
-        """重写版本号获取 - 始终返回需要迁移的状态"""
-        return "legacy"
+        """
+        重写版本号获取。
+        这个方法在新的逻辑中不再被依赖，返回一个固定值以避免意外行为。
+        """
+        return self.CURRENT_VERSION
         
     async def _migrate_v0_1_0_to_v0_2_0(self) -> bool:
-        """重写旧版本迁移 - 直接调用智能迁移"""
+        """
+        重写旧版本迁移方法。
+        直接调用智能迁移，确保即使旧的调用路径也能使用新系统。
+        """
+        logger.warning("检测到旧版本迁移路径 (_migrate_v0_1_0_to_v0_2_0)，将重定向到智能迁移。")
         return await self.run_smart_migration()
