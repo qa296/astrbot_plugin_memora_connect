@@ -42,7 +42,11 @@ class MemoraConnectPlugin(Star):
     
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
-        """监听所有消息，形成记忆"""
+        """监听所有消息，形成记忆并注入相关记忆"""
+        # 1. 注入相关记忆到上下文
+        await self.memory_system.inject_memories_to_context(event)
+        
+        # 2. 处理消息形成新记忆
         await self.memory_system.process_message(event)
     
     async def terminate(self):
@@ -62,10 +66,11 @@ class MemoraConnectPlugin(Star):
             concept_id = self.memory_system.memory_graph.add_concept(topic)
             memory_id = self.memory_system.memory_graph.add_memory(content, concept_id)
             logger.info(f"LLM 工具创建记忆：{topic} -> {content}")
-            yield event.plain_result(f"已记录关于“{topic}”的记忆。")
+            # 返回空值，让LLM继续自然回复
+            yield event.plain_result("")
         except Exception as e:
             logger.error(f"LLM 工具创建记忆失败：{e}")
-            yield event.plain_result("记录记忆时出错，请联系管理员。")
+            yield event.plain_result("")
 
     @filter.llm_tool(name="recall_memory")
     async def recall_memory_tool(self, event: AstrMessageEvent, keyword: str) -> MessageEventResult:
@@ -76,12 +81,16 @@ class MemoraConnectPlugin(Star):
         try:
             memories = await self.memory_system.recall_memories(keyword, event)
             if memories:
-                yield event.plain_result(f"相关记忆：\n" + "\n".join(memories))
-            else:
-                yield event.plain_result("没有找到相关记忆。")
+                # 将记忆注入系统提示词，而不是返回固定回复
+                memory_text = "\n".join(f"• {mem}" for mem in memories)
+                if not hasattr(event, 'context_extra'):
+                    event.context_extra = {}
+                event.context_extra["recalled_memories"] = memory_text
+            # 返回空值，让LLM继续自然回复
+            yield event.plain_result("")
         except Exception as e:
             logger.error(f"LLM 工具回忆记忆失败：{e}")
-            yield event.plain_result("查询记忆时出错，请联系管理员。")
+            yield event.plain_result("")
 
 
 class MemorySystem:
@@ -120,7 +129,10 @@ class MemorySystem:
             "llm_provider": config.get("llm_provider", "openai"),
             "llm_system_prompt": config.get("llm_system_prompt", "你是一个记忆总结助手，请将对话内容总结成简洁自然的记忆。"),
             "embedding_provider": config.get("embedding_provider", "openai"),
-            "embedding_model": config.get("embedding_model", "")
+            "embedding_model": config.get("embedding_model", ""),
+            "auto_inject_memories": config.get("auto_inject_memories", True),
+            "memory_injection_threshold": config.get("memory_injection_threshold", 0.5),
+            "max_injected_memories": config.get("max_injected_memories", 3)
         }
         
     async def initialize(self):
@@ -438,26 +450,49 @@ class MemorySystem:
             return []
 
     async def _recall_simple(self, keyword: str) -> List[str]:
-        """简单关键词匹配回忆"""
+        """增强的简单关键词匹配回忆"""
         try:
             if not keyword:
-                # 随机回忆
+                # 随机回忆，优先选择强度高的记忆
                 memories = list(self.memory_graph.memories.values())
                 if memories:
-                    selected = random.sample(memories, min(3, len(memories)))
+                    # 按记忆强度和时间排序
+                    memories.sort(key=lambda m: (m.strength, m.last_accessed), reverse=True)
+                    selected = memories[:min(3, len(memories))]
                     return [m.content for m in selected]
                 return []
             
-            # 基于关键词回忆
+            # 增强的关键词匹配
             related_memories = []
+            keyword_lower = keyword.lower()
+            
+            # 直接概念匹配
             for concept in self.memory_graph.concepts.values():
-                if keyword.lower() in concept.name.lower():
+                concept_name_lower = concept.name.lower()
+                if keyword_lower in concept_name_lower or concept_name_lower in keyword_lower:
                     concept_memories = [m for m in self.memory_graph.memories.values()
                                       if m.concept_id == concept.id]
-                    for memory in concept_memories:
+                    # 按记忆强度排序
+                    concept_memories.sort(key=lambda m: m.strength, reverse=True)
+                    for memory in concept_memories[:2]:  # 每个概念最多2条
                         related_memories.append(memory.content)
             
-            return related_memories[:5]  # 最多返回5条
+            # 内容关键词匹配
+            for memory in self.memory_graph.memories.values():
+                if keyword_lower in memory.content.lower():
+                    related_memories.append(memory.content)
+            
+            # 去重并限制数量
+            seen = set()
+            unique_memories = []
+            for memory in related_memories:
+                if memory not in seen:
+                    seen.add(memory)
+                    unique_memories.append(memory)
+                    if len(unique_memories) >= 5:
+                        break
+            
+            return unique_memories
             
         except Exception as e:
             logger.error(f"简单回忆失败: {e}")
@@ -1075,6 +1110,141 @@ class MemorySystem:
         except Exception as e:
             logger.error(f"获取嵌入向量失败: {e}")
             return []
+
+    async def inject_memories_to_context(self, event: AstrMessageEvent):
+        """将相关记忆注入到对话上下文中"""
+        try:
+            if not self.memory_config.get("auto_inject_memories", True):
+                return
+            
+            current_message = event.message_str.strip()
+            if not current_message:
+                return
+            
+            # 获取相关记忆
+            relevant_memories = await self.recall_relevant_memories(current_message)
+            
+            if relevant_memories:
+                # 格式化记忆为上下文提示
+                memory_context = self.format_memories_for_context(relevant_memories)
+                
+                # 注入到AstrBot的上下文中
+                if not hasattr(event, 'context_extra'):
+                    event.context_extra = {}
+                event.context_extra["memory_context"] = memory_context
+                
+                logger.info(f"已注入 {len(relevant_memories)} 条相关记忆到上下文")
+                
+        except Exception as e:
+            logger.error(f"注入记忆到上下文失败: {e}")
+
+    async def recall_relevant_memories(self, message: str) -> List[str]:
+        """基于消息内容智能召回相关记忆"""
+        try:
+            if not self.memory_graph.memories:
+                return []
+            
+            # 使用多种召回策略
+            memories = []
+            
+            # 1. 语义搜索
+            semantic_memories = await self.semantic_search(message)
+            memories.extend(semantic_memories)
+            
+            # 2. 关键词匹配
+            keyword_memories = await self.keyword_based_recall(message)
+            memories.extend(keyword_memories)
+            
+            # 3. 去重和排序
+            seen = set()
+            unique_memories = []
+            for memory in memories:
+                if memory not in seen:
+                    seen.add(memory)
+                    unique_memories.append(memory)
+                    if len(unique_memories) >= self.memory_config.get("max_injected_memories", 3):
+                        break
+            
+            return unique_memories
+            
+        except Exception as e:
+            logger.error(f"智能召回记忆失败: {e}")
+            return []
+
+    async def semantic_search(self, query: str) -> List[str]:
+        """基于语义相似度的记忆搜索"""
+        try:
+            if not query or not self.memory_graph.memories:
+                return []
+            
+            # 获取查询的嵌入向量
+            query_embedding = await self.get_embedding(query)
+            if not query_embedding:
+                return []
+            
+            similarities = []
+            threshold = self.memory_config.get("memory_injection_threshold", 0.5)
+            
+            for memory in self.memory_graph.memories.values():
+                memory_embedding = await self.get_embedding(memory.content)
+                if memory_embedding:
+                    similarity = self._cosine_similarity(query_embedding, memory_embedding)
+                    if similarity > threshold:
+                        similarities.append((memory.content, similarity))
+            
+            # 按相似度排序
+            similarities.sort(key=lambda x: x[1], reverse=True)
+            return [content for content, sim in similarities]
+            
+        except Exception as e:
+            logger.error(f"语义搜索失败: {e}")
+            return []
+
+    async def keyword_based_recall(self, message: str) -> List[str]:
+        """基于关键词的记忆召回"""
+        try:
+            # 提取关键词
+            keywords = self.extract_keywords_from_text(message)
+            
+            relevant_memories = []
+            for keyword in keywords:
+                memories = await self._recall_simple(keyword)
+                relevant_memories.extend(memories)
+            
+            return relevant_memories
+            
+        except Exception as e:
+            logger.error(f"关键词召回失败: {e}")
+            return []
+
+    def extract_keywords_from_text(self, text: str) -> List[str]:
+        """从文本中提取关键词"""
+        try:
+            # 提取中文关键词
+            words = re.findall(r'\b[\u4e00-\u9fff]{2,4}\b', text)
+            
+            # 过滤常用词
+            stop_words = {"你好", "谢谢", "再见", "请问", "可以", "这个", "那个"}
+            keywords = [word for word in words if word not in stop_words and len(word) >= 2]
+            
+            # 返回前5个关键词
+            return keywords[:5]
+            
+        except Exception as e:
+            logger.error(f"提取关键词失败: {e}")
+            return []
+
+    def format_memories_for_context(self, memories: List[str]) -> str:
+        """将记忆格式化为适合LLM理解的上下文"""
+        if not memories:
+            return ""
+        
+        formatted = "【记忆提示】根据我们之前的对话记忆：\n"
+        for i, memory in enumerate(memories, 1):
+            formatted += f"• {memory}\n"
+        formatted += "【当前对话】"
+        
+        return formatted
 
 
 class MemoryGraph:
