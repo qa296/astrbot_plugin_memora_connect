@@ -83,23 +83,5 @@
     "type": "string",
     "hint": "指定要使用的嵌入模型名称，留空将使用提供商的默认模型",
     "default": ""
-  },
-  "auto_inject_memories": {
-    "description": "自动注入记忆到上下文",
-    "type": "bool",
-    "hint": "是否在每次对话时自动将相关记忆注入到LLM上下文中",
-    "default": true
-  },
-  "memory_injection_threshold": {
-    "description": "记忆注入阈值",
-    "type": "float",
-    "hint": "记忆与当前消息的相关度阈值(0-1)，高于此值的记忆才会被注入",
-    "default": 0.5
-  },
-  "max_injected_memories": {
-    "description": "最大注入记忆数",
-    "type": "int",
-    "hint": "每次对话最多注入多少条相关记忆",
-    "default": 3
   }
 }

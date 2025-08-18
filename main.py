@@ -66,11 +66,11 @@ class MemoraConnectPlugin(Star):
             concept_id = self.memory_system.memory_graph.add_concept(topic)
             memory_id = self.memory_system.memory_graph.add_memory(content, concept_id)
             logger.info(f"LLM 工具创建记忆：{topic} -> {content}")
-            # 返回空值，让LLM继续自然回复
-            yield event.plain_result("")
+            # 让LLM生成自然回复，不返回固定内容
+            yield event.plain_result(None)  # 返回None让LLM继续其自然回复流程
         except Exception as e:
             logger.error(f"LLM 工具创建记忆失败：{e}")
-            yield event.plain_result("")
+            yield event.plain_result(None)
 
     @filter.llm_tool(name="recall_memory")
     async def recall_memory_tool(self, event: AstrMessageEvent, keyword: str) -> MessageEventResult:
@@ -81,16 +81,15 @@ class MemoraConnectPlugin(Star):
         try:
             memories = await self.memory_system.recall_memories(keyword, event)
             if memories:
-                # 将记忆注入系统提示词，而不是返回固定回复
-                memory_text = "\n".join(f"• {mem}" for mem in memories)
-                if not hasattr(event, 'context_extra'):
-                    event.context_extra = {}
-                event.context_extra["recalled_memories"] = memory_text
-            # 返回空值，让LLM继续自然回复
-            yield event.plain_result("")
+                # 构建自然语言回复，让LLM基于记忆内容继续对话
+                memory_context = "根据我们之前的对话记忆：\n" + "\n".join(f"• {mem}" for mem in memories)
+                yield event.plain_result(memory_context)
+            else:
+                # 让LLM自然回复没有找到相关记忆
+                yield event.plain_result(None)
         except Exception as e:
             logger.error(f"LLM 工具回忆记忆失败：{e}")
-            yield event.plain_result("")
+            yield event.plain_result(None)
 
 
 class MemorySystem:
@@ -129,10 +128,7 @@ class MemorySystem:
             "llm_provider": config.get("llm_provider", "openai"),
             "llm_system_prompt": config.get("llm_system_prompt", "你是一个记忆总结助手，请将对话内容总结成简洁自然的记忆。"),
             "embedding_provider": config.get("embedding_provider", "openai"),
-            "embedding_model": config.get("embedding_model", ""),
-            "auto_inject_memories": config.get("auto_inject_memories", True),
-            "memory_injection_threshold": config.get("memory_injection_threshold", 0.5),
-            "max_injected_memories": config.get("max_injected_memories", 3)
+            "embedding_model": config.get("embedding_model", "")
         }
         
     async def initialize(self):
