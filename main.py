@@ -49,8 +49,8 @@ class MemoraConnectPlugin(Star):
             # 1. 注入相关记忆到上下文
             await self.memory_system.inject_memories_to_context(event)
             
-            # 2. 处理消息形成新记忆
-            await self.memory_system.process_message(event)
+            # 2. 使用优化后的单次LLM调用处理消息
+            await self.memory_system.process_message_optimized(event)
         except Exception as e:
             logger.error(f"on_message处理错误: {e}", exc_info=True)
     
@@ -116,6 +116,7 @@ class MemorySystem:
         self.memory_graph = MemoryGraph()
         self.llm_provider = None
         self.embedding_provider = None
+        self.batch_extractor = BatchMemoryExtractor(self)
         
         # 简化配置初始化
         config = config or {}
@@ -316,7 +317,7 @@ class MemorySystem:
             logger.error(f"保存记忆状态时发生未知错误: {e}")
     
     async def process_message(self, event: AstrMessageEvent):
-        """处理消息，形成记忆"""
+        """处理消息，形成记忆（旧方法，保留兼容性）"""
         try:
             # 获取对话历史
             history = await self.get_conversation_history(event)
@@ -344,9 +345,63 @@ class MemorySystem:
                     
         except Exception as e:
             logger.error(f"处理消息时出错: {e}")
+
+    async def process_message_optimized(self, event: AstrMessageEvent):
+        """优化的消息处理，使用单次LLM调用"""
+        try:
+            # 获取完整的对话历史
+            full_history = await self.get_conversation_history_full(event)
+            if not full_history:
+                return
+            
+            # 使用批量提取器，单次LLM调用获取多个记忆
+            extracted_memories = await self.batch_extractor.extract_memories_and_themes(full_history)
+            
+            if not extracted_memories:
+                return
+            
+            # 批量处理提取的记忆
+            themes = []
+            for memory_data in extracted_memories:
+                theme = memory_data["theme"]
+                memory_content = memory_data["memory_content"]
+                confidence = memory_data["confidence"]
+                
+                # 根据置信度调整记忆强度
+                base_strength = 1.0
+                adjusted_strength = base_strength * confidence
+                
+                # 添加概念和记忆
+                concept_id = self.memory_graph.add_concept(theme)
+                memory_id = self.memory_graph.add_memory(
+                    content=memory_content,
+                    concept_id=concept_id,
+                    strength=adjusted_strength
+                )
+                
+                themes.append(theme)
+                
+                logger.info(f"优化记忆创建: {theme} (置信度: {confidence})")
+            
+            # 建立概念之间的连接
+            if themes:
+                for concept_id in [self.memory_graph.concepts[cid].name for cid in self.memory_graph.concepts]:
+                    if concept_id in themes:
+                        self.establish_connections(concept_id, themes)
+            
+            # 触发回忆（降低频率以节省资源）
+            if random.random() < 0.2:  # 20%概率触发回忆
+                recalled = await self.recall_memories("", event)
+                if recalled:
+                    logger.info(f"优化模式触发了回忆: {len(recalled)}条")
+                    
+        except Exception as e:
+            logger.error(f"优化消息处理失败: {e}")
+            # 回退到旧方法
+            await self.process_message(event)
     
     async def get_conversation_history(self, event: AstrMessageEvent) -> List[str]:
-        """获取对话历史"""
+        """获取对话历史（兼容旧版本）"""
         try:
             uid = event.unified_msg_origin
             curr_cid = await self.context.conversation_manager.get_curr_conversation_id(uid)
@@ -358,6 +413,31 @@ class MemorySystem:
             return []
         except Exception as e:
             logger.error(f"获取对话历史失败: {e}")
+            return []
+
+    async def get_conversation_history_full(self, event: AstrMessageEvent) -> List[Dict[str, Any]]:
+        """获取包含完整信息的对话历史"""
+        try:
+            uid = event.unified_msg_origin
+            curr_cid = await self.context.conversation_manager.get_curr_conversation_id(uid)
+            if curr_cid:
+                conversation = await self.context.conversation_manager.get_conversation(uid, curr_cid)
+                if conversation and conversation.history:
+                    history = json.loads(conversation.history)
+                    # 添加发送者信息和时间戳
+                    full_history = []
+                    for msg in history[-8:]:  # 最近8条，避免token过多
+                        full_msg = {
+                            "role": msg.get("role", "user"),
+                            "content": msg.get("content", ""),
+                            "sender_name": msg.get("sender_name", "用户"),
+                            "timestamp": msg.get("timestamp", time.time())
+                        }
+                        full_history.append(full_msg)
+                    return full_history
+            return []
+        except Exception as e:
+            logger.error(f"获取完整对话历史失败: {e}")
             return []
     
     async def extract_themes(self, history: List[str]) -> List[str]:
@@ -1294,6 +1374,160 @@ class MemorySystem:
         formatted += "【当前对话】"
         
         return formatted
+
+
+class BatchMemoryExtractor:
+    """批量记忆提取器，通过单次LLM调用获取多个记忆点和主题"""
+    
+    def __init__(self, memory_system):
+        self.memory_system = memory_system
+    
+    async def extract_memories_and_themes(self, conversation_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        通过单次LLM调用同时提取主题和记忆内容
+        
+        Args:
+            conversation_history: 包含完整信息的对话历史，每项包含role, content, sender_name, timestamp
+            
+        Returns:
+            包含主题和记忆内容的列表，每项包含theme, memory_content, confidence
+        """
+        if not conversation_history:
+            return []
+        
+        # 构建包含完整信息的对话历史
+        formatted_history = self._format_conversation_history(conversation_history)
+        
+        prompt = f"""请从以下对话中提取有意义的记忆点和主题。对话包含完整的发送者信息和时间戳。
+
+对话历史：
+{formatted_history}
+
+任务要求：
+1. 识别3-5个核心主题或关键词
+2. 为每个主题生成一条简洁自然的记忆内容
+3. 评估每个记忆的可信度（0-1之间）
+4. 返回JSON格式，包含theme, memory_content, confidence字段
+
+返回格式：
+{{
+  "memories": [
+    {{
+      "theme": "主题1",
+      "memory_content": "关于这个主题的记忆内容",
+      "confidence": 0.85
+    }},
+    {{
+      "theme": "主题2",
+      "memory_content": "关于这个主题的记忆内容",
+      "confidence": 0.75
+    }}
+  ]
+}}
+
+要求：
+- 主题应该是对话的核心内容
+- 记忆内容要口语化、自然，像亲身经历
+- 每个记忆不超过50字
+- 只返回JSON，不要解释"""
+
+        try:
+            provider = await self.memory_system.get_llm_provider()
+            if not provider:
+                logger.warning("LLM提供商不可用，使用简单提取")
+                return await self._fallback_extraction(conversation_history)
+            
+            response = await provider.text_chat(
+                prompt=prompt,
+                contexts=[],
+                system_prompt="你是一个专业的记忆提取助手，请准确提取对话中的关键信息。"
+            )
+            
+            # 解析JSON响应
+            result = self._parse_batch_response(response.completion_text)
+            return result
+            
+        except Exception as e:
+            logger.error(f"批量记忆提取失败: {e}")
+            return await self._fallback_extraction(conversation_history)
+    
+    def _format_conversation_history(self, history: List[Dict[str, Any]]) -> str:
+        """格式化对话历史，包含完整信息"""
+        formatted_lines = []
+        for msg in history:
+            sender = msg.get('sender_name', '用户')
+            content = msg.get('content', '')
+            timestamp = msg.get('timestamp', '')
+            
+            # 格式化时间戳
+            if isinstance(timestamp, (int, float)):
+                dt = datetime.fromtimestamp(timestamp)
+                time_str = dt.strftime('%m-%d %H:%M')
+            else:
+                time_str = str(timestamp)
+            
+            formatted_lines.append(f"[{time_str}] {sender}: {content}")
+        
+        return "\n".join(formatted_lines)
+    
+    def _parse_batch_response(self, response_text: str) -> List[Dict[str, Any]]:
+        """解析批量提取的LLM响应"""
+        try:
+            # 提取JSON部分
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if not json_match:
+                logger.warning("未找到有效的JSON响应")
+                return []
+            
+            json_str = json_match.group(0)
+            data = json.loads(json_str)
+            
+            memories = data.get("memories", [])
+            # 过滤低置信度的记忆
+            filtered_memories = [
+                mem for mem in memories
+                if mem.get("confidence", 0) > 0.6
+            ]
+            
+            return filtered_memories
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON解析失败: {e}")
+            return []
+    
+    async def _fallback_extraction(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """回退到简单提取模式"""
+        if not history:
+            return []
+        
+        # 简单关键词提取
+        text = " ".join([msg.get('content', '') for msg in history])
+        themes = self._extract_simple_themes(text)
+        
+        memories = []
+        for theme in themes[:3]:
+            memory_content = f"我们聊过关于{theme}的事情"
+            memories.append({
+                "theme": theme,
+                "memory_content": memory_content,
+                "confidence": 0.5
+            })
+        
+        return memories
+    
+    def _extract_simple_themes(self, text: str) -> List[str]:
+        """简单主题提取"""
+        # 提取中文关键词
+        words = re.findall(r'\b[\u4e00-\u9fff]{2,4}\b', text)
+        word_freq = {}
+        
+        for word in words:
+            if len(word) >= 2 and word not in ["你好", "谢谢", "再见"]:
+                word_freq[word] = word_freq.get(word, 0) + 1
+        
+        # 返回频率最高的关键词
+        sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
+        return [word for word, freq in sorted_words[:5]]
 
 
 class MemoryGraph:
