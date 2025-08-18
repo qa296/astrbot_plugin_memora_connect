@@ -136,7 +136,7 @@ class MemorySystem:
     async def initialize(self):
         """初始化记忆系统"""
         migration = DatabaseMigration(self.db_path, self.context)
-        migration_success = await migration.run_migration_if_needed()
+        migration_success = await migration.run_smart_migration()
 
         if migration_success:
             self.load_memory_state()
@@ -147,92 +147,67 @@ class MemorySystem:
     def load_memory_state(self):
         """从数据库加载记忆状态"""
         import sqlite3
+        import os
+        
+        if not os.path.exists(self.db_path):
+            logger.info("数据库文件不存在，跳过加载")
+            return
+            
         try:
             logger.info(f"正在加载记忆数据库: {self.db_path}")
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # 创建表结构
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS concepts (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    last_accessed REAL NOT NULL,
-                    access_count INTEGER DEFAULT 0
-                )
-            ''')
-            
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS memories (
-                    id TEXT PRIMARY KEY,
-                    concept_id TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    last_accessed REAL NOT NULL,
-                    access_count INTEGER DEFAULT 0,
-                    strength REAL DEFAULT 1.0,
-                    FOREIGN KEY (concept_id) REFERENCES concepts (id)
-                )
-            ''')
-            
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS connections (
-                    id TEXT PRIMARY KEY,
-                    from_concept TEXT NOT NULL,
-                    to_concept TEXT NOT NULL,
-                    strength REAL DEFAULT 1.0,
-                    last_strengthened REAL NOT NULL,
-                    FOREIGN KEY (from_concept) REFERENCES concepts (id),
-                    FOREIGN KEY (to_concept) REFERENCES concepts (id)
-                )
-            ''')
-            
-            # 加载记忆图
-            cursor.execute("SELECT * FROM concepts")
-            concepts = cursor.fetchall()
-            for concept in concepts:
-                self.memory_graph.add_concept(
-                    name=concept[1],
-                    concept_id=concept[0],
-                    created_at=concept[2],
-                    last_accessed=concept[3],
-                    access_count=concept[4]
-                )
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
                 
-            cursor.execute("SELECT * FROM memories")
-            memories = cursor.fetchall()
-            for memory in memories:
-                self.memory_graph.add_memory(
-                    content=memory[2],
-                    concept_id=memory[1],
-                    memory_id=memory[0],
-                    created_at=memory[3],
-                    last_accessed=memory[4],
-                    access_count=memory[5],
-                    strength=memory[6]
-                )
+                # 检查表是否存在
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='concepts'")
+                if not cursor.fetchone():
+                    logger.info("数据库表不存在，跳过加载")
+                    return
                 
-            cursor.execute("SELECT * FROM connections")
-            connections = cursor.fetchall()
-            for conn in connections:
-                self.memory_graph.add_connection(
-                    from_concept=conn[1],
-                    to_concept=conn[2],
-                    strength=conn[3],
-                    connection_id=conn[0],
-                    last_strengthened=conn[4]
-                )
-                
-            conn.close()
+                # 加载概念
+                cursor.execute("SELECT id, name, created_at, last_accessed, access_count FROM concepts")
+                concepts = cursor.fetchall()
+                for concept_data in concepts:
+                    self.memory_graph.add_concept(
+                        concept_id=concept_data[0],
+                        name=concept_data[1],
+                        created_at=concept_data[2],
+                        last_accessed=concept_data[3],
+                        access_count=concept_data[4]
+                    )
+                    
+                # 加载记忆
+                cursor.execute("SELECT id, concept_id, content, created_at, last_accessed, access_count, strength FROM memories")
+                memories = cursor.fetchall()
+                for memory_data in memories:
+                    self.memory_graph.add_memory(
+                        content=memory_data[2],
+                        concept_id=memory_data[1],
+                        memory_id=memory_data[0],
+                        created_at=memory_data[3],
+                        last_accessed=memory_data[4],
+                        access_count=memory_data[5],
+                        strength=memory_data[6]
+                    )
+                    
+                # 加载连接
+                cursor.execute("SELECT id, from_concept, to_concept, strength, last_strengthened FROM connections")
+                connections = cursor.fetchall()
+                for conn_data in connections:
+                    self.memory_graph.add_connection(
+                        from_concept=conn_data[1],
+                        to_concept=conn_data[2],
+                        strength=conn_data[3],
+                        connection_id=conn_data[0],
+                        last_strengthened=conn_data[4]
+                    )
+                    
             logger.info(f"记忆系统已加载，包含 {len(concepts)} 个概念，{len(memories)} 条记忆")
             
+        except sqlite3.Error as e:
+            logger.error(f"加载记忆数据库失败: {e}")
         except Exception as e:
-            logger.info(f"加载记忆数据库时出现结构不匹配: {e}。启动智能迁移...")
-            # 在这里启动迁移流程
-            asyncio.run(self.run_migration())
-            # 迁移后再次尝试加载
-            self.load_memory_state()
+            logger.error(f"加载记忆状态时发生未知错误: {e}")
 
     def _create_database_schema(self):
         """创建初始数据库表结构"""
@@ -278,43 +253,64 @@ class MemorySystem:
         import sqlite3
         try:
             logger.info(f"正在保存记忆到数据库: {self.db_path}")
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
             
-            # 清空现有数据
-            cursor.execute("DELETE FROM connections")
-            cursor.execute("DELETE FROM memories")
-            cursor.execute("DELETE FROM concepts")
-            
-            # 保存概念
-            for concept in self.memory_graph.concepts.values():
-                cursor.execute('''
-                    INSERT INTO concepts (id, name, created_at, last_accessed, access_count)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (concept.id, concept.name, concept.created_at, concept.last_accessed, concept.access_count))
-            
-            # 保存记忆
-            for memory in self.memory_graph.memories.values():
-                cursor.execute('''
-                    INSERT INTO memories (id, concept_id, content, created_at, last_accessed, access_count, strength)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (memory.id, memory.concept_id, memory.content, memory.created_at,
-                      memory.last_accessed, memory.access_count, memory.strength))
-            
-            # 保存连接
-            for connection in self.memory_graph.connections:
-                cursor.execute('''
-                    INSERT INTO connections (id, from_concept, to_concept, strength, last_strengthened)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (connection.id, connection.from_concept, connection.to_concept,
-                      connection.strength, connection.last_strengthened))
-            
-            conn.commit()
-            conn.close()
-            logger.info("记忆状态已保存")
-            
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # 使用事务确保数据一致性
+                cursor.execute("BEGIN TRANSACTION")
+                
+                try:
+                    # 清空现有数据
+                    cursor.execute("DELETE FROM connections")
+                    cursor.execute("DELETE FROM memories")
+                    cursor.execute("DELETE FROM concepts")
+                    
+                    # 批量保存概念
+                    concept_data = [
+                        (c.id, c.name, c.created_at, c.last_accessed, c.access_count)
+                        for c in self.memory_graph.concepts.values()
+                    ]
+                    if concept_data:
+                        cursor.executemany('''
+                            INSERT INTO concepts (id, name, created_at, last_accessed, access_count)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', concept_data)
+                    
+                    # 批量保存记忆
+                    memory_data = [
+                        (m.id, m.concept_id, m.content, m.created_at, m.last_accessed, m.access_count, m.strength)
+                        for m in self.memory_graph.memories.values()
+                    ]
+                    if memory_data:
+                        cursor.executemany('''
+                            INSERT INTO memories (id, concept_id, content, created_at, last_accessed, access_count, strength)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ''', memory_data)
+                    
+                    # 批量保存连接
+                    connection_data = [
+                        (c.id, c.from_concept, c.to_concept, c.strength, c.last_strengthened)
+                        for c in self.memory_graph.connections
+                    ]
+                    if connection_data:
+                        cursor.executemany('''
+                            INSERT INTO connections (id, from_concept, to_concept, strength, last_strengthened)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', connection_data)
+                    
+                    conn.commit()
+                    logger.info(f"记忆状态已保存: {len(concept_data)}个概念, {len(memory_data)}条记忆, {len(connection_data)}个连接")
+                    
+                except Exception as e:
+                    conn.rollback()
+                    logger.error(f"保存记忆状态失败，已回滚: {e}")
+                    raise
+                    
+        except sqlite3.Error as e:
+            logger.error(f"数据库错误导致保存失败: {e}")
         except Exception as e:
-            logger.error(f"保存记忆状态失败: {e}")
+            logger.error(f"保存记忆状态时发生未知错误: {e}")
     
     async def process_message(self, event: AstrMessageEvent):
         """处理消息，形成记忆"""
@@ -432,7 +428,7 @@ class MemorySystem:
             对话内容：{" ".join(history[-3:])}
             
             要求：
-            1. 用第一人称
+            1. 用第三人称
             2. 简洁自然
             3. 包含关键信息
             4. 不超过50字
@@ -1114,14 +1110,17 @@ class MemorySystem:
                 provider = self.context.get_provider_by_id(provider_name)
                 if provider and hasattr(provider, 'text_chat'):
                     return provider
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"通过ID获取提供商失败: {e}")
                 
             # 回退到当前使用的提供商
-            return self.context.get_using_provider()
+            fallback_provider = self.context.get_using_provider()
+            if fallback_provider:
+                logger.info(f"使用回退LLM提供商: {getattr(fallback_provider, 'name', 'unknown')}")
+            return fallback_provider
         except Exception as e:
             logger.error(f"获取LLM提供商失败: {e}")
-            return self.context.get_using_provider()
+            return None
 
     async def get_embedding_provider(self):
         """获取嵌入模型提供商"""
