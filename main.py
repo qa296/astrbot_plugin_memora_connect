@@ -1475,26 +1475,44 @@ class BatchMemoryExtractor:
     def _parse_batch_response(self, response_text: str) -> List[Dict[str, Any]]:
         """解析批量提取的LLM响应"""
         try:
+            # 清理响应文本，处理中文引号
+            cleaned_text = response_text.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
+            
             # 提取JSON部分
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            json_match = re.search(r'\{.*\}', cleaned_text, re.DOTALL)
             if not json_match:
                 logger.warning("未找到有效的JSON响应")
                 return []
             
             json_str = json_match.group(0)
+            
+            # 确保JSON格式正确
+            json_str = re.sub(r',\s*}', '}', json_str)  # 移除末尾逗号
+            json_str = re.sub(r',\s*]', ']', json_str)  # 移除数组末尾逗号
+            
             data = json.loads(json_str)
             
             memories = data.get("memories", [])
-            # 过滤低置信度的记忆
-            filtered_memories = [
-                mem for mem in memories
-                if mem.get("confidence", 0) > 0.6
-            ]
+            if not isinstance(memories, list):
+                logger.warning("memories不是列表格式")
+                return []
+            
+            # 过滤和验证记忆
+            filtered_memories = []
+            for mem in memories:
+                if isinstance(mem, dict) and mem.get("confidence", 0) > 0.6:
+                    # 确保必需字段存在
+                    if "theme" in mem and "memory_content" in mem:
+                        filtered_memories.append({
+                            "theme": str(mem["theme"]),
+                            "memory_content": str(mem["memory_content"]),
+                            "confidence": float(mem.get("confidence", 0.7))
+                        })
             
             return filtered_memories
             
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON解析失败: {e}")
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"JSON解析失败: {e}, 响应: {response_text[:200]}...")
             return []
     
     async def _fallback_extraction(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
