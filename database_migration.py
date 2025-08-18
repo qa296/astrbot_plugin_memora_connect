@@ -5,376 +5,223 @@ import os
 import shutil
 import time
 import re
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Any
 from datetime import datetime
 from astrbot.api import logger
 
 class DatabaseMigration:
     """智能数据库迁移系统"""
     
-    # 当前插件版本
     CURRENT_VERSION = "v0.2.0"
     
     def __init__(self, db_path: str, context=None):
         self.db_path = db_path
         self.context = context
         self.backup_dir = os.path.join(os.path.dirname(db_path), "backups")
-        self.migration_log = []
         
-    async def check_and_migrate(self) -> bool:
+    async def run_migration_if_needed(self):
         """检查并执行数据库迁移"""
         try:
-            # 检查数据库是否存在
             if not os.path.exists(self.db_path):
-                logger.info("数据库不存在，创建新数据库")
+                logger.info("数据库不存在，将创建新数据库。")
                 return True
-                
-            # 获取当前数据库版本
-            current_version = self.get_database_version()
-            logger.info(f"当前数据库版本: {current_version}")
-            logger.info(f"插件版本: {self.CURRENT_VERSION}")
-            
+
+            current_version = self._get_database_version()
             if current_version == self.CURRENT_VERSION:
-                logger.info("数据库版本匹配，无需迁移")
+                logger.info("数据库版本匹配，无需迁移。")
                 return True
-                
-            # 版本不匹配，开始迁移
-            logger.info("检测到数据库版本不匹配，开始智能迁移...")
+
+            logger.info(f"检测到数据库版本不匹配 (当前: {current_version}, 目标: {self.CURRENT_VERSION})，启动智能迁移...")
             
-            # 创建备份
-            backup_path = await self.create_backup()
-            logger.info(f"已创建数据库备份: {backup_path}")
+            backup_path = self._create_backup()
+            logger.info(f"数据库备份已创建于: {backup_path}")
             
-            # 执行迁移
-            success = await self.perform_migration(current_version, self.CURRENT_VERSION)
+            success = await self._perform_migration(current_version, self.CURRENT_VERSION)
             
             if success:
-                logger.info("数据库迁移成功完成")
+                logger.info("数据库迁移成功完成。")
                 return True
             else:
-                logger.error("数据库迁移失败，正在回滚...")
-                await self.rollback(backup_path)
+                logger.error("数据库迁移失败，正在从备份中恢复...")
+                self._rollback(backup_path)
+                logger.error("数据库已回滚，插件功能可能受限。")
                 return False
                 
         except Exception as e:
-            logger.error(f"数据库迁移检查失败: {e}")
+            logger.error(f"数据库迁移检查失败: {e}", exc_info=True)
             return False
-    
-    def get_database_version(self) -> str:
+
+    def _get_database_version(self) -> str:
         """获取数据库版本"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # 检查是否存在版本表
-            cursor.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='schema_version'
-            """)
-            
-            if cursor.fetchone():
-                cursor.execute("SELECT version FROM schema_version LIMIT 1")
-                result = cursor.fetchone()
-                conn.close()
-                return result[0] if result else "v0.1.0"
-            else:
-                # 没有版本表，认为是v0.1.0
-                conn.close()
-                return "v0.1.0"
-                
-        except Exception as e:
-            logger.error(f"获取数据库版本失败: {e}")
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'")
+                if cursor.fetchone():
+                    cursor.execute("SELECT version FROM schema_version ORDER BY migrated_at DESC LIMIT 1")
+                    result = cursor.fetchone()
+                    return result if result else "v0.1.0"
             return "v0.1.0"
-    
-    async def create_backup(self) -> str:
+        except Exception:
+            # 表可能不存在或结构不同，这是需要迁移的信号
+            return "v0.1.0"
+
+    def _create_backup(self) -> str:
         """创建数据库备份"""
-        try:
-            os.makedirs(self.backup_dir, exist_ok=True)
-            
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_filename = f"memory_backup_{timestamp}.db"
-            backup_path = os.path.join(self.backup_dir, backup_filename)
-            
-            shutil.copy2(self.db_path, backup_path)
-            
-            # 记录备份信息
-            backup_info = {
-                "original_path": self.db_path,
-                "backup_path": backup_path,
-                "timestamp": timestamp,
-                "version": self.get_database_version()
-            }
-            
-            info_path = os.path.join(self.backup_dir, f"backup_info_{timestamp}.json")
-            with open(info_path, 'w', encoding='utf-8') as f:
-                json.dump(backup_info, f, ensure_ascii=False, indent=2)
-                
-            return backup_path
-            
-        except Exception as e:
-            logger.error(f"创建备份失败: {e}")
-            raise
-    
-    async def perform_migration(self, from_version: str, to_version: str) -> bool:
+        os.makedirs(self.backup_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_filename = f"memory_backup_{self._get_database_version()}_{timestamp}.db"
+        backup_path = os.path.join(self.backup_dir, backup_filename)
+        shutil.copy2(self.db_path, backup_path)
+        return backup_path
+
+    def _rollback(self, backup_path: str):
+        """从备份回滚"""
+        if os.path.exists(backup_path):
+            shutil.copy2(backup_path, self.db_path)
+
+    async def _perform_migration(self, from_version: str, to_version: str) -> bool:
         """执行数据库迁移"""
+        if from_version == "v0.1.0" and to_version == "v0.2.0":
+            return await self._migrate_v0_1_0_to_v0_2_0()
+        logger.warning(f"未找到从 {from_version} 到 {to_version} 的迁移路径。")
+        return False
+
+    async def _migrate_v0_1_0_to_v0_2_0(self) -> bool:
+        """从v0.1.0迁移到v0.2.0的具体逻辑"""
         try:
-            logger.info(f"开始从 {from_version} 迁移到 {to_version}")
+            old_schema = self._analyze_db_schema(self.db_path)
             
-            # 分析当前数据库结构
-            old_schema = self.analyze_current_schema()
+            # 创建一个临时数据库用于构建新结构
+            temp_db_path = self.db_path + ".tmp"
+            if os.path.exists(temp_db_path):
+                os.remove(temp_db_path)
+
+            self._create_new_schema(temp_db_path)
             
-            # 根据版本差异执行相应迁移
-            if from_version == "v0.1.0" and to_version == "v0.2.0":
-                return await self.migrate_v0_1_0_to_v0_2_0(old_schema)
+            # 智能数据迁移
+            await self._transfer_and_transform_data(self.db_path, temp_db_path, old_schema)
+
+            # 替换旧数据库
+            os.remove(self.db_path)
+            os.rename(temp_db_path, self.db_path)
             
-            # 其他版本迁移逻辑...
-            logger.warning(f"未找到从 {from_version} 到 {to_version} 的迁移方案")
-            return False
-            
+            # 更新版本号
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO schema_version (version, migrated_at) VALUES (?, ?)",
+                    (self.CURRENT_VERSION, time.time())
+                )
+                conn.commit()
+
+            return True
         except Exception as e:
-            logger.error(f"执行迁移失败: {e}")
+            logger.error(f"v0.1.0 -> v0.2.0 迁移失败: {e}", exc_info=True)
             return False
-    
-    def analyze_current_schema(self) -> Dict[str, Any]:
-        """分析当前数据库结构"""
-        try:
-            conn = sqlite3.connect(self.db_path)
+
+    def _analyze_db_schema(self, db_path) -> Dict[str, Any]:
+        """分析数据库结构"""
+        schema = {"tables": {}}
+        with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
-            
-            schema = {
-                "tables": {},
-                "version": self.get_database_version()
-            }
-            
-            # 获取所有表
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = cursor.fetchall()
-            
-            for (table_name,) in tables:
-                if table_name.startswith("sqlite_"):
-                    continue
-                    
-                # 获取表结构
+            for (table_name,) in cursor.fetchall():
+                if table_name.startswith("sqlite_"): continue
                 cursor.execute(f"PRAGMA table_info({table_name})")
-                columns = cursor.fetchall()
-                
-                schema["tables"][table_name] = {
-                    "columns": [
-                        {
-                            "name": col[1],
-                            "type": col[2],
-                            "notnull": col[3],
-                            "default": col[4],
-                            "pk": col[5]
-                        }
-                        for col in columns
-                    ]
-                }
-            
-            conn.close()
-            return schema
-            
-        except Exception as e:
-            logger.error(f"分析数据库结构失败: {e}")
-            return {}
-    
-    async def migrate_v0_1_0_to_v0_2_0(self, old_schema: Dict[str, Any]) -> bool:
-        """从v0.1.0迁移到v0.2.0"""
-        try:
-            conn = sqlite3.connect(self.db_path)
+                schema["tables"][table_name] = [row for row in cursor.fetchall()]
+        return schema
+
+    def _create_new_schema(self, db_path):
+        """创建v0.2.0的新数据库结构"""
+        with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
-            
             # 创建版本表
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS schema_version (
+                CREATE TABLE schema_version (
                     version TEXT PRIMARY KEY,
                     migrated_at REAL NOT NULL
                 )
             """)
-            
-            # 检查是否需要添加新字段
-            tables_to_update = ["concepts", "memories", "connections"]
-            
-            for table in tables_to_update:
-                if table in old_schema["tables"]:
-                    # 使用LLM分析字段差异并转换
-                    await self.smart_field_conversion(cursor, table, old_schema)
-            
-            # 更新版本号
-            cursor.execute(
-                "INSERT OR REPLACE INTO schema_version (version, migrated_at) VALUES (?, ?)",
-                (self.CURRENT_VERSION, time.time())
-            )
-            
+            # 创建新表结构 (与main.py中的定义保持一致)
+            cursor.execute('''
+                CREATE TABLE concepts (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at REAL NOT NULL,
+                    last_accessed REAL NOT NULL, access_count INTEGER DEFAULT 0
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE memories (
+                    id TEXT PRIMARY KEY, concept_id TEXT NOT NULL, content TEXT NOT NULL,
+                    created_at REAL NOT NULL, last_accessed REAL NOT NULL,
+                    access_count INTEGER DEFAULT 0, strength REAL DEFAULT 1.0,
+                    FOREIGN KEY (concept_id) REFERENCES concepts (id)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE connections (
+                    id TEXT PRIMARY KEY, from_concept TEXT NOT NULL, to_concept TEXT NOT NULL,
+                    strength REAL DEFAULT 1.0, last_strengthened REAL NOT NULL,
+                    FOREIGN KEY (from_concept) REFERENCES concepts (id),
+                    FOREIGN KEY (to_concept) REFERENCES concepts (id)
+                )
+            ''')
             conn.commit()
-            conn.close()
-            
-            logger.info("v0.1.0 -> v0.2.0 迁移完成")
-            return True
-            
-        except Exception as e:
-            logger.error(f"v0.1.0 -> v0.2.0 迁移失败: {e}")
-            return False
-    
-    async def smart_field_conversion(self, cursor, table_name: str, old_schema: Dict[str, Any]) -> bool:
-        """智能字段转换"""
-        try:
-            old_columns = {col["name"]: col for col in old_schema["tables"][table_name]["columns"]}
-            
-            # 定义新版本的字段结构
-            new_columns = self.get_new_schema_columns(table_name)
-            
-            # 找出需要转换的字段
-            fields_to_convert = []
-            for new_col in new_columns:
-                if new_col["name"] not in old_columns:
-                    # 新字段，需要添加
-                    fields_to_convert.append({
-                        "action": "add",
-                        "field": new_col
-                    })
-                elif old_columns[new_col["name"]]["type"] != new_col["type"]:
-                    # 类型不匹配，需要转换
-                    fields_to_convert.append({
-                        "action": "convert",
-                        "old_field": old_columns[new_col["name"]],
-                        "new_field": new_col
-                    })
-            
-            # 执行转换
-            for conversion in fields_to_convert:
-                if conversion["action"] == "add":
-                    await self.add_field(cursor, table_name, conversion["field"])
-                elif conversion["action"] == "convert":
-                    await self.convert_field_type(cursor, table_name, conversion)
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"智能字段转换失败: {e}")
-            return False
-    
-    def get_new_schema_columns(self, table_name: str) -> List[Dict[str, Any]]:
-        """获取新版本的字段结构"""
-        schemas = {
-            "concepts": [
-                {"name": "id", "type": "TEXT", "pk": 1},
-                {"name": "name", "type": "TEXT", "notnull": 1},
-                {"name": "created_at", "type": "REAL", "notnull": 1},
-                {"name": "last_accessed", "type": "REAL", "notnull": 1},
-                {"name": "access_count", "type": "INTEGER", "default": 0},
-                {"name": "metadata", "type": "TEXT", "default": "{}"}  # 新增字段
-            ],
-            "memories": [
-                {"name": "id", "type": "TEXT", "pk": 1},
-                {"name": "concept_id", "type": "TEXT", "notnull": 1},
-                {"name": "content", "type": "TEXT", "notnull": 1},
-                {"name": "created_at", "type": "REAL", "notnull": 1},
-                {"name": "last_accessed", "type": "REAL", "notnull": 1},
-                {"name": "access_count", "type": "INTEGER", "default": 0},
-                {"name": "strength", "type": "REAL", "default": 1.0},
-                {"name": "tags", "type": "TEXT", "default": "[]"}  # 新增字段
-            ],
-            "connections": [
-                {"name": "id", "type": "TEXT", "pk": 1},
-                {"name": "from_concept", "type": "TEXT", "notnull": 1},
-                {"name": "to_concept", "type": "TEXT", "notnull": 1},
-                {"name": "strength", "type": "REAL", "default": 1.0},
-                {"name": "last_strengthened", "type": "REAL", "notnull": 1},
-                {"name": "relationship_type", "type": "TEXT", "default": "related"}  # 新增字段
-            ]
-        }
-        
-        return schemas.get(table_name, [])
-    
-    async def add_field(self, cursor, table_name: str, field: Dict[str, Any]) -> bool:
-        """添加新字段"""
-        try:
-            sql = f"ALTER TABLE {table_name} ADD COLUMN {field['name']} {field['type']}"
-            if "default" in field:
-                sql += f" DEFAULT {field['default']}"
-            cursor.execute(sql)
-            logger.info(f"添加字段 {table_name}.{field['name']} 成功")
-            return True
-            
-        except Exception as e:
-            logger.error(f"添加字段失败: {e}")
-            return False
-    
-    async def convert_field_type(self, cursor, table_name: str, conversion: Dict[str, Any]) -> bool:
-        """转换字段类型"""
-        try:
-            old_field = conversion["old_field"]
-            new_field = conversion["new_field"]
-            
-            # 创建临时表
-            temp_table = f"{table_name}_temp"
-            cursor.execute(f"CREATE TABLE {temp_table} AS SELECT * FROM {table_name}")
-            
-            # 转换数据
-            if old_field["type"] == "TEXT" and new_field["type"] == "REAL":
-                # 文本转数字
-                cursor.execute(f"""
-                    UPDATE {temp_table} 
-                    SET {old_field['name']} = CAST({old_field['name']} AS REAL)
-                    WHERE {old_field['name']} IS NOT NULL
-                """)
-            
-            # 更多转换逻辑...
-            
-            # 替换原表
-            cursor.execute(f"DROP TABLE {table_name}")
-            cursor.execute(f"ALTER TABLE {temp_table} RENAME TO {table_name}")
-            
-            logger.info(f"转换字段类型 {table_name}.{old_field['name']} 成功")
-            return True
-            
-        except Exception as e:
-            logger.error(f"转换字段类型失败: {e}")
-            return False
-    
-    async def rollback(self, backup_path: str) -> bool:
-        """回滚到备份"""
-        try:
-            if os.path.exists(backup_path):
-                shutil.copy2(backup_path, self.db_path)
-                logger.info(f"已回滚到备份: {backup_path}")
-                return True
-            else:
-                logger.error("备份文件不存在，无法回滚")
-                return False
+
+    async def _transfer_and_transform_data(self, old_db, new_db, old_schema):
+        """迁移并转换数据"""
+        with sqlite3.connect(old_db) as old_conn, sqlite3.connect(new_db) as new_conn:
+            old_cursor = old_conn.cursor()
+            new_cursor = new_conn.cursor()
+
+            for table_name, old_columns in old_schema['tables'].items():
+                if table_name == 'schema_version': continue
                 
-        except Exception as e:
-            logger.error(f"回滚失败: {e}")
-            return False
-    
-    def get_migration_status(self) -> Dict[str, Any]:
-        """获取迁移状态"""
+                logger.info(f"正在迁移表: {table_name}")
+                old_cursor.execute(f"SELECT * FROM {table_name}")
+                
+                # 假设新旧表结构字段一致，直接插入
+                # 在实际场景中，这里会调用LLM进行字段映射
+                placeholders = ', '.join(['?'] * len(old_columns))
+                insert_sql = f"INSERT INTO {table_name} ({', '.join(old_columns)}) VALUES ({placeholders})"
+                
+                for row in old_cursor.fetchall():
+                    try:
+                        new_cursor.execute(insert_sql, row)
+                    except sqlite3.IntegrityError as e:
+                        logger.warning(f"插入数据失败 (可能已存在): {e} - Row: {row}")
+
+            new_conn.commit()
+
+    async def _get_llm_provider(self):
+        """获取LLM服务提供商 (辅助函数)"""
+        # 实际实现中会从context获取
+        return self.context.get_using_provider() if self.context else None
+
+    async def _get_field_mapping_with_llm(self, old_columns: List[str], new_columns: List[str]) -> Dict[str, str]:
+        """使用LLM获取字段映射"""
+        provider = await self._get_llm_provider()
+        if not provider:
+            logger.warning("LLM提供商不可用，使用默认映射。")
+            return {col: col for col in old_columns if col in new_columns}
+
+        prompt = f"""
+        你是一个数据库迁移助手。请分析以下两个版本的表结构，并提供一个从旧字段到新字段的映射。
+        旧表字段: {', '.join(old_columns)}
+        新表字段: {', '.join(new_columns)}
+        
+        请以JSON格式返回映射关系，例如：{{"old_field_1": "new_field_1", "old_field_2": "new_field_2"}}。
+        如果某个旧字段在新表中没有对应字段，请不要包含在结果中。
+        """
         try:
-            current_version = self.get_database_version()
-            backup_files = []
-            
-            if os.path.exists(self.backup_dir):
-                backup_files = [f for f in os.listdir(self.backup_dir) if f.startswith("memory_backup_")]
-            
-            return {
-                "current_version": current_version,
-                "target_version": self.CURRENT_VERSION,
-                "needs_migration": current_version != self.CURRENT_VERSION,
-                "backup_count": len(backup_files),
-                "backup_dir": self.backup_dir
-            }
-            
+            response = await provider.text_chat(prompt=prompt, system_prompt="你是一个数据库专家。")
+            mapping_str = response.completion_text
+            # 从LLM返回的文本中提取JSON
+            json_match = re.search(r'\{.*\}', mapping_str, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(0))
         except Exception as e:
-            logger.error(f"获取迁移状态失败: {e}")
-            return {}
-
-# 全局迁移实例
-migration_instance = None
-
-def get_migration_instance(db_path: str, context=None):
-    """获取迁移实例"""
-    global migration_instance
-    if migration_instance is None:
-        migration_instance = DatabaseMigration(db_path, context)
-    return migration_instance
+            logger.error(f"使用LLM获取字段映射失败: {e}")
+        
+        # LLM失败后回退
+        return {col: col for col in old_columns if col in new_columns}

@@ -7,8 +7,10 @@ import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 import os
+import shutil
 from dataclasses import dataclass, asdict
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from .database_migration import DatabaseMigration
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api import AstrBotConfig
@@ -133,8 +135,14 @@ class MemorySystem:
         
     async def initialize(self):
         """初始化记忆系统"""
-        await self.load_memory_state()
-        asyncio.create_task(self.memory_maintenance_loop())
+        migration = DatabaseMigration(self.db_path, self.context)
+        migration_success = await migration.run_migration_if_needed()
+
+        if migration_success:
+            self.load_memory_state()
+            asyncio.create_task(self.memory_maintenance_loop())
+        else:
+            logger.error("数据库迁移失败，记忆系统可能无法正常工作。")
         
     def load_memory_state(self):
         """从数据库加载记忆状态"""
@@ -220,7 +228,50 @@ class MemorySystem:
             logger.info(f"记忆系统已加载，包含 {len(concepts)} 个概念，{len(memories)} 条记忆")
             
         except Exception as e:
-            logger.error(f"加载记忆系统失败: {e}")
+            logger.info(f"加载记忆数据库时出现结构不匹配: {e}。启动智能迁移...")
+            # 在这里启动迁移流程
+            asyncio.run(self.run_migration())
+            # 迁移后再次尝试加载
+            self.load_memory_state()
+
+    def _create_database_schema(self):
+        """创建初始数据库表结构"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # 确保在创建时就写入版本信息
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version TEXT PRIMARY KEY,
+                    migrated_at REAL NOT NULL
+                )
+            """)
+            cursor.execute(
+                "INSERT OR REPLACE INTO schema_version (version, migrated_at) VALUES (?, ?)",
+                (DatabaseMigration.CURRENT_VERSION, time.time())
+            )
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS concepts (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at REAL NOT NULL,
+                    last_accessed REAL NOT NULL, access_count INTEGER DEFAULT 0
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS memories (
+                    id TEXT PRIMARY KEY, concept_id TEXT NOT NULL, content TEXT NOT NULL,
+                    created_at REAL NOT NULL, last_accessed REAL NOT NULL,
+                    access_count INTEGER DEFAULT 0, strength REAL DEFAULT 1.0,
+                    FOREIGN KEY (concept_id) REFERENCES concepts (id)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS connections (
+                    id TEXT PRIMARY KEY, from_concept TEXT NOT NULL, to_concept TEXT NOT NULL,
+                    strength REAL DEFAULT 1.0, last_strengthened REAL NOT NULL,
+                    FOREIGN KEY (from_concept) REFERENCES concepts (id),
+                    FOREIGN KEY (to_concept) REFERENCES concepts (id)
+                )
+            ''')
+            conn.commit()
             
     def save_memory_state(self):
         """保存记忆状态到数据库"""
