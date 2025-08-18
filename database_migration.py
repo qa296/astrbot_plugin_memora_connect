@@ -461,17 +461,3 @@ class DatabaseMigration(SmartDatabaseMigration):
         logger.info("调用兼容接口 run_migration_if_needed()，将执行智能迁移。")
         return await self.run_smart_migration()
         
-    def _get_database_version(self) -> str:
-        """
-        重写版本号获取。
-        这个方法在新的逻辑中不再被依赖，返回一个固定值以避免意外行为。
-        """
-        return self.CURRENT_VERSION
-        
-    async def _migrate_v0_1_0_to_v0_2_0(self) -> bool:
-        """
-        重写旧版本迁移方法。
-        直接调用智能迁移，确保即使旧的调用路径也能使用新系统。
-        """
-        logger.warning("检测到旧版本迁移路径 (_migrate_v0_1_0_to_v0_2_0)，将重定向到智能迁移。")
-        return await self.run_smart_migration()
