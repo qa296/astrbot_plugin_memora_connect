@@ -1502,15 +1502,24 @@ class BatchMemoryExtractor:
                 logger.warning("LLM提供商不可用，使用简单提取")
                 return await self._fallback_extraction(conversation_history)
             
-            response = await provider.text_chat(
-                prompt=prompt,
-                contexts=[],
-                system_prompt="你是一个专业的记忆提取助手，请准确提取对话中的关键信息。"
-            )
-            
-            # 解析JSON响应
-            result = self._parse_batch_response(response.completion_text)
-            return result
+            try:
+                response = await provider.text_chat(
+                    prompt=prompt,
+                    contexts=[],
+                    system_prompt="你是一个专业的记忆提取助手，请准确提取对话中的关键信息。"
+                )
+                
+                # 解析JSON响应
+                result = self._parse_batch_response(response.completion_text)
+                return result
+                
+            except Exception as e:
+                # 网络错误或LLM服务不可用
+                if "upstream" in str(e).lower() or "connection" in str(e).lower():
+                    logger.warning(f"LLM服务连接失败，使用简单提取: {e}")
+                else:
+                    logger.error(f"LLM调用失败: {e}")
+                return await self._fallback_extraction(conversation_history)
             
         except Exception as e:
             logger.error(f"批量记忆提取失败: {e}")
