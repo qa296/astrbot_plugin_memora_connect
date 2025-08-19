@@ -126,8 +126,8 @@ class MemorySystem:
             "forget_threshold_days": config.get("forget_threshold_days", 30),
             "consolidation_interval_hours": config.get("consolidation_interval_hours", 24),
             "max_memories_per_topic": config.get("max_memories_per_topic", 10),
-            "memory_formation_every_n": config.get("memory_formation_every_n", 5),
-            "recall_trigger_probability": config.get("recall_trigger_probability", 0.2),
+            "memory_formation_probability": config.get("memory_formation_probability", 0.3),
+            "recall_trigger_probability": config.get("recall_trigger_probability", 0.6),
             "enable_forgetting": config.get("enable_forgetting", True),
             "enable_consolidation": config.get("enable_consolidation", True),
             "bimodal_recall": config.get("bimodal_recall", True),
@@ -139,12 +139,18 @@ class MemorySystem:
         
     async def initialize(self):
         """初始化记忆系统"""
+        logger.info("开始初始化记忆系统...")
+        logger.info(f"数据库路径: {self.db_path}")
+        logger.info(f"配置参数: {json.dumps(self.memory_config, ensure_ascii=False, indent=2)}")
+        
         migration = DatabaseMigration(self.db_path, self.context)
         migration_success = await migration.run_smart_migration()
 
         if migration_success:
+            logger.info("数据库迁移成功")
             self.load_memory_state()
             asyncio.create_task(self.memory_maintenance_loop())
+            logger.info("记忆系统初始化完成")
         else:
             logger.error("数据库迁移失败，记忆系统可能无法正常工作。")
         
@@ -1178,21 +1184,33 @@ class MemorySystem:
         """根据关键词查找提供商，优先完全匹配"""
         providers = self.context.get_all_providers()
         
+        if not providers:
+            logger.warning("没有找到任何LLM提供商")
+            return None
+        
+        # 记录所有提供商名称用于调试
+        provider_names = [str(getattr(p, 'name', 'unknown')) for p in providers]
+        logger.debug(f"可用提供商: {provider_names}, 查找关键词: {keywords}")
+        
         # 优先完全匹配
         for provider in providers:
             provider_name = str(getattr(provider, 'name', '')).lower()
-            if provider_name in keywords:
-                if capability_check is None or capability_check(provider):
-                    return provider
+            for keyword in keywords:
+                if keyword.lower() in provider_name or provider_name in keyword.lower():
+                    if capability_check is None or capability_check(provider):
+                        logger.info(f"找到匹配的LLM提供商: {provider_name} (关键词: {keyword})")
+                        return provider
 
-        # 然后再进行模糊匹配
+        # 模糊匹配
         for provider in providers:
             provider_name = str(getattr(provider, 'name', '')).lower()
             for keyword in keywords:
-                if keyword in provider_name:
+                if keyword.lower() in provider_name:
                     if capability_check is None or capability_check(provider):
+                        logger.info(f"找到模糊匹配的LLM提供商: {provider_name} (关键词: {keyword})")
                         return provider
         
+        logger.warning(f"未找到匹配的LLM提供商，关键词: {keywords}")
         return None
 
     async def get_llm_provider(self):
@@ -1499,22 +1517,43 @@ class BatchMemoryExtractor:
     def _parse_batch_response(self, response_text: str) -> List[Dict[str, Any]]:
         """解析批量提取的LLM响应"""
         try:
-            # 清理响应文本，处理中文引号
-            cleaned_text = response_text.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
+            logger.debug(f"开始解析LLM响应: {response_text[:500]}...")
             
-            # 提取JSON部分
-            json_match = re.search(r'\{.*\}', cleaned_text, re.DOTALL)
-            if not json_match:
+            # 清理响应文本，处理中文引号和格式问题
+            cleaned_text = response_text
+            for old, new in [('“', '"'), ('”', '"'), ('‘', "'"), ('’', "'"), ('，', ','), ('：', ':')]:
+                cleaned_text = cleaned_text.replace(old, new)
+            
+            # 尝试多种JSON提取方式
+            json_patterns = [
+                r'\{[^{}]*"memories"[^{}]*\}',  # 简单JSON对象
+                r'\{.*"memories"\s*:\s*\[.*\].*\}',  # 包含memories数组的完整对象
+                r'\{.*\}',  # 最宽泛的匹配
+            ]
+            
+            json_str = None
+            for pattern in json_patterns:
+                matches = re.findall(pattern, cleaned_text, re.DOTALL)
+                if matches:
+                    json_str = matches[-1]  # 取最后一个匹配
+                    break
+            
+            if not json_str:
                 logger.warning("未找到有效的JSON响应")
                 return []
             
-            json_str = json_match.group(0)
+            # 修复常见的JSON格式问题
+            json_str = re.sub(r',\s*}', '}', json_str)
+            json_str = re.sub(r',\s*]', ']', json_str)
+            json_str = re.sub(r'([{,]\s*)(\w+):', r'\1"\2":', json_str)  # 修复未加引号的键
             
-            # 确保JSON格式正确
-            json_str = re.sub(r',\s*}', '}', json_str)  # 移除末尾逗号
-            json_str = re.sub(r',\s*]', ']', json_str)  # 移除数组末尾逗号
-            
-            data = json.loads(json_str)
+            try:
+                data = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                logger.warning(f"第一次JSON解析失败，尝试修复: {e}")
+                # 更激进的修复
+                json_str = re.sub(r'([{,]\s*)"([^"]*)"\s*:\s*([^",}\]]+)([,\}])', r'\1"\2": "\3"\4', json_str)
+                data = json.loads(json_str)
             
             memories = data.get("memories", [])
             if not isinstance(memories, list):
@@ -1523,30 +1562,36 @@ class BatchMemoryExtractor:
             
             # 过滤和验证记忆
             filtered_memories = []
-            for mem in memories:
+            for i, mem in enumerate(memories):
                 try:
-                    if isinstance(mem, dict) and float(mem.get("confidence", 0)) > 0.6:
-                        # 确保必需字段存在且为字符串
-                        theme = str(mem.get("theme", "")).strip()
-                        content = str(mem.get("memory_content", "")).strip()
+                    if not isinstance(mem, dict):
+                        logger.warning(f"跳过非字典的记忆数据: {type(mem)}")
+                        continue
+                    
+                    confidence = float(mem.get("confidence", 0.7))
+                    theme = str(mem.get("theme", "")).strip()
+                    content = str(mem.get("memory_content", "")).strip()
+                    
+                    # 清理主题中的特殊字符
+                    theme = re.sub(r'[^\w\u4e00-\u9fff]', '', theme)
+                    
+                    if theme and content and confidence > 0.3:  # 降低置信度阈值
+                        filtered_memories.append({
+                            "theme": theme,
+                            "memory_content": content,
+                            "confidence": max(0.0, min(1.0, confidence))
+                        })
+                        logger.debug(f"成功提取记忆 {i+1}: {theme}")
                         
-                        # 清理主题中的特殊字符
-                        theme = re.sub(r'[^\w\u4e00-\u9fff]', '', theme)
-                        
-                        if theme and content:
-                            filtered_memories.append({
-                                "theme": theme,
-                                "memory_content": content,
-                                "confidence": max(0.0, min(1.0, float(mem.get("confidence", 0.7))))
-                            })
                 except (ValueError, TypeError) as e:
                     logger.warning(f"跳过无效的记忆数据: {mem}, 错误: {e}")
                     continue
             
+            logger.info(f"成功解析 {len(filtered_memories)} 条记忆")
             return filtered_memories
             
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"JSON解析失败: {e}, 响应: {response_text[:200]}...")
+        except Exception as e:
+            logger.error(f"JSON解析失败: {e}, 响应: {response_text[:300]}...")
             return []
     
     async def _fallback_extraction(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

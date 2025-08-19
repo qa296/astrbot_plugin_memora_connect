@@ -138,7 +138,7 @@ class SmartDatabaseMigration:
             
             # 获取所有表
             cursor.execute("""
-                SELECT name, sql FROM sqlite_master 
+                SELECT name, sql FROM sqlite_master
                 WHERE type='table' AND name NOT LIKE 'sqlite_%'
             """)
             
@@ -148,19 +148,21 @@ class SmartDatabaseMigration:
                 # 分析字段
                 cursor.execute(f"PRAGMA table_info('{table_name}')")
                 for col in cursor.fetchall():
+                    # col结构: (cid, name, type, notnull, dflt_value, pk)
                     field = FieldSchema(
-                        name=str(col),
-                        type=str(col),
-                        not_null=bool(col),
-                        default_value=col,
-                        primary_key=bool(col)
+                        name=str(col[1]),
+                        type=str(col[2]),
+                        not_null=bool(col[3]),
+                        default_value=col[4],
+                        primary_key=bool(col[5])
                     )
                     table.fields.append(field)
                 
                 # 分析索引
                 cursor.execute(f"PRAGMA index_list('{table_name}')")
                 for idx in cursor.fetchall():
-                    table.indexes.append(str(idx))
+                    # idx结构: (seq, name, unique, origin, partial)
+                    table.indexes.append(str(idx[1]))
                 
                 schema.tables[table_name] = table
         
