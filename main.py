@@ -193,6 +193,14 @@ class MemorySystem:
         logger.info(f"配置的LLM提供商: {self.memory_config['llm_provider']}")
         logger.info(f"配置的嵌入提供商: {self.memory_config['embedding_provider']}")
         
+        # 检查数据库文件状态
+        logger.info(f"检查数据库文件: {self.db_path}")
+        if os.path.exists(self.db_path):
+            file_size = os.path.getsize(self.db_path)
+            logger.info(f"数据库文件存在，大小: {file_size} 字节")
+        else:
+            logger.info("数据库文件不存在，将创建新数据库")
+        
         # 强制测试指定的提供商，完全忽略AstrBot默认设置
         logger.info("=== 强制测试配置指定的提供商 ===")
         
@@ -235,16 +243,37 @@ class MemorySystem:
         else:
             logger.error("❌ 无法获取配置的嵌入提供商，请检查配置")
         
-        migration = DatabaseMigration(self.db_path, self.context)
-        migration_success = await migration.run_smart_migration()
-
-        if migration_success:
-            logger.info("数据库迁移成功")
-            self.load_memory_state()
-            asyncio.create_task(self.memory_maintenance_loop())
-            logger.info("记忆系统初始化完成")
-        else:
-            logger.error("数据库迁移失败，记忆系统可能无法正常工作。")
+        # 增强数据库迁移调试
+        logger.info("=== 开始数据库迁移检查 ===")
+        try:
+            migration = DatabaseMigration(self.db_path, self.context)
+            
+            # 检查当前数据库结构
+            if os.path.exists(self.db_path):
+                import sqlite3
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = cursor.fetchall()
+                    logger.info(f"当前数据库表: {[t[0] for t in tables]}")
+                    
+                    for table in [t[0] for t in tables]:
+                        cursor.execute(f"PRAGMA table_info('{table}')")
+                        columns = cursor.fetchall()
+                        logger.info(f"表 {table} 的列: {[c[1] for c in columns]}")
+            
+            migration_success = await migration.run_smart_migration()
+            
+            if migration_success:
+                logger.info("数据库迁移成功")
+                self.load_memory_state()
+                asyncio.create_task(self.memory_maintenance_loop())
+                logger.info("记忆系统初始化完成")
+            else:
+                logger.error("数据库迁移失败，记忆系统可能无法正常工作。")
+                
+        except Exception as e:
+            logger.error(f"数据库迁移过程异常: {e}", exc_info=True)
         
     def load_memory_state(self):
         """从数据库加载记忆状态"""
@@ -1329,7 +1358,7 @@ class MemorySystem:
             try:
                 judge_provider = self.context.get_provider_by_id(provider_id)
                 if judge_provider:
-                    logger.info(f"✅ 成功强制使用配置指定的LLM提供商: {provider_id}")
+                    logger.debug(f"成功使用配置指定的LLM提供商: {provider_id}")
                     return judge_provider
                 else:
                     logger.error(f"❌ 未找到提供商: {provider_id}")
@@ -1460,6 +1489,28 @@ class MemorySystem:
                 
         except Exception as e:
             logger.error(f"注入记忆到上下文失败: {e}")
+
+    async def recall_memories(self, keyword: str, event: AstrMessageEvent = None) -> List[str]:
+        """回忆相关记忆 - 统一的回忆接口"""
+        try:
+            if not self.memory_graph.memories:
+                return []
+                
+            # 根据配置的回忆模式选择合适的方法
+            recall_mode = self.memory_config["recall_mode"]
+            
+            if recall_mode == "llm":
+                return await self._recall_llm(keyword, event)
+            elif recall_mode == "embedding":
+                return await self._recall_embedding(keyword)
+            elif recall_mode == "activation":
+                return await self._recall_by_activation(keyword)
+            else:
+                return await self._recall_simple(keyword)
+                
+        except Exception as e:
+            logger.error(f"回忆记忆失败: {e}")
+            return await self._recall_simple(keyword)
 
     async def recall_relevant_memories(self, message: str) -> List[str]:
         """基于消息内容智能召回相关记忆 - 使用增强召回系统"""
