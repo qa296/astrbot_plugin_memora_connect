@@ -424,7 +424,7 @@ class MemorySystem:
                     themes.append(theme)
                     concept_ids.append(concept_id)  # 存储概念ID
                     
-                    logger.info(f"优化记忆创建: {theme} (置信度: {confidence})")
+                    logger.debug(f"优化记忆创建: {theme} (置信度: {confidence})")
                     
                 except (KeyError, ValueError, TypeError) as e:
                     logger.error(f"处理提取的记忆数据失败: {e}, 数据: {memory_data}")
@@ -454,7 +454,7 @@ class MemorySystem:
             if should_trigger:
                 recalled = await self.recall_memories("", event)
                 if recalled:
-                    logger.info(f"优化模式触发了回忆: {len(recalled)}条 (模式: {recall_mode})")
+                    logger.debug(f"优化模式触发了回忆: {len(recalled)}条 (模式: {recall_mode})")
                     
         except Exception as e:
             logger.error(f"优化消息处理失败: {e}", exc_info=True)
@@ -1095,7 +1095,7 @@ class MemorySystem:
         for memory_id in memories_to_remove:
             self.memory_graph.remove_memory(memory_id)
         
-        logger.info(f"遗忘机制：移除{len(memories_to_remove)}条记忆，{len(connections_to_remove)}个连接")
+        logger.debug(f"遗忘机制：移除{len(memories_to_remove)}条记忆，{len(connections_to_remove)}个连接")
     
     async def consolidate_memories(self):
         """记忆整理机制 - 智能合并相似记忆"""
@@ -1147,7 +1147,7 @@ class MemorySystem:
                                 self.memory_graph.remove_memory(mem_id)
         
         if consolidation_count > 0:
-            logger.info(f"记忆整理：合并了{consolidation_count}条相似记忆")
+            logger.debug(f"记忆整理：合并了{consolidation_count}条相似记忆")
     
     async def _merge_memories(self, memories: List['Memory']) -> str:
         """智能合并多条相似记忆"""
@@ -1600,7 +1600,7 @@ class BatchMemoryExtractor:
                     logger.warning(f"跳过无效的记忆数据: {mem}, 错误: {e}")
                     continue
             
-            logger.info(f"成功解析 {len(filtered_memories)} 条记忆")
+            logger.debug(f"成功解析 {len(filtered_memories)} 条记忆")
             return filtered_memories
             
         except Exception as e:
