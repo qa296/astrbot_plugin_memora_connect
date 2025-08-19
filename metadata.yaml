@@ -1,5 +1,5 @@
 name: astrbot_plugin_memora_connect # 这是你的插件的唯一识别名。
 desc: 一个模仿人类记忆方式的记忆插件。 # 插件简短描述
-version: v0.1.0 # 插件版本号。格式：v1.1.1 或者 v1.1
+version: v0.2.0 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: qa296 # 作者
 repo: https://github.com/qa296/astrbot_plugin_memora_connect # 插件的仓库地址
