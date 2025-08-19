@@ -23,7 +23,18 @@ class MemoraConnectPlugin(Star):
         super().__init__(context)
         data_dir = StarTools.get_data_dir() / "memora_connect"
         self.memory_system = MemorySystem(context, config, data_dir)
-        asyncio.create_task(self.memory_system.initialize())
+        self._initialized = False
+        asyncio.create_task(self._async_init())
+    
+    async def _async_init(self):
+        """异步初始化包装器"""
+        try:
+            logger.info("开始异步初始化记忆系统...")
+            await self.memory_system.initialize()
+            self._initialized = True
+            logger.info("记忆系统异步初始化完成")
+        except Exception as e:
+            logger.error(f"记忆系统初始化失败: {e}", exc_info=True)
         
     @filter.command("记忆")
     async def memory_command(self, event: AstrMessageEvent):
@@ -45,6 +56,10 @@ class MemoraConnectPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         """监听所有消息，形成记忆并注入相关记忆"""
+        if not self._initialized:
+            logger.debug("记忆系统尚未初始化完成，跳过消息处理")
+            return
+            
         try:
             # 1. 注入相关记忆到上下文
             await self.memory_system.inject_memories_to_context(event)
@@ -1231,26 +1246,15 @@ class MemorySystem:
 """
 
     async def get_llm_provider(self):
-        """获取LLM服务提供商 - 直接使用配置ID"""
+        """获取LLM服务提供商 - 简化版本"""
         try:
-            provider_id = self.memory_config['llm_provider']
+            # 直接使用AstrBot的当前提供商
+            provider = self.context.get_using_provider()
+            if provider:
+                logger.debug(f"使用当前LLM提供商: {getattr(provider, 'name', 'unknown')}")
+                return provider
             
-            # 1. 优先使用配置的提供商ID直接查找
-            try:
-                provider = self.context.get_provider_by_id(provider_id)
-                if provider and hasattr(provider, 'text_chat'):
-                    logger.debug(f"成功找到配置的LLM提供商: {provider_id}")
-                    return provider
-            except Exception as e:
-                logger.debug(f"通过ID获取提供商失败: {e}")
-            
-            # 2. 回退到当前使用的提供商
-            fallback_provider = self.context.get_using_provider()
-            if fallback_provider:
-                logger.debug(f"使用回退LLM提供商: {getattr(fallback_provider, 'name', 'unknown')}")
-                return fallback_provider
-                
-            logger.warning("没有找到可用的LLM提供商")
+            logger.warning("没有配置LLM提供商")
             return None
             
         except Exception as e:
