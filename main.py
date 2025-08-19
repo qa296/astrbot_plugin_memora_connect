@@ -143,6 +143,23 @@ class MemorySystem:
         logger.info(f"数据库路径: {self.db_path}")
         logger.info(f"配置参数: {json.dumps(self.memory_config, ensure_ascii=False, indent=2)}")
         
+        # 添加提供商配置调试信息
+        logger.info(f"配置的LLM提供商: {self.memory_config['llm_provider']}")
+        logger.info(f"配置的嵌入提供商: {self.memory_config['embedding_provider']}")
+        
+        # 测试提供商可用性
+        llm_provider = await self.get_llm_provider()
+        if llm_provider:
+            logger.info(f"LLM提供商测试成功: {getattr(llm_provider, 'name', 'unknown')}")
+        else:
+            logger.warning("LLM提供商测试失败，将使用回退机制")
+        
+        embedding_provider = await self.get_embedding_provider()
+        if embedding_provider:
+            logger.info(f"嵌入提供商测试成功: {getattr(embedding_provider, 'name', 'unknown')}")
+        else:
+            logger.warning("嵌入提供商测试失败，嵌入功能将不可用")
+        
         migration = DatabaseMigration(self.db_path, self.context)
         migration_success = await migration.run_smart_migration()
 
@@ -1213,88 +1230,50 @@ class MemorySystem:
 - 记忆整理: {'启用' if self.memory_config['enable_consolidation'] else '禁用'}
 """
 
-    def _find_provider_by_keywords(self, keywords: list, capability_check=None):
-        """根据关键词查找提供商，优先完全匹配"""
-        providers = self.context.get_all_providers()
-        
-        if not providers:
-            logger.warning("没有找到任何LLM提供商")
-            return None
-        
-        # 记录所有提供商名称用于调试
-        provider_names = [str(getattr(p, 'name', 'unknown')) for p in providers]
-        logger.debug(f"可用提供商: {provider_names}, 查找关键词: {keywords}")
-        
-        # 优先完全匹配
-        for provider in providers:
-            provider_name = str(getattr(provider, 'name', '')).lower()
-            for keyword in keywords:
-                if keyword.lower() in provider_name or provider_name in keyword.lower():
-                    if capability_check is None or capability_check(provider):
-                        logger.info(f"找到匹配的LLM提供商: {provider_name} (关键词: {keyword})")
-                        return provider
-
-        # 模糊匹配
-        for provider in providers:
-            provider_name = str(getattr(provider, 'name', '')).lower()
-            for keyword in keywords:
-                if keyword.lower() in provider_name:
-                    if capability_check is None or capability_check(provider):
-                        logger.info(f"找到模糊匹配的LLM提供商: {provider_name} (关键词: {keyword})")
-                        return provider
-        
-        logger.warning(f"未找到匹配的LLM提供商，关键词: {keywords}")
-        return None
-
     async def get_llm_provider(self):
-        """获取LLM服务提供商"""
+        """获取LLM服务提供商 - 直接使用配置ID"""
         try:
-            provider_name = self.memory_config['llm_provider'].lower()
-            keywords_map = {
-                "openai": ["openai"],
-                "azure": ["azure"],
-                "zhipu": ["zhipu", "glm"],
-                "moonshot": ["moonshot", "kimi"],
-                "anthropic": ["anthropic", "claude"],
-                "google": ["google", "gemini"]
-            }
+            provider_id = self.memory_config['llm_provider']
             
-            keywords = keywords_map.get(provider_name, [provider_name])
-            provider = self._find_provider_by_keywords(keywords, lambda p: hasattr(p, 'text_chat'))
-            
-            if provider:
-                return provider
-            
-            # 通过ID获取指定提供商
+            # 1. 优先使用配置的提供商ID直接查找
             try:
-                provider = self.context.get_provider_by_id(provider_name)
+                provider = self.context.get_provider_by_id(provider_id)
                 if provider and hasattr(provider, 'text_chat'):
+                    logger.info(f"成功找到配置的LLM提供商: {provider_id}")
                     return provider
             except Exception as e:
                 logger.debug(f"通过ID获取提供商失败: {e}")
-                
-            # 回退到当前使用的提供商
+            
+            # 2. 回退到当前使用的提供商
             fallback_provider = self.context.get_using_provider()
             if fallback_provider:
                 logger.info(f"使用回退LLM提供商: {getattr(fallback_provider, 'name', 'unknown')}")
-            return fallback_provider
+                return fallback_provider
+                
+            logger.warning("没有找到可用的LLM提供商")
+            return None
+            
         except Exception as e:
             logger.error(f"获取LLM提供商失败: {e}")
             return None
 
     async def get_embedding_provider(self):
-        """获取嵌入模型提供商"""
+        """获取嵌入模型提供商 - 直接使用配置ID"""
         try:
-            provider_name = self.memory_config['embedding_provider'].lower()
-            keywords_map = {
-                "openai": ["openai"],
-                "azure": ["azure"],
-                "zhipu": ["zhipu", "glm"],
-                "google": ["google", "gemini"]
-            }
+            provider_id = self.memory_config['embedding_provider']
             
-            keywords = keywords_map.get(provider_name, [provider_name])
-            return self._find_provider_by_keywords(keywords)
+            # 直接使用配置的提供商ID
+            try:
+                provider = self.context.get_provider_by_id(provider_id)
+                if provider:
+                    logger.info(f"成功找到配置的嵌入提供商: {provider_id}")
+                    return provider
+            except Exception as e:
+                logger.debug(f"通过ID获取嵌入提供商失败: {e}")
+                
+            logger.warning(f"未找到配置的嵌入提供商: {provider_id}")
+            return None
+            
         except Exception as e:
             logger.error(f"获取嵌入提供商失败: {e}")
             return None
