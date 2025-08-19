@@ -141,13 +141,13 @@ class MemorySystem:
         """初始化记忆系统"""
         logger.info("开始初始化记忆系统...")
         logger.info(f"数据库路径: {self.db_path}")
-        logger.info(f"配置参数: {json.dumps(self.memory_config, ensure_ascii=False, indent=2)}")
+        logger.info(f"配置参数: {json.dumps({k:v for k,v in self.memory_config.items() if k not in ['llm_system_prompt']}, ensure_ascii=False, indent=2)}")
         
-        # 添加提供商配置调试信息
+        # 添加提供商配置调试信息（仅初始化时显示）
         logger.info(f"配置的LLM提供商: {self.memory_config['llm_provider']}")
         logger.info(f"配置的嵌入提供商: {self.memory_config['embedding_provider']}")
         
-        # 测试提供商可用性
+        # 测试提供商可用性（仅初始化时测试）
         llm_provider = await self.get_llm_provider()
         if llm_provider:
             logger.info(f"LLM提供商测试成功: {getattr(llm_provider, 'name', 'unknown')}")
@@ -1239,7 +1239,7 @@ class MemorySystem:
             try:
                 provider = self.context.get_provider_by_id(provider_id)
                 if provider and hasattr(provider, 'text_chat'):
-                    logger.info(f"成功找到配置的LLM提供商: {provider_id}")
+                    logger.debug(f"成功找到配置的LLM提供商: {provider_id}")
                     return provider
             except Exception as e:
                 logger.debug(f"通过ID获取提供商失败: {e}")
@@ -1247,7 +1247,7 @@ class MemorySystem:
             # 2. 回退到当前使用的提供商
             fallback_provider = self.context.get_using_provider()
             if fallback_provider:
-                logger.info(f"使用回退LLM提供商: {getattr(fallback_provider, 'name', 'unknown')}")
+                logger.debug(f"使用回退LLM提供商: {getattr(fallback_provider, 'name', 'unknown')}")
                 return fallback_provider
                 
             logger.warning("没有找到可用的LLM提供商")
@@ -1266,7 +1266,7 @@ class MemorySystem:
             try:
                 provider = self.context.get_provider_by_id(provider_id)
                 if provider:
-                    logger.info(f"成功找到配置的嵌入提供商: {provider_id}")
+                    logger.debug(f"成功找到配置的嵌入提供商: {provider_id}")
                     return provider
             except Exception as e:
                 logger.debug(f"通过ID获取嵌入提供商失败: {e}")
