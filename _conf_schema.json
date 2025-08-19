@@ -83,5 +83,30 @@
     "type": "string",
     "hint": "指定要使用的嵌入模型名称，留空将使用提供商的默认模型",
     "default": ""
+  },
+  "max_injected_memories": {
+    "description": "最大注入记忆数",
+    "type": "int",
+    "hint": "每次对话中最多注入多少条相关记忆到LLM上下文",
+    "default": 5
+  },
+  "enable_enhanced_recall": {
+    "description": "启用增强记忆召回",
+    "type": "bool",
+    "hint": "是否启用新的多维度记忆召回系统，能召回更多相关记忆",
+    "default": true
+  },
+  "memory_injection_threshold": {
+    "description": "记忆注入阈值",
+    "type": "float",
+    "hint": "记忆相关性阈值，低于此值的记忆不会被注入(0-1)",
+    "default": 0.3
+  },
+  "auto_inject_memories": {
+    "description": "自动注入记忆",
+    "type": "bool",
+    "hint": "是否在每次对话中自动注入相关记忆到LLM上下文",
+    "default": true
   }
 }
+

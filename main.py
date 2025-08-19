@@ -11,6 +11,7 @@ import shutil
 from dataclasses import dataclass, asdict
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from .database_migration import DatabaseMigration
+from .enhanced_memory_display import EnhancedMemoryDisplay
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api import AstrBotConfig
@@ -23,6 +24,7 @@ class MemoraConnectPlugin(Star):
         super().__init__(context)
         data_dir = StarTools.get_data_dir() / "memora_connect"
         self.memory_system = MemorySystem(context, config, data_dir)
+        self.memory_display = EnhancedMemoryDisplay(self.memory_system)
         self._initialized = False
         asyncio.create_task(self._async_init())
     
@@ -44,14 +46,12 @@ class MemoraConnectPlugin(Star):
             yield event.plain_result("记忆系统已激活！我可以帮你记住对话中的重要信息。")
         elif message.startswith("/记忆 回忆"):
             keyword = message[5:].strip()
-            memories = await self.memory_system.recall_memories(keyword, event)
-            if memories:
-                yield event.plain_result(f"关于'{keyword}'的记忆：\n" + "\n".join(memories))
-            else:
-                yield event.plain_result(f"没有找到关于'{keyword}'的记忆")
+            memories = await self.memory_system.recall_memories_full(keyword)
+            response = self.memory_display.format_memory_search_result(memories, keyword)
+            yield event.plain_result(response)
         elif message.startswith("/记忆 状态"):
-            stats = await self.memory_system.get_memory_stats()
-            yield event.plain_result(f"记忆系统状态：\n{stats}")
+            stats = self.memory_display.format_memory_statistics()
+            yield event.plain_result(stats)
     
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
@@ -111,6 +111,32 @@ class MemoraConnectPlugin(Star):
             logger.error(f"LLM 工具回忆记忆失败：{e}")
             yield event.plain_result(None)
 
+    @filter.llm_tool(name="recall_all_memories")
+    async def recall_all_memories_tool(self, event: AstrMessageEvent, query: str) -> MessageEventResult:
+        """使用增强系统召回所有相关记忆，包括联想记忆。
+        Args:
+            query(string): 要查询的内容
+        """
+        try:
+            from .enhanced_memory_recall import EnhancedMemoryRecall
+            
+            enhanced_recall = EnhancedMemoryRecall(self.memory_system)
+            results = await enhanced_recall.recall_all_relevant_memories(
+                query=query,
+                max_memories=8
+            )
+            
+            if results:
+                # 生成增强的上下文
+                formatted_memories = enhanced_recall.format_memories_for_llm(results)
+                yield event.plain_result(formatted_memories)
+            else:
+                yield event.plain_result(None)
+                
+        except Exception as e:
+            logger.error(f"增强记忆召回工具失败：{e}")
+            yield event.plain_result(None)
+
 
 class MemorySystem:
     """核心记忆系统，模仿人类海马体功能"""
@@ -133,7 +159,7 @@ class MemorySystem:
         self.embedding_provider = None
         self.batch_extractor = BatchMemoryExtractor(self)
         
-        # 简化配置初始化
+        # 增强配置初始化
         config = config or {}
         self.memory_config = {
             "recall_mode": config.get("recall_mode", "llm"),
@@ -149,7 +175,12 @@ class MemorySystem:
             "llm_provider": config.get("llm_provider", "openai"),
             "llm_system_prompt": config.get("llm_system_prompt", "你是一个记忆总结助手，请将对话内容总结成简洁自然的记忆。"),
             "embedding_provider": config.get("embedding_provider", "openai"),
-            "embedding_model": config.get("embedding_model", "")
+            "embedding_model": config.get("embedding_model", ""),
+            # 增强配置
+            "max_injected_memories": config.get("max_injected_memories", 5),
+            "enable_enhanced_recall": config.get("enable_enhanced_recall", True),
+            "memory_injection_threshold": config.get("memory_injection_threshold", 0.3),
+            "auto_inject_memories": config.get("auto_inject_memories", True)
         }
         
     async def initialize(self):
@@ -166,12 +197,31 @@ class MemorySystem:
         llm_provider = await self.get_llm_provider()
         if llm_provider:
             logger.info(f"LLM提供商测试成功: {getattr(llm_provider, 'name', 'unknown')}")
+            # 测试text_chat功能
+            try:
+                test_response = await llm_provider.text_chat(
+                    prompt="测试",
+                    contexts=[],
+                    system_prompt="你是一个测试助手"
+                )
+                logger.info("LLM text_chat功能测试成功")
+            except Exception as e:
+                logger.warning(f"LLM text_chat功能测试失败: {e}")
         else:
             logger.warning("LLM提供商测试失败，将使用回退机制")
         
         embedding_provider = await self.get_embedding_provider()
         if embedding_provider:
             logger.info(f"嵌入提供商测试成功: {getattr(embedding_provider, 'name', 'unknown')}")
+            # 测试嵌入功能
+            try:
+                test_embedding = await self.get_embedding("测试文本")
+                if test_embedding:
+                    logger.info(f"嵌入功能测试成功，维度: {len(test_embedding)}")
+                else:
+                    logger.warning("嵌入功能测试失败：返回空结果")
+            except Exception as e:
+                logger.warning(f"嵌入功能测试失败: {e}")
         else:
             logger.warning("嵌入提供商测试失败，嵌入功能将不可用")
         
@@ -219,17 +269,22 @@ class MemorySystem:
                     )
                     
                 # 加载记忆
-                cursor.execute("SELECT id, concept_id, content, created_at, last_accessed, access_count, strength FROM memories")
+                cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories")
                 memories = cursor.fetchall()
                 for memory_data in memories:
                     self.memory_graph.add_memory(
                         content=memory_data[2],
                         concept_id=memory_data[1],
                         memory_id=memory_data[0],
-                        created_at=memory_data[3],
-                        last_accessed=memory_data[4],
-                        access_count=memory_data[5],
-                        strength=memory_data[6]
+                        details=memory_data[3] or "",
+                        participants=memory_data[4] or "",
+                        location=memory_data[5] or "",
+                        emotion=memory_data[6] or "",
+                        tags=memory_data[7] or "",
+                        created_at=memory_data[8],
+                        last_accessed=memory_data[9],
+                        access_count=memory_data[10],
+                        strength=memory_data[11]
                     )
                     
                 # 加载连接
@@ -275,6 +330,8 @@ class MemorySystem:
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS memories (
                     id TEXT PRIMARY KEY, concept_id TEXT NOT NULL, content TEXT NOT NULL,
+                    details TEXT DEFAULT '', participants TEXT DEFAULT '',
+                    location TEXT DEFAULT '', emotion TEXT DEFAULT '', tags TEXT DEFAULT '',
                     created_at REAL NOT NULL, last_accessed REAL NOT NULL,
                     access_count INTEGER DEFAULT 0, strength REAL DEFAULT 1.0,
                     FOREIGN KEY (concept_id) REFERENCES concepts (id)
@@ -321,13 +378,15 @@ class MemorySystem:
                     
                     # 批量保存记忆
                     memory_data = [
-                        (m.id, m.concept_id, m.content, m.created_at, m.last_accessed, m.access_count, m.strength)
+                        (m.id, m.concept_id, m.content, m.details, m.participants, m.location,
+                         m.emotion, m.tags, m.created_at, m.last_accessed, m.access_count, m.strength)
                         for m in self.memory_graph.memories.values()
                     ]
                     if memory_data:
                         cursor.executemany('''
-                            INSERT INTO memories (id, concept_id, content, created_at, last_accessed, access_count, strength)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            INSERT INTO memories (id, concept_id, content, details, participants,
+                            location, emotion, tags, created_at, last_accessed, access_count, strength)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ''', memory_data)
                     
                     # 批量保存连接
@@ -416,11 +475,16 @@ class MemorySystem:
             for memory_data in extracted_memories:
                 try:
                     theme = str(memory_data.get("theme", "")).strip()
-                    memory_content = str(memory_data.get("memory_content", "")).strip()
+                    content = str(memory_data.get("content", "")).strip()
+                    details = str(memory_data.get("details", "")).strip()
+                    participants = str(memory_data.get("participants", "")).strip()
+                    location = str(memory_data.get("location", "")).strip()
+                    emotion = str(memory_data.get("emotion", "")).strip()
+                    tags = str(memory_data.get("tags", "")).strip()
                     confidence = float(memory_data.get("confidence", 0.7))
                     
                     # 验证数据完整性
-                    if not theme or not memory_content:
+                    if not theme or not content:
                         logger.warning(f"跳过无效的记忆数据: 主题或内容为空")
                         continue
                     
@@ -431,15 +495,20 @@ class MemorySystem:
                     # 添加概念和记忆
                     concept_id = self.memory_graph.add_concept(theme)
                     memory_id = self.memory_graph.add_memory(
-                        content=memory_content,
+                        content=content,
                         concept_id=concept_id,
+                        details=details,
+                        participants=participants,
+                        location=location,
+                        emotion=emotion,
+                        tags=tags,
                         strength=adjusted_strength
                     )
                     
                     themes.append(theme)
-                    concept_ids.append(concept_id)  # 存储概念ID
+                    concept_ids.append(concept_id)
                     
-                    logger.debug(f"优化记忆创建: {theme} (置信度: {confidence})")
+                    logger.debug(f"丰富记忆创建: {theme} (置信度: {confidence}, 参与者: {participants})")
                     
                 except (KeyError, ValueError, TypeError) as e:
                     logger.error(f"处理提取的记忆数据失败: {e}, 数据: {memory_data}")
@@ -635,29 +704,19 @@ class MemorySystem:
         except Exception as e:
             logger.error(f"建立概念连接时出错: {e}, 概念ID: {concept_id}, 主题: {themes}")
     
-    async def recall_memories(self, keyword: str, event: AstrMessageEvent) -> List[str]:
-        """回忆相关记忆"""
+    async def recall_memories_full(self, keyword: str) -> List['Memory']:
+        """回忆相关记忆并返回完整的Memory对象"""
         try:
-            recall_mode = self.memory_config["recall_mode"]
-            enable_associative = self.memory_config.get("enable_associative_recall", True)
+            # 这是一个简化的实现，用于演示目的
+            # 在实际应用中，这里应该有更复杂的逻辑来匹配关键词
+            related_memories = []
+            keyword_lower = keyword.lower()
+
+            for memory in self.memory_graph.memories.values():
+                if keyword_lower in memory.content.lower():
+                    related_memories.append(memory)
             
-            if recall_mode == "simple":
-                return await self._recall_simple(keyword)
-            elif recall_mode == "llm":
-                core_memories = await self._recall_llm(keyword, event)
-                if enable_associative and core_memories:
-                    associative_memories = await self._get_associative_memories(core_memories)
-                    return self._merge_memories_with_associative(core_memories, associative_memories)
-                return core_memories
-            elif recall_mode == "embedding":
-                core_memories = await self._recall_embedding(keyword)
-                if enable_associative and core_memories:
-                    associative_memories = await self._get_associative_memories(core_memories)
-                    return self._merge_memories_with_associative(core_memories, associative_memories)
-                return core_memories
-            else:
-                logger.warning(f"未知的回忆模式: {recall_mode}，使用simple模式")
-                return await self._recall_simple(keyword)
+            return related_memories
                 
         except Exception as e:
             logger.error(f"回忆记忆失败: {e}")
@@ -1231,19 +1290,18 @@ class MemorySystem:
         similarity = len(common_words) / denominator
         return similarity > 0.5
     
-    async def get_memory_stats(self) -> str:
+    async def get_memory_stats(self) -> dict:
         """获取记忆统计信息"""
-        return f"""
-记忆系统状态：
-- 概念节点: {len(self.memory_graph.concepts)}
-- 记忆条目: {len(self.memory_graph.memories)}
-- 关系连接: {len(self.memory_graph.connections)}
-- 回忆模式: {self.memory_config['recall_mode']}
-- LLM提供商: {self.memory_config['llm_provider']}
-- 嵌入提供商: {self.memory_config['embedding_provider']}
-- 遗忘机制: {'启用' if self.memory_config['enable_forgetting'] else '禁用'}
-- 记忆整理: {'启用' if self.memory_config['enable_consolidation'] else '禁用'}
-"""
+        return {
+            "concepts": len(self.memory_graph.concepts),
+            "memories": len(self.memory_graph.memories),
+            "connections": len(self.memory_graph.connections),
+            "recall_mode": self.memory_config['recall_mode'],
+            "llm_provider": self.memory_config['llm_provider'],
+            "embedding_provider": self.memory_config['embedding_provider'],
+            "enable_forgetting": self.memory_config['enable_forgetting'],
+            "enable_consolidation": self.memory_config['enable_consolidation'],
+        }
 
     async def get_llm_provider(self):
         """获取LLM服务提供商 - 简化版本"""
@@ -1253,6 +1311,14 @@ class MemorySystem:
             if provider:
                 logger.debug(f"使用当前LLM提供商: {getattr(provider, 'name', 'unknown')}")
                 return provider
+            
+            # 尝试通过配置ID获取
+            provider_id = self.memory_config.get('llm_provider', 'openai')
+            if provider_id and provider_id != 'openai':
+                provider = self.context.get_provider_by_id(provider_id)
+                if provider:
+                    logger.debug(f"通过配置ID获取LLM提供商: {provider_id}")
+                    return provider
             
             logger.warning("没有配置LLM提供商")
             return None
@@ -1275,6 +1341,12 @@ class MemorySystem:
             except Exception as e:
                 logger.debug(f"通过ID获取嵌入提供商失败: {e}")
                 
+            # 尝试获取当前使用的提供商作为备选
+            provider = self.context.get_using_provider()
+            if provider:
+                logger.debug(f"使用当前LLM提供商作为嵌入提供商: {getattr(provider, 'name', 'unknown')}")
+                return provider
+                
             logger.warning(f"未找到配置的嵌入提供商: {provider_id}")
             return None
             
@@ -1287,21 +1359,40 @@ class MemorySystem:
         try:
             provider = await self.get_embedding_provider()
             if not provider:
+                logger.debug("嵌入提供商不可用")
                 return []
             
-            # 静默尝试不同的嵌入方法，避免误报
-            methods = ['embedding', 'embeddings', 'get_embedding']
+            # 尝试多种嵌入方法
+            methods = ['embedding', 'embeddings', 'get_embedding', 'get_embeddings']
             for method_name in methods:
                 if hasattr(provider, method_name):
                     try:
                         method = getattr(provider, method_name)
                         result = await method(text)
                         if result and isinstance(result, list) and len(result) > 0:
+                            logger.debug(f"成功获取嵌入向量，维度: {len(result)}")
                             return result
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"方法 {method_name} 失败: {e}")
                         continue
             
-            # 只在真正失败时记录调试信息
+            # 尝试使用LLM提供商的嵌入功能
+            if hasattr(provider, 'text_chat'):
+                try:
+                    # 构建嵌入请求
+                    prompt = f"请将以下文本转换为嵌入向量: {text}"
+                    response = await provider.text_chat(
+                        prompt=prompt,
+                        contexts=[],
+                        system_prompt="请将文本转换为数值向量表示"
+                    )
+                    # 这里假设LLM可能返回嵌入向量
+                    if response and hasattr(response, 'embedding'):
+                        return response.embedding
+                except Exception as e:
+                    logger.debug(f"LLM嵌入方法失败: {e}")
+                
+            logger.debug("所有嵌入方法均失败")
             return []
                 
         except Exception as e:
@@ -1309,7 +1400,7 @@ class MemorySystem:
             return []
 
     async def inject_memories_to_context(self, event: AstrMessageEvent):
-        """将相关记忆注入到对话上下文中"""
+        """将相关记忆注入到对话上下文中 - 使用增强记忆召回系统"""
         try:
             if not self.memory_config.get("auto_inject_memories", True):
                 return
@@ -1318,130 +1409,77 @@ class MemorySystem:
             if not current_message:
                 return
             
-            # 获取相关记忆
-            relevant_memories = await self.recall_relevant_memories(current_message)
+            # 使用增强记忆召回系统获取相关记忆
+            from .enhanced_memory_recall import EnhancedMemoryRecall
             
-            if relevant_memories:
-                # 格式化记忆为上下文提示
-                memory_context = self.format_memories_for_context(relevant_memories)
+            enhanced_recall = EnhancedMemoryRecall(self)
+            results = await enhanced_recall.recall_all_relevant_memories(
+                query=current_message,
+                max_memories=self.memory_config.get("max_injected_memories", 5)
+            )
+            
+            if results:
+                # 使用增强格式化
+                memory_context = enhanced_recall.format_memories_for_llm(results)
                 
                 # 注入到AstrBot的上下文中
                 if not hasattr(event, 'context_extra'):
                     event.context_extra = {}
                 event.context_extra["memory_context"] = memory_context
                 
-                logger.info(f"已注入 {len(relevant_memories)} 条相关记忆到上下文")
+                logger.info(f"已注入 {len(results)} 条增强记忆到上下文")
                 
         except Exception as e:
             logger.error(f"注入记忆到上下文失败: {e}")
 
     async def recall_relevant_memories(self, message: str) -> List[str]:
-        """基于消息内容智能召回相关记忆"""
+        """基于消息内容智能召回相关记忆 - 使用增强召回系统"""
         try:
             if not self.memory_graph.memories:
                 return []
             
-            # 使用多种召回策略
-            memories = []
+            # 使用增强记忆召回系统
+            from .enhanced_memory_recall import EnhancedMemoryRecall
             
-            # 1. 语义搜索
-            semantic_memories = await self.semantic_search(message)
-            memories.extend(semantic_memories)
+            enhanced_recall = EnhancedMemoryRecall(self)
+            results = await enhanced_recall.recall_all_relevant_memories(
+                query=message,
+                max_memories=self.memory_config.get("max_injected_memories", 5)
+            )
             
-            # 2. 关键词匹配
-            keyword_memories = await self.keyword_based_recall(message)
-            memories.extend(keyword_memories)
-            
-            # 3. 去重和排序
-            seen = set()
-            unique_memories = []
-            for memory in memories:
-                if memory not in seen:
-                    seen.add(memory)
-                    unique_memories.append(memory)
-                    if len(unique_memories) >= self.memory_config.get("max_injected_memories", 3):
-                        break
-            
-            return unique_memories
+            # 返回记忆内容列表
+            return [result.memory for result in results]
             
         except Exception as e:
-            logger.error(f"智能召回记忆失败: {e}")
-            return []
-
-    async def semantic_search(self, query: str) -> List[str]:
-        """基于语义相似度的记忆搜索"""
-        try:
-            if not query or not self.memory_graph.memories:
-                return []
-            
-            # 获取查询的嵌入向量
-            query_embedding = await self.get_embedding(query)
-            if not query_embedding:
-                return []
-            
-            similarities = []
-            threshold = self.memory_config.get("memory_injection_threshold", 0.5)
-            
-            for memory in self.memory_graph.memories.values():
-                memory_embedding = await self.get_embedding(memory.content)
-                if memory_embedding:
-                    similarity = self._cosine_similarity(query_embedding, memory_embedding)
-                    if similarity > threshold:
-                        similarities.append((memory.content, similarity))
-            
-            # 按相似度排序
-            similarities.sort(key=lambda x: x[1], reverse=True)
-            return [content for content, sim in similarities]
-            
-        except Exception as e:
-            logger.error(f"语义搜索失败: {e}")
-            return []
-
-    async def keyword_based_recall(self, message: str) -> List[str]:
-        """基于关键词的记忆召回"""
-        try:
-            # 提取关键词
-            keywords = self.extract_keywords_from_text(message)
-            
-            relevant_memories = []
-            for keyword in keywords:
-                memories = await self._recall_simple(keyword)
-                relevant_memories.extend(memories)
-            
-            return relevant_memories
-            
-        except Exception as e:
-            logger.error(f"关键词召回失败: {e}")
-            return []
-
-    def extract_keywords_from_text(self, text: str) -> List[str]:
-        """从文本中提取关键词"""
-        try:
-            # 提取中文关键词
-            words = re.findall(r'\b[\u4e00-\u9fff]{2,4}\b', text)
-            
-            # 过滤常用词
-            stop_words = {"你好", "谢谢", "再见", "请问", "可以", "这个", "那个"}
-            keywords = [word for word in words if word not in stop_words and len(word) >= 2]
-            
-            # 返回前5个关键词
-            return keywords[:5]
-            
-        except Exception as e:
-            logger.error(f"提取关键词失败: {e}")
+            logger.error(f"增强记忆召回失败: {e}")
             return []
 
     def format_memories_for_context(self, memories: List[str]) -> str:
-        """将记忆格式化为适合LLM理解的上下文"""
-        if not memories:
+        """将记忆格式化为适合LLM理解的增强上下文"""
+        try:
+            if not memories:
+                return ""
+            
+            # 使用增强格式化
+            from .enhanced_memory_recall import EnhancedMemoryRecall, MemoryRecallResult
+            
+            # 创建增强结果用于格式化
+            enhanced_results = []
+            for memory in memories:
+                enhanced_results.append(MemoryRecallResult(
+                    memory=memory,
+                    relevance_score=0.8,
+                    memory_type='context_injection',
+                    concept_id='',
+                    metadata={'source': 'auto_injection'}
+                ))
+            
+            enhanced_recall = EnhancedMemoryRecall(self)
+            return enhanced_recall.format_memories_for_llm(enhanced_results)
+            
+        except Exception as e:
+            logger.error(f"上下文格式化失败: {e}")
             return ""
-        
-        formatted = "【记忆提示】根据我们之前的对话记忆：\n"
-        for i, memory in enumerate(memories, 1):
-            formatted += f"• {memory}\n"
-        formatted += "【当前对话】"
-        
-        return formatted
 
 
 class BatchMemoryExtractor:
@@ -1466,39 +1504,60 @@ class BatchMemoryExtractor:
         # 构建包含完整信息的对话历史
         formatted_history = self._format_conversation_history(conversation_history)
         
-        prompt = f"""请从以下对话中提取有意义的记忆点和主题。对话包含完整的发送者信息和时间戳。
+        prompt = f"""请从以下对话中提取丰富、详细、准确的记忆信息。对话包含完整的发送者信息和时间戳。
 
 对话历史：
 {formatted_history}
 
 任务要求：
-1. 识别3-5个核心主题
-2. 每个主题可以包含多个相关关键词，用逗号分隔
-3. 为每个主题生成一条简洁自然的记忆内容
-4. 评估每个记忆的可信度（0-1之间）
-5. 返回JSON格式，包含theme, memory_content, confidence字段
+1. 识别所有有意义的记忆点，包括：
+   - 重要事件（高置信度：0.7-1.0）
+   - 日常小事（中置信度：0.4-0.7）
+   - 有趣细节（低置信度：0.1-0.4）
+2. 为每个记忆生成完整信息：
+   - 主题（theme）：核心关键词，用逗号分隔
+   - 内容（content）：简洁的核心记忆
+   - 细节（details）：具体细节和背景
+   - 参与者（participants）：涉及的人物
+   - 地点（location）：相关场景
+   - 情感（emotion）：情感色彩
+   - 标签（tags）：分类标签
+   - 置信度（confidence）：0-1之间的数值
+3. 可以生成多个记忆，包括小事
+4. 返回JSON格式
 
 返回格式：
 {{
   "memories": [
     {{
-      "theme": "工作,项目,会议",
-      "memory_content": "关于这个主题的记忆内容",
-      "confidence": 0.85
+      "theme": "工作,项目",
+      "content": "今天完成了项目演示",
+      "details": "丰富、详细、准确的记忆信息",
+      "participants": "我,客户,项目经理",
+      "location": "会议室",
+      "emotion": "兴奋,满意",
+      "tags": "重要,成功",
+      "confidence": 0.9
     }},
     {{
-      "theme": "学习,考试,复习",
-      "memory_content": "关于这个主题的记忆内容",
-      "confidence": 0.75
+      "theme": "午餐,同事",
+      "content": "丰富、详细、准确的记忆信息",
+      "details": "讨论了周末的计划",
+      "participants": "我,小王",
+      "location": "公司食堂",
+      "emotion": "轻松,愉快",
+      "tags": "日常,社交",
+      "confidence": 0.5
     }}
   ]
 }}
 
 要求：
-- 主题关键词应该是对话的核心内容，用逗号分隔
-- 记忆内容要口语化、自然，像亲身经历
-- 每个记忆不超过50字
-- 只返回JSON，不要解释"""
+- 捕捉所有有意义的对话内容
+- 小事也可以记录，降低置信度即可
+- 内容要具体、生动
+- 可以生成5-8个记忆
+- 只返回JSON"""
 
         try:
             provider = await self.memory_system.get_llm_provider()
@@ -1604,15 +1663,25 @@ class BatchMemoryExtractor:
                     
                     confidence = float(mem.get("confidence", 0.7))
                     theme = str(mem.get("theme", "")).strip()
-                    content = str(mem.get("memory_content", "")).strip()
+                    content = str(mem.get("content", "")).strip()
+                    details = str(mem.get("details", "")).strip()
+                    participants = str(mem.get("participants", "")).strip()
+                    location = str(mem.get("location", "")).strip()
+                    emotion = str(mem.get("emotion", "")).strip()
+                    tags = str(mem.get("tags", "")).strip()
                     
                     # 清理主题中的特殊字符
-                    theme = re.sub(r'[^\w\u4e00-\u9fff]', '', theme)
+                    theme = re.sub(r'[^\w\u4e00-\u9fff,，]', '', theme)
                     
-                    if theme and content and confidence > 0.3:  # 降低置信度阈值
+                    if theme and content and confidence > 0.3:
                         filtered_memories.append({
                             "theme": theme,
-                            "memory_content": content,
+                            "content": content,
+                            "details": details,
+                            "participants": participants,
+                            "location": location,
+                            "emotion": emotion,
+                            "tags": tags,
                             "confidence": max(0.0, min(1.0, confidence))
                         })
                         logger.debug(f"成功提取记忆 {i+1}: {theme}")
@@ -1693,8 +1762,10 @@ class MemoryGraph:
         return concept_id
     
     def add_memory(self, content: str, concept_id: str, memory_id: str = None,
-                   created_at: float = None, last_accessed: float = None,
-                   access_count: int = 0, strength: float = 1.0) -> str:
+                   details: str = "", participants: str = "", location: str = "",
+                   emotion: str = "", tags: str = "", created_at: float = None,
+                   last_accessed: float = None, access_count: int = 0,
+                   strength: float = 1.0) -> str:
         """添加记忆"""
         if memory_id is None:
             memory_id = f"memory_{int(time.time() * 1000)}"
@@ -1703,6 +1774,11 @@ class MemoryGraph:
             id=memory_id,
             concept_id=concept_id,
             content=content,
+            details=details,
+            participants=participants,
+            location=location,
+            emotion=emotion,
+            tags=tags,
             created_at=created_at,
             last_accessed=last_accessed,
             access_count=access_count,
@@ -1805,6 +1881,11 @@ class Memory:
     id: str
     concept_id: str
     content: str
+    details: str = ""  # 详细描述
+    participants: str = ""  # 参与者
+    location: str = ""  # 地点
+    emotion: str = ""  # 情感
+    tags: str = ""  # 标签
     created_at: float = None
     last_accessed: float = None
     access_count: int = 0

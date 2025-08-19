@@ -183,12 +183,17 @@ class SmartDatabaseMigration:
         ]
         schema.tables["concepts"] = concepts_table
         
-        # 记忆表
+        # 记忆表 - 增强版，包含更多详细信息
         memories_table = TableSchema(name="memories")
         memories_table.fields = [
             FieldSchema(name="id", type="TEXT", primary_key=True),
             FieldSchema(name="concept_id", type="TEXT", not_null=True),
             FieldSchema(name="content", type="TEXT", not_null=True),
+            FieldSchema(name="details", type="TEXT", default_value=""),
+            FieldSchema(name="participants", type="TEXT", default_value=""),
+            FieldSchema(name="location", type="TEXT", default_value=""),
+            FieldSchema(name="emotion", type="TEXT", default_value=""),
+            FieldSchema(name="tags", type="TEXT", default_value=""),
             FieldSchema(name="created_at", type="REAL", not_null=True),
             FieldSchema(name="last_accessed", type="REAL", not_null=True),
             FieldSchema(name="access_count", type="INTEGER", default_value=0),
