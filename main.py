@@ -193,41 +193,47 @@ class MemorySystem:
         logger.info(f"配置的LLM提供商: {self.memory_config['llm_provider']}")
         logger.info(f"配置的嵌入提供商: {self.memory_config['embedding_provider']}")
         
-        # 测试提供商可用性（仅初始化时测试）
+        # 强制测试指定的提供商，完全忽略AstrBot默认设置
+        logger.info("=== 强制测试配置指定的提供商 ===")
+        
+        # 测试LLM提供商
         llm_provider = await self.get_llm_provider()
         if llm_provider:
             provider_name = getattr(llm_provider, 'name', 'unknown')
             provider_id = getattr(llm_provider, 'id', 'unknown')
-            logger.info(f"LLM提供商测试成功: {provider_name} (ID: {provider_id})")
+            logger.info(f"✅ 成功强制使用LLM提供商: {provider_name} (ID: {provider_id})")
+            
             # 测试text_chat功能
             try:
                 test_response = await llm_provider.text_chat(
-                    prompt="测试",
+                    prompt="这是一个测试消息，请回复'测试成功'",
                     contexts=[],
-                    system_prompt="你是一个测试助手"
+                    system_prompt="你是一个测试助手，请简洁回复"
                 )
-                logger.info("LLM text_chat功能测试成功")
+                logger.info(f"✅ LLM text_chat功能测试成功: {test_response.completion_text[:50]}...")
             except Exception as e:
-                logger.warning(f"LLM text_chat功能测试失败: {e}")
+                logger.error(f"❌ LLM text_chat功能测试失败: {e}")
         else:
-            logger.warning("LLM提供商测试失败，将使用回退机制")
+            logger.error("❌ 无法获取配置的LLM提供商，请检查配置")
         
+        # 测试嵌入提供商
         embedding_provider = await self.get_embedding_provider()
         if embedding_provider:
             provider_name = getattr(embedding_provider, 'name', 'unknown')
             provider_id = getattr(embedding_provider, 'id', 'unknown')
-            logger.info(f"嵌入提供商测试成功: {provider_name} (ID: {provider_id})")
+            logger.info(f"✅ 成功强制使用嵌入提供商: {provider_name} (ID: {provider_id})")
+            
             # 测试嵌入功能
             try:
                 test_embedding = await self.get_embedding("测试文本")
                 if test_embedding:
-                    logger.info(f"嵌入功能测试成功，维度: {len(test_embedding)}")
+                    logger.info(f"✅ 嵌入功能测试成功，维度: {len(test_embedding)}")
                 else:
-                    logger.warning("嵌入功能测试失败：返回空结果")
+                    logger.warning("⚠️ 嵌入功能测试失败：返回空结果")
             except Exception as e:
-                logger.warning(f"嵌入功能测试失败: {e}")
+                logger.error(f"❌ 嵌入功能测试失败: {e}")
         else:
-            logger.warning("嵌入提供商测试失败，嵌入功能将不可用")
+            logger.error("❌ 无法获取配置的嵌入提供商，请检查配置")
         
         migration = DatabaseMigration(self.db_path, self.context)
         migration_success = await migration.run_smart_migration()
@@ -1308,23 +1314,41 @@ class MemorySystem:
         }
 
     async def get_llm_provider(self):
-        """获取LLM服务提供商 - 强制使用配置文件指定的提供商"""
+        """获取LLM服务提供商 - 完全强制使用配置文件指定的提供商"""
         try:
-            # 优先使用配置文件指定的提供商
-            provider_id = self.memory_config.get('llm_provider', 'openai')
-            if provider_id and provider_id != 'openai':
-                provider = self.context.get_provider_by_id(provider_id)
-                if provider:
-                    logger.info(f"强制使用配置指定的LLM提供商: {provider_id}")
+            # 完全强制使用配置文件指定的提供商
+            provider_id = self.memory_config.get('llm_provider', 'rdaojqxp')
+            
+            # 获取所有已注册的提供商
+            all_providers = self.context.get_all_providers()
+            logger.debug(f"所有可用提供商: {[getattr(p, 'id', 'unknown') for p in all_providers]}")
+            
+            # 精确匹配配置的提供商ID
+            for provider in all_providers:
+                if hasattr(provider, 'id') and provider.id == provider_id:
+                    logger.info(f"成功强制使用配置指定的LLM提供商: {provider_id}")
                     return provider
             
-            # 回退到当前使用的提供商
-            provider = self.context.get_using_provider()
+            # 如果找不到，尝试通过ID获取
+            provider = self.context.get_provider_by_id(provider_id)
             if provider:
-                logger.debug(f"使用当前LLM提供商: {getattr(provider, 'name', 'unknown')}")
+                logger.info(f"通过ID强制使用LLM提供商: {provider_id}")
                 return provider
             
-            logger.warning("没有配置LLM提供商")
+            # 最后尝试通过名称匹配
+            for provider in all_providers:
+                if hasattr(provider, 'meta') and hasattr(provider.meta, 'name'):
+                    if provider.meta.name == provider_id:
+                        logger.info(f"通过名称匹配强制使用LLM提供商: {provider_id}")
+                        return provider
+            
+            logger.error(f"无法找到配置的LLM提供商: {provider_id}，将使用第一个可用提供商")
+            if all_providers:
+                fallback_provider = all_providers[0]
+                logger.warning(f"使用回退提供商: {getattr(fallback_provider, 'id', 'unknown')}")
+                return fallback_provider
+            
+            logger.error("没有任何可用的LLM提供商")
             return None
             
         except Exception as e:
@@ -1332,26 +1356,34 @@ class MemorySystem:
             return None
 
     async def get_embedding_provider(self):
-        """获取嵌入模型提供商 - 强制使用配置文件指定的提供商"""
+        """获取嵌入模型提供商 - 完全强制使用配置文件指定的提供商"""
         try:
             provider_id = self.memory_config['embedding_provider']
             
-            # 强制使用配置的提供商ID
-            try:
-                provider = self.context.get_provider_by_id(provider_id)
-                if provider:
-                    logger.info(f"强制使用配置指定的嵌入提供商: {provider_id}")
+            # 获取所有已注册的提供商
+            all_providers = self.context.get_all_providers()
+            logger.debug(f"所有可用嵌入提供商: {[getattr(p, 'id', 'unknown') for p in all_providers]}")
+            
+            # 精确匹配配置的提供商ID
+            for provider in all_providers:
+                if hasattr(provider, 'id') and provider.id == provider_id:
+                    logger.info(f"成功强制使用配置指定的嵌入提供商: {provider_id}")
                     return provider
-            except Exception as e:
-                logger.warning(f"通过ID获取嵌入提供商失败: {provider_id}, 错误: {e}")
-                
-            # 回退到当前使用的提供商
-            provider = self.context.get_using_provider()
+            
+            # 如果找不到，尝试通过ID获取
+            provider = self.context.get_provider_by_id(provider_id)
             if provider:
-                logger.debug(f"使用当前LLM提供商作为嵌入提供商: {getattr(provider, 'name', 'unknown')}")
+                logger.info(f"通过ID强制使用嵌入提供商: {provider_id}")
                 return provider
-                
-            logger.warning(f"未找到配置的嵌入提供商: {provider_id}")
+            
+            # 最后尝试通过名称匹配
+            for provider in all_providers:
+                if hasattr(provider, 'meta') and hasattr(provider.meta, 'name'):
+                    if provider.meta.name == provider_id:
+                        logger.info(f"通过名称匹配强制使用嵌入提供商: {provider_id}")
+                        return provider
+            
+            logger.error(f"无法找到配置的嵌入提供商: {provider_id}")
             return None
             
         except Exception as e:
