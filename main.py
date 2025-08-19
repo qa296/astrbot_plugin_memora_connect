@@ -511,6 +511,9 @@ class MemorySystem:
             themes = []
             concept_ids = []  # 存储创建的概念ID
             
+            # 获取记忆形成概率
+            formation_probability = self.memory_config.get("memory_formation_probability", 0.3)
+            
             for memory_data in extracted_memories:
                 try:
                     theme = str(memory_data.get("theme", "")).strip()
@@ -525,6 +528,11 @@ class MemorySystem:
                     # 验证数据完整性
                     if not theme or not content:
                         logger.warning(f"跳过无效的记忆数据: 主题或内容为空")
+                        continue
+                    
+                    # 根据记忆形成概率决定是否创建记忆
+                    if random.random() > formation_probability:
+                        logger.debug(f"跳过记忆创建: {theme} (概率: {formation_probability})")
                         continue
                     
                     # 根据置信度调整记忆强度
@@ -547,7 +555,7 @@ class MemorySystem:
                     themes.append(theme)
                     concept_ids.append(concept_id)
                     
-                    logger.debug(f"丰富记忆创建: {theme} (置信度: {confidence}, 参与者: {participants})")
+                    logger.debug(f"丰富记忆创建: {theme} (置信度: {confidence}, 概率: {formation_probability}, 参与者: {participants})")
                     
                 except (KeyError, ValueError, TypeError) as e:
                     logger.error(f"处理提取的记忆数据失败: {e}, 数据: {memory_data}")
