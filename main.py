@@ -201,7 +201,7 @@ class MemorySystem:
         if llm_provider:
             provider_name = getattr(llm_provider, 'name', 'unknown')
             provider_id = getattr(llm_provider, 'id', 'unknown')
-            logger.info(f"✅ 成功强制使用LLM提供商: {provider_name} (ID: {provider_id})")
+            logger.info(f"✅ 成功使用LLM提供商: {provider_name} (ID: {provider_id})")
             
             # 测试text_chat功能
             try:
@@ -546,7 +546,14 @@ class MemorySystem:
                 should_trigger = random.random() < trigger_probability
             
             if should_trigger:
-                recalled = await self.recall_memories("", event)
+                # 修复：使用正确的回忆方法
+                if recall_mode == "llm":
+                    recalled = await self._recall_llm("", event)
+                elif recall_mode == "embedding":
+                    recalled = await self._recall_embedding("")
+                else:
+                    recalled = await self._recall_simple("")
+                    
                 if recalled:
                     logger.debug(f"优化模式触发了回忆: {len(recalled)}条 (模式: {recall_mode})")
                     
@@ -1316,40 +1323,26 @@ class MemorySystem:
     async def get_llm_provider(self):
         """获取LLM服务提供商 - 完全强制使用配置文件指定的提供商"""
         try:
-            # 完全强制使用配置文件指定的提供商
             provider_id = self.memory_config.get('llm_provider', 'rdaojqxp')
             
-            # 获取所有已注册的提供商
-            all_providers = self.context.get_all_providers()
-            logger.debug(f"所有可用提供商: {[getattr(p, 'id', 'unknown') for p in all_providers]}")
-            
-            # 精确匹配配置的提供商ID
-            for provider in all_providers:
-                if hasattr(provider, 'id') and provider.id == provider_id:
-                    logger.info(f"成功强制使用配置指定的LLM提供商: {provider_id}")
-                    return provider
-            
-            # 如果找不到，尝试通过ID获取
-            provider = self.context.get_provider_by_id(provider_id)
-            if provider:
-                logger.info(f"通过ID强制使用LLM提供商: {provider_id}")
-                return provider
-            
-            # 最后尝试通过名称匹配
-            for provider in all_providers:
-                if hasattr(provider, 'meta') and hasattr(provider.meta, 'name'):
-                    if provider.meta.name == provider_id:
-                        logger.info(f"通过名称匹配强制使用LLM提供商: {provider_id}")
-                        return provider
-            
-            logger.error(f"无法找到配置的LLM提供商: {provider_id}，将使用第一个可用提供商")
-            if all_providers:
-                fallback_provider = all_providers[0]
-                logger.warning(f"使用回退提供商: {getattr(fallback_provider, 'id', 'unknown')}")
-                return fallback_provider
-            
-            logger.error("没有任何可用的LLM提供商")
-            return None
+            # 使用示例代码中的精确方法
+            try:
+                judge_provider = self.context.get_provider_by_id(provider_id)
+                if judge_provider:
+                    logger.info(f"✅ 成功强制使用配置指定的LLM提供商: {provider_id}")
+                    return judge_provider
+                else:
+                    logger.error(f"❌ 未找到提供商: {provider_id}")
+                    
+                    # 列出所有可用提供商供调试
+                    all_providers = self.context.get_all_providers()
+                    available_ids = [getattr(p, 'id', str(p)) for p in all_providers]
+                    logger.error(f"可用提供商: {available_ids}")
+                    
+                    return None
+            except Exception as e:
+                logger.error(f"获取提供商失败: {e}")
+                return None
             
         except Exception as e:
             logger.error(f"获取LLM提供商失败: {e}")
