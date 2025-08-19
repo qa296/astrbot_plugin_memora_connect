@@ -1285,11 +1285,36 @@ class MemorySystem:
             if not provider:
                 return []
             
-            # 使用提供商的嵌入功能
-            if hasattr(provider, 'embedding'):
-                return await provider.embedding(text)
-            else:
-                logger.warning("提供商不支持嵌入功能")
+            # 检查提供商是否支持嵌入功能
+            has_embedding = (
+                hasattr(provider, 'embedding') or
+                hasattr(provider, 'embeddings') or
+                hasattr(provider, 'get_embedding')
+            )
+            
+            if not has_embedding:
+                logger.debug(f"提供商 {getattr(provider, 'name', 'unknown')} 不支持嵌入功能")
+                return []
+            
+            # 尝试不同的嵌入方法
+            try:
+                if hasattr(provider, 'embedding'):
+                    result = await provider.embedding(text)
+                elif hasattr(provider, 'embeddings'):
+                    result = await provider.embeddings(text)
+                elif hasattr(provider, 'get_embedding'):
+                    result = await provider.get_embedding(text)
+                else:
+                    return []
+                
+                if result and isinstance(result, list) and len(result) > 0:
+                    return result
+                else:
+                    logger.debug("嵌入返回空结果或无效格式")
+                    return []
+                    
+            except Exception as e:
+                logger.debug(f"嵌入调用失败: {e}")
                 return []
                 
         except Exception as e:
