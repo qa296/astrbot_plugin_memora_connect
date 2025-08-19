@@ -343,11 +343,22 @@ class MemorySystem:
                     # 建立连接
                     self.establish_connections(concept_id, themes)
                     
-            # 触发回忆
-            if random.random() < 0.3:  # 30%概率触发回忆
+            # 根据回忆模式决定是否触发回忆
+            recall_mode = self.memory_config["recall_mode"]
+            should_trigger = False
+            
+            if recall_mode == "simple" or recall_mode == "embedding":
+                # 关键词和嵌入模式每次都触发
+                should_trigger = True
+            elif recall_mode == "llm":
+                # LLM模式按概率触发
+                trigger_probability = self.memory_config.get("recall_trigger_probability", 0.6)
+                should_trigger = random.random() < trigger_probability
+            
+            if should_trigger:
                 recalled = await self.recall_memories("", event)
                 if recalled:
-                    logger.info(f"触发了回忆: {recalled[:2]}")
+                    logger.info(f"触发了回忆: {recalled[:2]} (模式: {recall_mode})")
                     
         except Exception as e:
             logger.error(f"处理消息时出错: {e}")
@@ -411,11 +422,22 @@ class MemorySystem:
                         logger.error(f"建立概念连接失败: {e}, 概念ID: {concept_id}")
                         continue
             
-            # 触发回忆（降低频率以节省资源）
-            if random.random() < 0.2:  # 20%概率触发回忆
+            # 根据回忆模式决定是否触发回忆
+            recall_mode = self.memory_config["recall_mode"]
+            should_trigger = False
+            
+            if recall_mode == "simple" or recall_mode == "embedding":
+                # 关键词和嵌入模式每次都触发
+                should_trigger = True
+            elif recall_mode == "llm":
+                # LLM模式按概率触发
+                trigger_probability = self.memory_config.get("recall_trigger_probability", 0.6)
+                should_trigger = random.random() < trigger_probability
+            
+            if should_trigger:
                 recalled = await self.recall_memories("", event)
                 if recalled:
-                    logger.info(f"优化模式触发了回忆: {len(recalled)}条")
+                    logger.info(f"优化模式触发了回忆: {len(recalled)}条 (模式: {recall_mode})")
                     
         except Exception as e:
             logger.error(f"优化消息处理失败: {e}", exc_info=True)
@@ -502,9 +524,11 @@ class MemorySystem:
 
 要求：
 1. 提取的主题应该是对话的核心内容
-2. 每个主题2-4个汉字
-3. 返回格式：主题1,主题2,主题3
-4. 不要包含解释，只返回主题列表
+2. 每个主题可以包含多个相关关键词，用逗号分隔
+3. 返回格式：主题1关键词1,主题1关键词2,主题2关键词1,主题2关键词2
+4. 每个关键词2-4个汉字
+5. 不要包含解释，只返回主题列表
+6. 例如：工作,项目,会议,学习,考试,复习
 """
             
             provider = await self.get_llm_provider()
@@ -516,9 +540,9 @@ class MemorySystem:
                 )
                 
                 themes_text = response.completion_text.strip()
-                # 清理和分割主题
+                # 清理和分割主题，支持逗号分隔的多个关键词
                 themes = [theme.strip() for theme in themes_text.replace("，", ",").split(",") if theme.strip()]
-                return themes[:5]  # 最多返回5个主题
+                return themes[:8]  # 最多返回8个关键词/主题
                 
         except Exception as e:
             logger.error(f"LLM主题提取失败: {e}")
@@ -620,25 +644,34 @@ class MemorySystem:
                     return [m.content for m in selected]
                 return []
             
-            # 增强的关键词匹配
+            # 增强的关键词匹配，支持多关键词匹配
             related_memories = []
             keyword_lower = keyword.lower()
             
-            # 直接概念匹配
+            # 直接概念匹配，支持逗号分隔的多关键词
             for concept in self.memory_graph.concepts.values():
                 concept_name_lower = concept.name.lower()
-                if keyword_lower in concept_name_lower or concept_name_lower in keyword_lower:
-                    concept_memories = [m for m in self.memory_graph.memories.values()
-                                      if m.concept_id == concept.id]
-                    # 按记忆强度排序
-                    concept_memories.sort(key=lambda m: m.strength, reverse=True)
-                    for memory in concept_memories[:2]:  # 每个概念最多2条
-                        related_memories.append(memory.content)
+                
+                # 检查概念名称是否包含任意关键词
+                concept_keywords = concept_name_lower.split(',')
+                for concept_keyword in concept_keywords:
+                    concept_keyword = concept_keyword.strip()
+                    if (keyword_lower in concept_keyword or concept_keyword in keyword_lower or
+                        any(kw.strip() in concept_keyword for kw in keyword_lower.split(','))):
+                        concept_memories = [m for m in self.memory_graph.memories.values()
+                                          if m.concept_id == concept.id]
+                        # 按记忆强度排序
+                        concept_memories.sort(key=lambda m: m.strength, reverse=True)
+                        for memory in concept_memories[:2]:  # 每个概念最多2条
+                            if memory.content not in related_memories:
+                                related_memories.append(memory.content)
+                        break
             
             # 内容关键词匹配
             for memory in self.memory_graph.memories.values():
                 if keyword_lower in memory.content.lower():
-                    related_memories.append(memory.content)
+                    if memory.content not in related_memories:
+                        related_memories.append(memory.content)
             
             # 去重并限制数量
             seen = set()
@@ -1448,21 +1481,22 @@ class BatchMemoryExtractor:
 {formatted_history}
 
 任务要求：
-1. 识别3-5个核心主题或关键词
-2. 为每个主题生成一条简洁自然的记忆内容
-3. 评估每个记忆的可信度（0-1之间）
-4. 返回JSON格式，包含theme, memory_content, confidence字段
+1. 识别3-5个核心主题
+2. 每个主题可以包含多个相关关键词，用逗号分隔
+3. 为每个主题生成一条简洁自然的记忆内容
+4. 评估每个记忆的可信度（0-1之间）
+5. 返回JSON格式，包含theme, memory_content, confidence字段
 
 返回格式：
 {{
   "memories": [
     {{
-      "theme": "主题1",
+      "theme": "工作,项目,会议",
       "memory_content": "关于这个主题的记忆内容",
       "confidence": 0.85
     }},
     {{
-      "theme": "主题2",
+      "theme": "学习,考试,复习",
       "memory_content": "关于这个主题的记忆内容",
       "confidence": 0.75
     }}
@@ -1470,7 +1504,7 @@ class BatchMemoryExtractor:
 }}
 
 要求：
-- 主题应该是对话的核心内容
+- 主题关键词应该是对话的核心内容，用逗号分隔
 - 记忆内容要口语化、自然，像亲身经历
 - 每个记忆不超过50字
 - 只返回JSON，不要解释"""
