@@ -176,11 +176,9 @@ class MemorySystem:
             "llm_system_prompt": config.get("llm_system_prompt", "你是一个记忆总结助手，请将对话内容总结成简洁自然的记忆。"),
             "embedding_provider": config.get("embedding_provider", "openai"),
             "embedding_model": config.get("embedding_model", ""),
-            # 增强配置
             "max_injected_memories": config.get("max_injected_memories", 5),
-            "enable_enhanced_recall": config.get("enable_enhanced_recall", True),
-            "memory_injection_threshold": config.get("memory_injection_threshold", 0.3),
-            "auto_inject_memories": config.get("auto_inject_memories", True)
+            "enable_enhanced_memory": config.get("enable_enhanced_memory", True),
+            "memory_injection_threshold": config.get("memory_injection_threshold", 0.3)
         }
         
     async def initialize(self):
@@ -209,7 +207,7 @@ class MemorySystem:
         if llm_provider:
             provider_name = getattr(llm_provider, 'name', 'unknown')
             provider_id = getattr(llm_provider, 'id', 'unknown')
-            logger.info(f"✅ 成功使用LLM提供商: {provider_name} (ID: {provider_id})")
+            logger.info(f"成功使用LLM提供商: {provider_name} (ID: {provider_id})")
             
             # 测试text_chat功能
             try:
@@ -218,30 +216,30 @@ class MemorySystem:
                     contexts=[],
                     system_prompt="你是一个测试助手，请简洁回复"
                 )
-                logger.info(f"✅ LLM text_chat功能测试成功: {test_response.completion_text[:50]}...")
+                logger.info(f"LLM text_chat功能测试成功: {test_response.completion_text[:50]}...")
             except Exception as e:
-                logger.error(f"❌ LLM text_chat功能测试失败: {e}")
+                logger.error(f"LLM text_chat功能测试失败: {e}")
         else:
-            logger.error("❌ 无法获取配置的LLM提供商，请检查配置")
+            logger.error("无法获取配置的LLM提供商，请检查配置")
         
         # 测试嵌入提供商
         embedding_provider = await self.get_embedding_provider()
         if embedding_provider:
             provider_name = getattr(embedding_provider, 'name', 'unknown')
             provider_id = getattr(embedding_provider, 'id', 'unknown')
-            logger.info(f"✅ 成功强制使用嵌入提供商: {provider_name} (ID: {provider_id})")
+            logger.info(f"成功强制使用嵌入提供商: {provider_name} (ID: {provider_id})")
             
             # 测试嵌入功能
             try:
                 test_embedding = await self.get_embedding("测试文本")
                 if test_embedding:
-                    logger.info(f"✅ 嵌入功能测试成功，维度: {len(test_embedding)}")
+                    logger.info(f"嵌入功能测试成功，维度: {len(test_embedding)}")
                 else:
-                    logger.warning("⚠️ 嵌入功能测试失败：返回空结果")
+                    logger.warning("嵌入功能测试失败：返回空结果")
             except Exception as e:
-                logger.error(f"❌ 嵌入功能测试失败: {e}")
+                logger.error(f"嵌入功能测试失败: {e}")
         else:
-            logger.error("❌ 无法获取配置的嵌入提供商，请检查配置")
+            logger.error("无法获取配置的嵌入提供商，请检查配置")
         
         # 增强数据库迁移调试
         logger.info("=== 开始数据库迁移检查 ===")
@@ -1468,7 +1466,7 @@ class MemorySystem:
     async def inject_memories_to_context(self, event: AstrMessageEvent):
         """将相关记忆注入到对话上下文中 - 使用增强记忆召回系统"""
         try:
-            if not self.memory_config.get("auto_inject_memories", True):
+            if not self.memory_config.get("enable_enhanced_memory", True):
                 return
             
             current_message = event.message_str.strip()

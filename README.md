@@ -55,9 +55,8 @@
 | `llm_provider` | `openai` | LLM 服务商 |
 | `embedding_provider` | `openai` | 向量嵌入服务商 |
 | `max_injected_memories` | `5` | 注入上下文的最大记忆数 |
-| `enable_enhanced_recall` | `true` | 是否启用增强记忆召回系统 |
+| `enable_enhanced_memory` | `true` | 是否启用增强记忆功能，包括增强召回和自动注入相关记忆到LLM上下文 |
 | `memory_injection_threshold` | `0.3` | 记忆注入的相似度阈值 |
-| `auto_inject_memories` | `true` | 是否自动注入相关记忆到上下文 |
 
 ## 数据存储
 
