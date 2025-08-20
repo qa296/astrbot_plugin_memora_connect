@@ -86,11 +86,11 @@ class MemoraConnectPlugin(Star):
             concept_id = self.memory_system.memory_graph.add_concept(topic)
             memory_id = self.memory_system.memory_graph.add_memory(content, concept_id)
             logger.info(f"LLM 工具创建记忆：{topic} -> {content}")
-            # 让LLM生成自然回复，不返回固定内容
-            yield event.plain_result(None)  # 返回None让LLM继续其自然回复流程
+            # 返回空字符串让LLM继续其自然回复流程
+            yield event.plain_result("")
         except Exception as e:
             logger.error(f"LLM 工具创建记忆失败：{e}")
-            yield event.plain_result(None)
+            yield event.plain_result("")
 
     @filter.llm_tool(name="recall_memory")
     async def recall_memory_tool(self, event: AstrMessageEvent, keyword: str) -> MessageEventResult:
@@ -105,11 +105,11 @@ class MemoraConnectPlugin(Star):
                 memory_context = "根据我们之前的对话记忆：\n" + "\n".join(f"• {mem}" for mem in memories)
                 yield event.plain_result(memory_context)
             else:
-                # 让LLM自然回复没有找到相关记忆
-                yield event.plain_result(None)
+                # 返回空字符串让LLM继续其自然回复流程
+                yield event.plain_result("")
         except Exception as e:
             logger.error(f"LLM 工具回忆记忆失败：{e}")
-            yield event.plain_result(None)
+            yield event.plain_result("")
 
     @filter.llm_tool(name="recall_all_memories")
     async def recall_all_memories_tool(self, event: AstrMessageEvent, query: str) -> MessageEventResult:
@@ -131,11 +131,12 @@ class MemoraConnectPlugin(Star):
                 formatted_memories = enhanced_recall.format_memories_for_llm(results)
                 yield event.plain_result(formatted_memories)
             else:
-                yield event.plain_result(None)
-                
+                # 返回空字符串让LLM继续其自然回复流程
+                yield event.plain_result("")
+                 
         except Exception as e:
             logger.error(f"增强记忆召回工具失败：{e}")
-            yield event.plain_result(None)
+            yield event.plain_result("")
 
 
 class MemorySystem:
