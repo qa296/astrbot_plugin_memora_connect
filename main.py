@@ -200,7 +200,7 @@ class MemorySystem:
             logger.info("数据库文件不存在，将创建新数据库")
         
         # 强制测试指定的提供商，完全忽略AstrBot默认设置
-        logger.info("=== 强制测试配置指定的提供商 ===")
+        logger.info("=== 测试配置指定的提供商 ===")
         
         # 测试LLM提供商
         llm_provider = await self.get_llm_provider()
@@ -388,7 +388,7 @@ class MemorySystem:
         """保存记忆状态到数据库"""
         import sqlite3
         try:
-            logger.info(f"正在保存记忆到数据库: {self.db_path}")
+            logger.debug(f"正在保存记忆到数据库: {self.db_path}")
             
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
@@ -486,7 +486,7 @@ class MemorySystem:
             if should_trigger:
                 recalled = await self.recall_memories("", event)
                 if recalled:
-                    logger.info(f"触发了回忆: {recalled[:2]} (模式: {recall_mode})")
+                    logger.debug(f"触发了回忆: {recalled[:2]} (模式: {recall_mode})")
                     
         except Exception as e:
             logger.error(f"处理消息时出错: {e}")
@@ -1187,7 +1187,7 @@ class MemorySystem:
                 # 保存状态
                 self.save_memory_state()
                 
-                logger.info("记忆维护完成")
+                logger.debug("记忆维护完成")
                 
             except Exception as e:
                 logger.error(f"记忆维护失败: {e}")
@@ -1367,7 +1367,7 @@ class MemorySystem:
                     logger.debug(f"成功使用配置指定的LLM提供商: {provider_id}")
                     return judge_provider
                 else:
-                    logger.error(f"❌ 未找到提供商: {provider_id}")
+                    logger.error(f"未找到提供商: {provider_id}")
                     
                     # 列出所有可用提供商供调试
                     all_providers = self.context.get_all_providers()
@@ -1395,20 +1395,20 @@ class MemorySystem:
             # 精确匹配配置的提供商ID
             for provider in all_providers:
                 if hasattr(provider, 'id') and provider.id == provider_id:
-                    logger.info(f"成功强制使用配置指定的嵌入提供商: {provider_id}")
+                    logger.debug(f"成功使用配置指定的嵌入提供商: {provider_id}")
                     return provider
             
             # 如果找不到，尝试通过ID获取
             provider = self.context.get_provider_by_id(provider_id)
             if provider:
-                logger.info(f"通过ID强制使用嵌入提供商: {provider_id}")
+                logger.debug(f"通过ID使用嵌入提供商: {provider_id}")
                 return provider
             
             # 最后尝试通过名称匹配
             for provider in all_providers:
                 if hasattr(provider, 'meta') and hasattr(provider.meta, 'name'):
                     if provider.meta.name == provider_id:
-                        logger.info(f"通过名称匹配强制使用嵌入提供商: {provider_id}")
+                        logger.debug(f"通过名称匹配使用嵌入提供商: {provider_id}")
                         return provider
             
             logger.error(f"无法找到配置的嵌入提供商: {provider_id}")
@@ -1491,7 +1491,7 @@ class MemorySystem:
                     event.context_extra = {}
                 event.context_extra["memory_context"] = memory_context
                 
-                logger.info(f"已注入 {len(results)} 条增强记忆到上下文")
+                logger.debug(f"已注入 {len(results)} 条增强记忆到上下文")
                 
         except Exception as e:
             logger.error(f"注入记忆到上下文失败: {e}")
