@@ -71,7 +71,7 @@ class MemoraConnectPlugin(Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: Any):
-        """处理LLM请求时的记忆召回 - 兼容AstrBot事件钩子"""
+        """处理LLM请求时的记忆召回"""
         try:
             if not self._initialized:
                 return
@@ -111,53 +111,95 @@ class MemoraConnectPlugin(Star):
 
     # ---------- LLM 函数工具 ----------
     @filter.llm_tool(name="create_memory")
-    async def create_memory_tool(self, event: AstrMessageEvent, content: str, topic: str) -> MessageEventResult:
-        """主动把一段对话内容记为记忆。
+    async def create_memory_tool(
+        self,
+        event: AstrMessageEvent,
+        content: str,
+        theme: str = None,
+        topic: str = None,
+        details: str = "",
+        participants: str = "",
+        location: str = "",
+        emotion: str = "",
+        tags: str = "",
+        confidence: float = 0.7
+    ) -> MessageEventResult:
+        """批量记忆提取器，通过单次LLM调用获取多个记忆点和主题
         Args:
             content(string): 需要记录的完整对话内容
-            topic(string): 该记忆所属的主题或关键词
+            theme(string): 核心关键词，用逗号分隔
+            topic(string): 该记忆所属的主题或关键词（向后兼容）
+            details(string): 具体细节和背景信息
+            participants(string): 涉及的人物，用逗号分隔
+            location(string): 相关场景或地点
+            emotion(string): 情感色彩，如"开心,兴奋"
+            tags(string): 分类标签，如"工作,重要"
+            confidence(float): 置信度，0-1之间的数值
         """
         try:
-            concept_id = self.memory_system.memory_graph.add_concept(topic)
-            memory_id = self.memory_system.memory_graph.add_memory(content, concept_id)
-            logger.info(f"LLM 工具创建记忆：{topic} -> {content}")
+            # 向后兼容性处理：如果提供了topic但没有theme，使用topic作为theme
+            actual_theme = theme or topic
+            if not actual_theme:
+                logger.warning("创建记忆失败：主题为空")
+                yield event.plain_result("")
+                return
+            
+            # 参数验证和清理
+            if not content:
+                logger.warning("创建记忆失败：内容为空")
+                yield event.plain_result("")
+                return
+            
+            # 清理特殊字符
+            import re
+            actual_theme = re.sub(r'[^\w\u4e00-\u9fff,，]', '', str(actual_theme))
+            details = str(details).strip()
+            participants = str(participants).strip()
+            location = str(location).strip()
+            emotion = str(emotion).strip()
+            tags = str(tags).strip()
+            confidence = max(0.0, min(1.0, float(confidence)))
+            
+            # 创建概念
+            concept_id = self.memory_system.memory_graph.add_concept(actual_theme)
+            
+            # 根据置信度调整记忆强度
+            base_strength = 1.0
+            adjusted_strength = base_strength * confidence
+            
+            # 创建丰富记忆
+            memory_id = self.memory_system.memory_graph.add_memory(
+                content=content,
+                concept_id=concept_id,
+                details=details,
+                participants=participants,
+                location=location,
+                emotion=emotion,
+                tags=tags,
+                strength=adjusted_strength
+            )
+            
+            logger.info(f"LLM工具创建丰富记忆：{actual_theme} -> {content} (置信度: {confidence})")
+            
             # 返回空字符串让LLM继续其自然回复流程
             yield event.plain_result("")
+            
         except Exception as e:
-            logger.error(f"LLM 工具创建记忆失败：{e}")
+            logger.error(f"LLM工具创建记忆失败：{e}")
             yield event.plain_result("")
 
     @filter.llm_tool(name="recall_memory")
     async def recall_memory_tool(self, event: AstrMessageEvent, keyword: str) -> MessageEventResult:
-        """主动查询与关键词相关的记忆。
+        """召回所有相关记忆，包括联想记忆。
         Args:
-            keyword(string): 要查询的关键词
-        """
-        try:
-            memories = await self.memory_system.recall_memories(keyword, event)
-            if memories:
-                # 构建自然语言回复，让LLM基于记忆内容继续对话
-                memory_context = "根据我们之前的对话记忆：\n" + "\n".join(f"• {mem}" for mem in memories)
-                yield event.plain_result(memory_context)
-            else:
-                # 返回空字符串让LLM继续其自然回复流程
-                yield event.plain_result("")
-        except Exception as e:
-            logger.error(f"LLM 工具回忆记忆失败：{e}")
-            yield event.plain_result("")
-
-    @filter.llm_tool(name="recall_all_memories")
-    async def recall_all_memories_tool(self, event: AstrMessageEvent, query: str) -> MessageEventResult:
-        """使用增强系统召回所有相关记忆，包括联想记忆。
-        Args:
-            query(string): 要查询的内容
+            keyword(string): 要查询的关键词或内容
         """
         try:
             from .enhanced_memory_recall import EnhancedMemoryRecall
             
             enhanced_recall = EnhancedMemoryRecall(self.memory_system)
             results = await enhanced_recall.recall_all_relevant_memories(
-                query=query,
+                query=keyword,
                 max_memories=8
             )
             
@@ -168,7 +210,7 @@ class MemoraConnectPlugin(Star):
             else:
                 # 返回空字符串让LLM继续其自然回复流程
                 yield event.plain_result("")
-                 
+                  
         except Exception as e:
             logger.error(f"增强记忆召回工具失败：{e}")
             yield event.plain_result("")
@@ -263,7 +305,7 @@ class MemorySystem:
         if embedding_provider:
             provider_name = getattr(embedding_provider, 'name', 'unknown')
             provider_id = getattr(embedding_provider, 'id', 'unknown')
-            logger.info(f"成功强制使用嵌入提供商: {provider_name} (ID: {provider_id})")
+            logger.info(f"成功测试嵌入提供商: {provider_name} (ID: {provider_id})")
             
             # 测试嵌入功能
             try:
@@ -659,7 +701,7 @@ class MemorySystem:
                     history = json.loads(conversation.history)
                     # 添加发送者信息和时间戳
                     full_history = []
-                    for msg in history[-8:]:  # 最近8条，避免token过多
+                    for msg in history[-20:]:  # 最近20条，避免token过多，等会加配置
                         full_msg = {
                             "role": msg.get("role", "user"),
                             "content": msg.get("content", ""),
@@ -1095,7 +1137,7 @@ class MemorySystem:
             # 扩散参数
             decay_factor = 0.7  # 能量衰减因子
             min_threshold = 0.1  # 最小激活阈值
-            max_hops = 3  # 最大扩散步数
+            max_hops = 3  # 最大扩散步数，以后加配置文件
             
             # 进行扩散
             for hop in range(max_hops):
@@ -1392,7 +1434,7 @@ class MemorySystem:
         }
 
     async def get_llm_provider(self):
-        """获取LLM服务提供商 - 完全强制使用配置文件指定的提供商"""
+        """使用配置文件指定的提供商"""
         try:
             provider_id = self.memory_config.get('llm_provider', 'rdaojqxp')
             
@@ -1420,7 +1462,7 @@ class MemorySystem:
             return None
 
     async def get_embedding_provider(self):
-        """获取嵌入模型提供商 - 完全强制使用配置文件指定的提供商"""
+        """使用配置文件指定的提供商"""
         try:
             provider_id = self.memory_config['embedding_provider']
             
@@ -1500,7 +1542,7 @@ class MemorySystem:
             return []
 
     async def inject_memories_to_context(self, event: AstrMessageEvent):
-        """将相关记忆注入到对话上下文中 - 使用增强记忆召回系统"""
+        """将相关记忆注入到对话上下文中"""
         try:
             if not self.memory_config.get("enable_enhanced_memory", True):
                 return
@@ -1533,7 +1575,7 @@ class MemorySystem:
             logger.error(f"注入记忆到上下文失败: {e}")
 
     async def query_memory(self, query: str, event: AstrMessageEvent = None) -> List[str]:
-        """兼容的记忆查询接口 - 解决Mnemosyne.query_memory()参数问题"""
+        """记忆查询接口"""
         try:
             if not query:
                 return []
@@ -1546,7 +1588,7 @@ class MemorySystem:
             return []
 
     async def recall_memories(self, keyword: str, event: AstrMessageEvent = None) -> List[str]:
-        """回忆相关记忆 - 统一的回忆接口"""
+        """回忆相关记忆，回忆接口"""
         try:
             if not self.memory_graph.memories:
                 return []
@@ -1568,7 +1610,7 @@ class MemorySystem:
             return await self._recall_simple(keyword)
 
     async def recall_relevant_memories(self, message: str) -> List[str]:
-        """基于消息内容智能召回相关记忆 - 使用增强召回系统"""
+        """基于消息内容智能召回相关记忆"""
         try:
             if not self.memory_graph.memories:
                 return []
@@ -1652,7 +1694,7 @@ class BatchMemoryExtractor:
 2. 为每个记忆生成完整信息：
    - 主题（theme）：核心关键词，用逗号分隔
    - 内容（content）：简洁的核心记忆
-   - 细节（details）：具体细节和背景
+   - 细节（details）：具体细节和背景，丰富、详细、准确的记忆信息
    - 参与者（participants）：涉及的人物
    - 地点（location）：相关场景
    - 情感（emotion）：情感色彩
@@ -1692,7 +1734,8 @@ class BatchMemoryExtractor:
 - 小事也可以记录，降低置信度即可
 - 内容要具体、生动
 - 可以生成5-8个记忆
-- 只返回JSON"""
+- 只返回JSON
+"""
 
         try:
             provider = await self.memory_system.get_llm_provider()
