@@ -79,7 +79,7 @@ class EnhancedMemoryRecall:
             # 限制数量
             final_results = unique_results[:max_memories]
             
-            logger.info(f"增强记忆召回完成: 找到{len(final_results)}条相关记忆")
+            logger.debug(f"增强记忆召回完成: 找到{len(final_results)}条相关记忆")
             return final_results
             
         except Exception as e:

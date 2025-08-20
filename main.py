@@ -68,6 +68,41 @@ class MemoraConnectPlugin(Star):
             await self.memory_system.process_message_optimized(event)
         except Exception as e:
             logger.error(f"on_message处理错误: {e}", exc_info=True)
+
+    @filter.on_llm_request()
+    async def on_llm_request(self, event: AstrMessageEvent, req: Any):
+        """处理LLM请求时的记忆召回 - 兼容AstrBot事件钩子"""
+        try:
+            if not self._initialized:
+                return
+                
+            # 获取当前消息内容
+            current_message = event.message_str.strip()
+            if not current_message:
+                return
+            
+            # 使用增强记忆召回系统
+            from .enhanced_memory_recall import EnhancedMemoryRecall
+            
+            enhanced_recall = EnhancedMemoryRecall(self.memory_system)
+            results = await enhanced_recall.recall_all_relevant_memories(
+                query=current_message,
+                max_memories=self.memory_system.memory_config.get("max_injected_memories", 5)
+            )
+            
+            if results:
+                # 格式化记忆为上下文
+                memory_context = enhanced_recall.format_memories_for_llm(results)
+                
+                # 将记忆注入到系统提示中
+                if hasattr(req, 'system_prompt'):
+                    original_prompt = req.system_prompt or ""
+                    if "【相关记忆】" not in original_prompt:
+                        req.system_prompt = f"{original_prompt}\n\n{memory_context}"
+                        logger.debug(f"已注入 {len(results)} 条记忆到LLM上下文")
+                        
+        except Exception as e:
+            logger.error(f"LLM请求记忆召回失败: {e}", exc_info=True)
     
     async def terminate(self):
         """插件卸载时保存记忆"""
@@ -1496,6 +1531,19 @@ class MemorySystem:
                 
         except Exception as e:
             logger.error(f"注入记忆到上下文失败: {e}")
+
+    async def query_memory(self, query: str, event: AstrMessageEvent = None) -> List[str]:
+        """兼容的记忆查询接口 - 解决Mnemosyne.query_memory()参数问题"""
+        try:
+            if not query:
+                return []
+                
+            # 使用统一的回忆接口
+            return await self.recall_memories(query, event)
+            
+        except Exception as e:
+            logger.error(f"记忆查询失败: {e}")
+            return []
 
     async def recall_memories(self, keyword: str, event: AstrMessageEvent = None) -> List[str]:
         """回忆相关记忆 - 统一的回忆接口"""
