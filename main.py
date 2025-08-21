@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple, Any
 import os
 import shutil
 from dataclasses import dataclass, asdict
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from .database_migration import DatabaseMigration
 from .enhanced_memory_display import EnhancedMemoryDisplay
@@ -20,7 +21,7 @@ import astrbot.api.message_components as Comp
 
 @register("astrbot_plugin_memora_connect", "qa296", "一个模仿人类记忆方式的记忆插件", "0.2.0", "https://github.com/qa296/astrbot_plugin_memora_connect")
 class MemoraConnectPlugin(Star):
-    def __init__(self, context: Context, config: AstrBotConfig = None):
+    def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         data_dir = StarTools.get_data_dir() / "memora_connect"
         self.memory_system = MemorySystem(context, config, data_dir)
@@ -70,7 +71,7 @@ class MemoraConnectPlugin(Star):
             logger.error(f"on_message处理错误: {e}", exc_info=True)
 
     @filter.on_llm_request()
-    async def on_llm_request(self, event: AstrMessageEvent, req: Any):
+    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         """处理LLM请求时的记忆召回"""
         try:
             if not self._initialized:
@@ -122,9 +123,10 @@ class MemoraConnectPlugin(Star):
         location: str = "",
         emotion: str = "",
         tags: str = "",
-        confidence: float = 0.7
+        confidence = 0.7
     ) -> MessageEventResult:
-        """批量记忆提取器，通过单次LLM调用获取多个记忆点和主题
+        """通过LLM调用获取个记忆点和主题
+
         Args:
             content(string): 需要记录的完整对话内容
             theme(string): 核心关键词，用逗号分隔
@@ -134,7 +136,7 @@ class MemoraConnectPlugin(Star):
             location(string): 相关场景或地点
             emotion(string): 情感色彩，如"开心,兴奋"
             tags(string): 分类标签，如"工作,重要"
-            confidence(float): 置信度，0-1之间的数值
+            confidence(number): 置信度，0-1之间的数值
         """
         try:
             # 向后兼容性处理：如果提供了topic但没有theme，使用topic作为theme
@@ -191,6 +193,7 @@ class MemoraConnectPlugin(Star):
     @filter.llm_tool(name="recall_memory")
     async def recall_memory_tool(self, event: AstrMessageEvent, keyword: str) -> MessageEventResult:
         """召回所有相关记忆，包括联想记忆。
+
         Args:
             keyword(string): 要查询的关键词或内容
         """
@@ -237,7 +240,7 @@ class MemorySystem:
         self.embedding_provider = None
         self.batch_extractor = BatchMemoryExtractor(self)
         
-        # 增强配置初始化
+        # 配置初始化
         config = config or {}
         self.memory_config = {
             "recall_mode": config.get("recall_mode", "llm"),
@@ -319,7 +322,7 @@ class MemorySystem:
         else:
             logger.error("无法获取配置的嵌入提供商，请检查配置")
         
-        # 增强数据库迁移调试
+        # 数据库迁移调试
         logger.info("=== 开始数据库迁移检查 ===")
         try:
             migration = DatabaseMigration(self.db_path, self.context)
@@ -421,48 +424,7 @@ class MemorySystem:
         except Exception as e:
             logger.error(f"加载记忆状态时发生未知错误: {e}")
 
-    def _create_database_schema(self):
-        """创建初始数据库表结构"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            # 确保在创建时就写入版本信息
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS schema_version (
-                    version TEXT PRIMARY KEY,
-                    migrated_at REAL NOT NULL
-                )
-            """)
-            cursor.execute(
-                "INSERT OR REPLACE INTO schema_version (version, migrated_at) VALUES (?, ?)",
-                (DatabaseMigration.CURRENT_VERSION, time.time())
-            )
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS concepts (
-                    id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at REAL NOT NULL,
-                    last_accessed REAL NOT NULL, access_count INTEGER DEFAULT 0
-                )
-            ''')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS memories (
-                    id TEXT PRIMARY KEY, concept_id TEXT NOT NULL, content TEXT NOT NULL,
-                    details TEXT DEFAULT '', participants TEXT DEFAULT '',
-                    location TEXT DEFAULT '', emotion TEXT DEFAULT '', tags TEXT DEFAULT '',
-                    created_at REAL NOT NULL, last_accessed REAL NOT NULL,
-                    access_count INTEGER DEFAULT 0, strength REAL DEFAULT 1.0,
-                    FOREIGN KEY (concept_id) REFERENCES concepts (id)
-                )
-            ''')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS connections (
-                    id TEXT PRIMARY KEY, from_concept TEXT NOT NULL, to_concept TEXT NOT NULL,
-                    strength REAL DEFAULT 1.0, last_strengthened REAL NOT NULL,
-                    FOREIGN KEY (from_concept) REFERENCES concepts (id),
-                    FOREIGN KEY (to_concept) REFERENCES concepts (id)
-                )
-            ''')
-            conn.commit()
-            
-    def save_memory_state(self):
+    async def save_memory_state(self):
         """保存记忆状态到数据库"""
         import sqlite3
         try:
@@ -1134,10 +1096,10 @@ class MemorySystem:
             for concept in initial_concepts:
                 activation_map[concept.id] = 1.0  # 初始能量为1.0
             
-            # 扩散参数
+            # 扩散参数，以后加配置文件
             decay_factor = 0.7  # 能量衰减因子
             min_threshold = 0.1  # 最小激活阈值
-            max_hops = 3  # 最大扩散步数，以后加配置文件
+            max_hops = 3  # 最大扩散步数
             
             # 进行扩散
             for hop in range(max_hops):
@@ -1436,29 +1398,32 @@ class MemorySystem:
     async def get_llm_provider(self):
         """使用配置文件指定的提供商"""
         try:
-            provider_id = self.memory_config.get('llm_provider', 'rdaojqxp')
-            
-            # 使用示例代码中的精确方法
-            try:
-                judge_provider = self.context.get_provider_by_id(provider_id)
-                if judge_provider:
-                    logger.debug(f"成功使用配置指定的LLM提供商: {provider_id}")
-                    return judge_provider
-                else:
-                    logger.error(f"未找到提供商: {provider_id}")
-                    
-                    # 列出所有可用提供商供调试
-                    all_providers = self.context.get_all_providers()
-                    available_ids = [getattr(p, 'id', str(p)) for p in all_providers]
-                    logger.error(f"可用提供商: {available_ids}")
-                    
-                    return None
-            except Exception as e:
-                logger.error(f"获取提供商失败: {e}")
+            provider_id = self.memory_config.get('llm_provider')
+            if not provider_id:
+                logger.error("插件配置中未指定 'llm_provider'")
                 return None
+
+            # 1. 尝试通过ID精确查找
+            provider = self.context.get_provider_by_id(provider_id)
+            if provider:
+                logger.debug(f"通过ID '{provider_id}' 成功获取LLM提供商")
+                return provider
+
+            # 2. 如果ID查找失败，尝试通过名称模糊匹配
+            all_providers = self.context.get_all_providers()
+            for p in all_providers:
+                p_name = getattr(getattr(p, 'meta', None), 'name', getattr(p, 'name', None))
+                if p_name and p_name.lower() == provider_id.lower():
+                    logger.debug(f"通过名称 '{provider_id}' 成功获取LLM提供商")
+                    return p
+            
+            logger.error(f"无法找到配置的LLM提供商: '{provider_id}'")
+            available_ids = [f"ID: {getattr(p, 'id', 'N/A')}, Name: {getattr(p, 'name', 'N/A')}" for p in all_providers]
+            logger.error(f"可用提供商: {available_ids}")
+            return None
             
         except Exception as e:
-            logger.error(f"获取LLM提供商失败: {e}")
+            logger.error(f"获取LLM提供商失败: {e}", exc_info=True)
             return None
 
     async def get_embedding_provider(self):
@@ -1660,14 +1625,14 @@ class MemorySystem:
 
 
 class BatchMemoryExtractor:
-    """批量记忆提取器，通过单次LLM调用获取多个记忆点和主题"""
+    """记忆提取器，通过LLM调用获取多个记忆点和主题"""
     
     def __init__(self, memory_system):
         self.memory_system = memory_system
     
     async def extract_memories_and_themes(self, conversation_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        通过单次LLM调用同时提取主题和记忆内容
+        通过LLM调用同时提取主题和记忆内容
         
         Args:
             conversation_history: 包含完整信息的对话历史，每项包含role, content, sender_name, timestamp

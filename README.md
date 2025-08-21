@@ -20,7 +20,7 @@
 
 ## 使用方法
 
-### 激活与指令
+### 指令
 - `/记忆`
   激活记忆系统。
 - `/记忆 回忆 <关键词>`
@@ -30,36 +30,8 @@
 
 ### LLM 工具接口
 
-#### 创建记忆（增强版）
-- `create_memory(content, theme, [details], [participants], [location], [emotion], [tags], [confidence])`
-  
-  **批量记忆提取器，支持丰富参数：**
-  - `content` (必需): 需要记录的完整对话内容
-  - `theme` (必需): 核心关键词，用逗号分隔
-  - `details` (可选): 具体细节和背景信息
-  - `participants` (可选): 涉及的人物，用逗号分隔
-  - `location` (可选): 相关场景或地点
-  - `emotion` (可选): 情感色彩，如"开心,兴奋"
-  - `tags` (可选): 分类标签，如"工作,重要"
-  - `confidence` (可选): 置信度，0-1之间的数值，默认0.7
+#### 创建记忆
 
-  **示例：**
-  ```
-  create_memory(
-      content="今天完成了项目演示，客户很满意",
-      theme="工作,项目,演示",
-      details="上午10点在会议室进行了产品演示，展示了新功能",
-      participants="我,客户,项目经理",
-      location="会议室",
-      emotion="兴奋,满意",
-      tags="重要,成功",
-      confidence=0.9
-  )
-  ```
-
-  **向后兼容：**
-  - 旧用法 `create_memory(content, topic)` 仍然支持
-  - topic参数会自动映射到theme
 
 #### 记忆召回
 - `recall_memory(keyword)`
@@ -97,7 +69,7 @@
 ```
 - 数据结构包含：
 - **concepts**：概念节点
-- **memories**：记忆条目（已扩展支持详细信息）
+- **memories**：记忆条目
 - **connections**：概念之间的连接关系
 
 ## 安装与使用
