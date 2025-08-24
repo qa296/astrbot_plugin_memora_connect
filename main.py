@@ -539,6 +539,14 @@ class MemorySystem:
             if not full_history:
                 return
             
+            # 获取记忆形成概率
+            formation_probability = self.memory_config.get("memory_formation_probability", 0.3)
+            
+            # 根据概率决定是否提取和创建记忆
+            if random.random() > formation_probability:
+                logger.debug(f"跳过记忆提取与创建 (概率: {formation_probability})")
+                return
+
             # 使用批量提取器，单次LLM调用获取多个记忆
             extracted_memories = await self.batch_extractor.extract_memories_and_themes(full_history)
             
@@ -548,9 +556,6 @@ class MemorySystem:
             # 批量处理提取的记忆
             themes = []
             concept_ids = []  # 存储创建的概念ID
-            
-            # 获取记忆形成概率
-            formation_probability = self.memory_config.get("memory_formation_probability", 0.3)
             
             for memory_data in extracted_memories:
                 try:
@@ -566,11 +571,6 @@ class MemorySystem:
                     # 验证数据完整性
                     if not theme or not content:
                         logger.warning(f"跳过无效的记忆数据: 主题或内容为空")
-                        continue
-                    
-                    # 根据记忆形成概率决定是否创建记忆
-                    if random.random() > formation_probability:
-                        logger.debug(f"跳过记忆创建: {theme} (概率: {formation_probability})")
                         continue
                     
                     # 根据置信度调整记忆强度
