@@ -39,20 +39,21 @@ class MemoraConnectPlugin(Star):
         except Exception as e:
             logger.error(f"记忆系统初始化失败: {e}", exc_info=True)
         
-    @filter.command("记忆")
-    async def memory_command(self, event: AstrMessageEvent):
-        """记忆相关指令"""
-        message = event.message_str.strip()
-        if message == "/记忆":
-            yield event.plain_result("记忆系统已激活！我可以帮你记住对话中的重要信息。")
-        elif message.startswith("/记忆 回忆"):
-            keyword = message[5:].strip()
-            memories = await self.memory_system.recall_memories_full(keyword)
-            response = self.memory_display.format_memory_search_result(memories, keyword)
-            yield event.plain_result(response)
-        elif message.startswith("/记忆 状态"):
-            stats = self.memory_display.format_memory_statistics()
-            yield event.plain_result(stats)
+    @filter.command_group("记忆")
+    def memory(self):
+        """记忆管理指令组"""
+        pass
+
+    @memory.command("回忆")
+    async def memory_recall(self, event: AstrMessageEvent, keyword: str):
+        memories = await self.memory_system.recall_memories_full(keyword)
+        response = self.memory_display.format_memory_search_result(memories, keyword)
+        yield event.plain_result(response)
+
+    @memory.command("状态")
+    async def memory_status(self, event: AstrMessageEvent):
+        stats = self.memory_display.format_memory_statistics()
+        yield event.plain_result(stats)
     
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
