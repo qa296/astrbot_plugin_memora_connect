@@ -40,7 +40,7 @@ class EmbeddingCacheManager:
         self.db_path = db_path
         self.cache_db_path = db_path.replace(".db", "_embeddings.db")
         self.vector_dimension = None  # 将从第一个嵌入结果中推断
-        self.precompute_queue = asyncio.Queue()
+        self.precompute_queue = asyncio.Queue(maxsize=1000)  # 限制队列大小，防止内存溢出
         self.is_precomputing = False
         self.precompute_stats = {
             "total_memories": 0,
@@ -53,6 +53,11 @@ class EmbeddingCacheManager:
         }
         self.batch_size = 10  # 批量处理大小
         self.max_queue_size = 1000  # 最大队列大小
+        
+        # 生命周期管理 - 新增
+        self._worker_task = None
+        self._should_stop_worker = asyncio.Event()
+        self._should_stop_worker.clear()  # 初始不停止
         
     async def initialize(self):
         """初始化嵌入向量缓存系统"""
@@ -275,9 +280,9 @@ class EmbeddingCacheManager:
                 return
                 
             # 如果队列已满，移除低优先级任务
-            if self.precompute_queue.qsize() >= self.max_queue_size:
+            if self.precompute_queue.full():
                 await self._cleanup_low_priority_tasks()
-                
+            
             # 创建任务
             task = PrecomputeTask(
                 task_id=task_id,
@@ -290,8 +295,12 @@ class EmbeddingCacheManager:
             # 保存任务到数据库
             await self._save_precompute_task(task)
             
-            # 添加到处理队列
-            await self.precompute_queue.put(task)
+            # 添加到处理队列，使用非阻塞方式避免死锁
+            try:
+                self.precompute_queue.put_nowait(task)
+            except asyncio.QueueFull:
+                logger.warning("预计算队列已满，丢弃任务")
+                return
             
             # 更新统计信息
             self.precompute_stats["pending_precompute"] += 1
@@ -300,7 +309,7 @@ class EmbeddingCacheManager:
             
             # 如果没有预计算任务正在运行，启动预计算器
             if not self.is_precomputing:
-                asyncio.create_task(self._precompute_worker())
+                self._worker_task = asyncio.create_task(self._precompute_worker())
                 
         except Exception as e:
             logger.error(f"调度预计算任务失败: {e}")
@@ -362,39 +371,66 @@ class EmbeddingCacheManager:
             logger.error(f"清理低优先级任务失败: {e}")
             
     async def _precompute_worker(self):
-        """预计算工作线程"""
+        """预计算工作线程 - 支持优雅退出"""
         self.is_precomputing = True
         
         try:
             logger.info("嵌入向量预计算工作线程启动")
             
-            while True:
+            # 工作循环，支持优雅退出
+            while not self._should_stop_worker.is_set():
                 try:
-                    # 从队列获取任务，设置超时以避免无限等待
-                    task = await asyncio.wait_for(self.precompute_queue.get(), timeout=30.0)
+                    # 使用较短的等待时间，以便及时响应停止信号
+                    try:
+                        task = await asyncio.wait_for(self.precompute_queue.get(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        # 队列为空，检查是否需要退出
+                        if self._should_stop_worker.is_set():
+                            break
+                        continue
                     
                     # 处理任务
-                    await self._process_precompute_task(task)
+                    try:
+                        await self._process_precompute_task(task)
+                        
+                        # 更新任务状态
+                        task.status = "completed"
+                        task.progress = 100
+                        await self._save_precompute_task(task)
+                        
+                        # 更新统计信息
+                        self.precompute_stats["pending_precompute"] -= 1
+                        self.precompute_stats["precompute_count"] += 1
+                        self.precompute_stats["last_precompute_time"] = time.time()
+                        
+                    except Exception as e:
+                        logger.error(f"处理预计算任务失败: {e}")
+                        # 标记任务为失败
+                        task.status = "failed"
+                        task.error_message = str(e)
+                        await self._save_precompute_task(task)
                     
-                    # 更新任务状态
-                    task.status = "completed"
-                    task.progress = 100
-                    await self._save_precompute_task(task)
-                    
-                    # 更新统计信息
-                    self.precompute_stats["pending_precompute"] -= 1
-                    self.precompute_stats["precompute_count"] += 1
-                    self.precompute_stats["last_precompute_time"] = time.time()
-                    
-                except asyncio.TimeoutError:
-                    # 队列为空，等待一段时间后退出
-                    if self.precompute_queue.empty():
+                    # 检查停止信号后再处理下一个任务
+                    if self._should_stop_worker.is_set():
                         break
+                        
+                except asyncio.CancelledError:
+                    # 任务被取消，正常退出
+                    logger.info("预计算工作线程被取消，准备退出")
+                    break
                 except Exception as e:
-                    logger.error(f"处理预计算任务失败: {e}")
+                    logger.error(f"预计算工作线程发生异常: {e}")
+                    # 短暂等待后继续
+                    try:
+                        await asyncio.sleep(1)
+                        if self._should_stop_worker.is_set():
+                            break
+                    except asyncio.CancelledError:
+                        break
                     
         finally:
             self.is_precomputing = False
+            logger.info("嵌入向量预计算工作线程已停止")
             
     async def _process_precompute_task(self, task: PrecomputeTask):
         """处理单个预计算任务"""
@@ -673,3 +709,46 @@ class EmbeddingCacheManager:
                     
         except Exception as e:
             logger.error(f"清理旧嵌入向量失败: {e}")
+    
+    async def cleanup(self):
+        """清理资源，支持优雅退出"""
+        try:
+            logger.info("开始清理嵌入向量缓存管理器资源")
+            
+            # 1. 停止工作线程
+            if hasattr(self, '_should_stop_worker'):
+                self._should_stop_worker.set()
+                
+            if hasattr(self, '_worker_task') and self._worker_task:
+                try:
+                    # 等待工作线程正常退出
+                    await asyncio.wait_for(self._worker_task, timeout=10.0)
+                except asyncio.TimeoutError:
+                    # 如果超时，强制取消
+                    self._worker_task.cancel()
+                    try:
+                        await self._worker_task
+                    except asyncio.CancelledError:
+                        pass
+            
+            # 2. 清空队列
+            if hasattr(self, 'precompute_queue'):
+                while not self.precompute_queue.empty():
+                    try:
+                        self.precompute_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+            
+            logger.info("嵌入向量缓存管理器资源已清理完成")
+            
+        except Exception as e:
+            logger.error(f"清理嵌入向量缓存管理器时发生错误: {e}", exc_info=True)
+    
+    def get_queue_status(self) -> Dict[str, int]:
+        """获取队列状态信息"""
+        return {
+            "queue_size": self.precompute_queue.qsize(),
+            "max_queue_size": self.max_queue_size,
+            "is_precomputing": self.is_precomputing,
+            "pending_precompute": self.precompute_stats.get("pending_precompute", 0)
+        }

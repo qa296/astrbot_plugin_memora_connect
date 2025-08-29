@@ -74,10 +74,10 @@ class MemoraConnectPlugin(Star):
                 self.memory_system.load_memory_state(group_id)
             
             # 2. 注入相关记忆到上下文（快速异步操作）
-            asyncio.create_task(self.memory_system.inject_memories_to_context(event))
+            self.memory_system._create_managed_task(self.memory_system.inject_memories_to_context(event))
             
             # 3. 消息处理使用异步队列，避免阻塞主流程
-            asyncio.create_task(self._process_message_async(event, group_id))
+            self.memory_system._create_managed_task(self._process_message_async(event, group_id))
                 
         except Exception as e:
             self._debug_log(f"on_message处理错误: {e}", "error")
@@ -133,24 +133,67 @@ class MemoraConnectPlugin(Star):
             logger.error(f"LLM请求记忆召回失败: {e}", exc_info=True)
     
     async def terminate(self):
-        """插件卸载时保存记忆"""
-        # 等待待处理的保存任务完成
-        if self.memory_system._pending_save_task and not self.memory_system._pending_save_task.done():
-            await self.memory_system._pending_save_task
+        """插件卸载时保存记忆并清理资源"""
+        self._debug_log("开始插件终止流程，清理所有资源", "info")
         
-        # 保存默认数据库
-        await self.memory_system.save_memory_state()
+        try:
+            # 1. 停止维护循环
+            if hasattr(self.memory_system, '_should_stop_maintenance'):
+                self.memory_system._should_stop_maintenance.set()
+            if hasattr(self.memory_system, '_maintenance_task') and self.memory_system._maintenance_task:
+                # 等待维护任务正常退出
+                try:
+                    await asyncio.wait_for(self.memory_system._maintenance_task, timeout=10.0)
+                except asyncio.TimeoutError:
+                    # 如果超时，取消任务
+                    self.memory_system._maintenance_task.cancel()
+                    try:
+                        await self.memory_system._maintenance_task
+                    except asyncio.CancelledError:
+                        pass
+                        
+            # 2. 取消所有托管的异步任务
+            if hasattr(self.memory_system, '_managed_tasks'):
+                await self.memory_system._cancel_all_managed_tasks()
+            
+            # 3. 等待待处理的保存任务完成
+            if hasattr(self.memory_system, '_pending_save_task') and self.memory_system._pending_save_task and not self.memory_system._pending_save_task.done():
+                try:
+                    await asyncio.wait_for(self.memory_system._pending_save_task, timeout=5.0)
+                except asyncio.TimeoutError:
+                    self.memory_system._pending_save_task.cancel()
+                    try:
+                        await self.memory_system._pending_save_task
+                    except asyncio.CancelledError:
+                        pass
+                    
+            # 4. 清理嵌入向量缓存
+            if hasattr(self.memory_system, 'embedding_cache') and self.memory_system.embedding_cache:
+                try:
+                    await self.memory_system.embedding_cache.cleanup()
+                except Exception as e:
+                    logger.warning(f"清理嵌入向量缓存时出错: {e}")
         
-        # 如果启用了群聊隔离，保存所有群聊数据库
-        if self.memory_system.memory_config.get("enable_group_isolation", True):
-            db_dir = os.path.dirname(self.memory_system.db_path)
-            if os.path.exists(db_dir):
-                for filename in os.listdir(db_dir):
-                    if filename.startswith("memory_group_") and filename.endswith(".db"):
-                        group_id = filename[12:-3]
-                        await self.memory_system.save_memory_state(group_id)
-        
-        self._debug_log("记忆系统已保存并关闭", "info")
+            # 5. 保存记忆状态
+            await self.memory_system.save_memory_state()
+            
+            # 6. 如果启用了群聊隔离，保存所有群聊数据库
+            if self.memory_system.memory_config.get("enable_group_isolation", True):
+                db_dir = os.path.dirname(self.memory_system.db_path)
+                if os.path.exists(db_dir):
+                    for filename in os.listdir(db_dir):
+                        if filename.startswith("memory_group_") and filename.endswith(".db"):
+                            group_id = filename[12:-3]
+                            await self.memory_system.save_memory_state(group_id)
+            
+            self._debug_log("记忆系统已保存并安全关闭", "info")
+            
+        except Exception as e:
+            logger.error(f"插件终止过程中发生错误: {e}", exc_info=True)
+            
+    async def safe_cleanup(self):
+        """安全清理方法，用于在 terminate 之外调用的情况"""
+        await self.terminate()
 
     # ---------- LLM 函数工具 ----------
     @filter.llm_tool(name="create_memory")
@@ -318,6 +361,12 @@ class MemorySystem:
         self._save_locks = {}  # 保存锁 {group_id: asyncio.Lock}
         self._last_save_time = {}  # 最后保存时间 {group_id: timestamp}
         self._pending_save_task = None  # 待处理的保存任务
+        
+        # 异步任务生命周期管理 - 新增
+        self._managed_tasks = set()  # 管理的异步任务集合
+        self._maintenance_task = None  # 维护循环任务
+        self._should_stop_maintenance = asyncio.Event()  # 停止维护事件
+        self._should_stop_maintenance.clear()  # 初始不停止
         
     def _get_group_db_path(self, group_id: str) -> str:
         """获取群聊专用的数据库路径"""
