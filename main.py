@@ -55,6 +55,53 @@ class MemoraConnectPlugin(Star):
     async def memory_status(self, event: AstrMessageEvent):
         stats = self.memory_display.format_memory_statistics()
         yield event.plain_result(stats)
+
+    @memory.command("印象")
+    async def memory_impression(self, event: AstrMessageEvent, name: str):
+        """查询人物印象摘要和相关记忆"""
+        try:
+            # 获取群组ID
+            group_id = self.memory_system._extract_group_id_from_event(event)
+            
+            # 获取印象摘要
+            impression_summary = self.memory_system.get_person_impression_summary(group_id, name)
+            
+            # 获取印象记忆列表
+            impression_memories = self.memory_system.get_person_impression_memories(group_id, name, limit=5)
+            
+            # 格式化响应
+            response_parts = []
+            
+            # 添加印象摘要
+            if impression_summary:
+                score = impression_summary.get("score", 0.5)
+                score_desc = self.memory_system._score_to_description(score)
+                response_parts.append(f"📝 {name} 的印象摘要:")
+                response_parts.append(f"   印象: {impression_summary.get('summary', '无')}")
+                response_parts.append(f"   好感度: {score_desc} ({score:.2f})")
+                response_parts.append(f"   记忆数: {impression_summary.get('memory_count', 0)}")
+                response_parts.append(f"   更新时间: {impression_summary.get('last_updated', '无')}")
+            else:
+                response_parts.append(f"📝 尚未建立对 {name} 的印象")
+            
+            # 添加相关记忆
+            if impression_memories:
+                response_parts.append("\n📚 相关记忆:")
+                for i, memory in enumerate(impression_memories, 1):
+                    response_parts.append(f"   {i}. {memory['content']}")
+                    if memory.get('details'):
+                        response_parts.append(f"      详情: {memory['details']}")
+                    response_parts.append(f"      好感度: {memory['score']:.2f} | 时间: {memory['last_accessed']}")
+            else:
+                response_parts.append(f"\n📚 暂无关于 {name} 的印象记忆")
+            
+            # 组合响应
+            response = "\n".join(response_parts)
+            yield event.plain_result(response)
+            
+        except Exception as e:
+            logger.error(f"查询印象失败: {e}")
+            yield event.plain_result(f"查询 {name} 的印象时出现错误")
     
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
@@ -303,6 +350,83 @@ class MemoraConnectPlugin(Star):
             logger.error(f"增强记忆召回工具失败：{e}")
             yield event.plain_result("")
 
+    @filter.llm_tool(name="adjust_impression")
+    async def adjust_impression_tool(
+        self,
+        event: AstrMessageEvent,
+        person_name: str,
+        delta: float,
+        reason: str = ""
+    ) -> MessageEventResult:
+        """调整对某人的印象和好感度
+
+        Args:
+            person_name(string): 人物名称
+            delta(float): 好感度调整量，可正可负
+            reason(string): 调整原因和详细信息
+        """
+        try:
+            # 获取群组ID
+            group_id = self.memory_system._extract_group_id_from_event(event)
+            
+            # 调整印象分数
+            new_score = self.memory_system.adjust_impression_score(group_id, person_name, delta)
+            
+            # 记录调整原因
+            if reason:
+                summary = f"调整对{person_name}的印象：{reason}，当前好感度：{new_score:.2f}"
+                self.memory_system.record_person_impression(group_id, person_name, summary, new_score, reason)
+            
+            logger.info(f"LLM工具调整印象：{person_name} 调整量:{delta} 新分数:{new_score:.2f}")
+            
+            # 返回空字符串让LLM继续其自然回复流程
+            yield event.plain_result("")
+            
+        except Exception as e:
+            logger.error(f"LLM工具调整印象失败：{e}")
+            yield event.plain_result("")
+
+    @filter.llm_tool(name="record_impression")
+    async def record_impression_tool(
+        self,
+        event: AstrMessageEvent,
+        person_name: str,
+        summary: str,
+        score: float = None,
+        details: str = ""
+    ) -> MessageEventResult:
+        """记录或更新对某人的印象
+
+        Args:
+            person_name(string): 人物名称
+            summary(string): 印象摘要描述
+            score(float): 好感度分数 (0-1)，可选
+            details(string): 详细信息和背景
+        """
+        try:
+            # 获取群组ID
+            group_id = self.memory_system._extract_group_id_from_event(event)
+            
+            # 验证分数范围
+            if score is not None:
+                score = max(0.0, min(1.0, float(score)))
+            
+            # 记录印象
+            memory_id = self.memory_system.record_person_impression(
+                group_id, person_name, summary, score, details
+            )
+            
+            if memory_id:
+                current_score = self.memory_system.get_impression_score(group_id, person_name)
+                logger.info(f"LLM工具记录印象：{person_name} 分数:{current_score:.2f} 摘要:{summary[:50]}...")
+            
+            # 返回空字符串让LLM继续其自然回复流程
+            yield event.plain_result("")
+            
+        except Exception as e:
+            logger.error(f"LLM工具记录印象失败：{e}")
+            yield event.plain_result("")
+
 
 class MemorySystem:
     """核心记忆系统，模仿人类海马体功能"""
@@ -325,6 +449,14 @@ class MemorySystem:
         self.embedding_provider = None
         self.batch_extractor = BatchMemoryExtractor(self)
         self.embedding_cache = None  # 嵌入向量缓存管理器
+        
+        # 印象系统配置
+        self.impression_config = {
+            "default_score": 0.5,
+            "enable_impression_injection": config.get("enable_impression_injection", True),
+            "min_score": 0.0,
+            "max_score": 1.0
+        }
         
         # 配置初始化
         config = config or {}
@@ -367,6 +499,47 @@ class MemorySystem:
         self._maintenance_task = None  # 维护循环任务
         self._should_stop_maintenance = asyncio.Event()  # 停止维护事件
         self._should_stop_maintenance.clear()  # 初始不停止
+        
+    def _create_managed_task(self, coro):
+        """创建托管的异步任务，确保任务生命周期被正确管理"""
+        if not asyncio.iscoroutine(coro):
+            self._debug_log(f"无法创建任务：传入的不是协程对象", "warning")
+            return
+        
+        task = asyncio.create_task(coro)
+        self._managed_tasks.add(task)
+        
+        # 添加任务完成回调，自动清理
+        def _task_done_callback(t):
+            self._managed_tasks.discard(t)
+            if t.exception():
+                self._debug_log(f"托管任务异常: {t.exception()}", "error")
+        
+        task.add_done_callback(_task_done_callback)
+        return task
+    
+    async def _cancel_all_managed_tasks(self):
+        """取消所有托管的异步任务"""
+        if not self._managed_tasks:
+            return
+        
+        # 取消所有任务
+        for task in self._managed_tasks:
+            if not task.done():
+                task.cancel()
+        
+        # 等待所有任务完成或取消
+        if self._managed_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._managed_tasks, return_exceptions=True),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                # 如果超时，强制清理
+                self._managed_tasks.clear()
+        
+        self._debug_log("已清理所有托管任务", "debug")
         
     def _get_group_db_path(self, group_id: str) -> str:
         """获取群聊专用的数据库路径"""
@@ -815,6 +988,7 @@ class MemorySystem:
             themes = []
             concept_ids = []  # 存储创建的概念ID
             valid_memories = 0
+            valid_impressions = 0  # 记录有效印象数量
             
             for memory_data in extracted_memories:
                 try:
@@ -826,6 +1000,7 @@ class MemorySystem:
                     emotion = str(memory_data.get("emotion", "")).strip()
                     tags = str(memory_data.get("tags", "")).strip()
                     confidence = float(memory_data.get("confidence", 0.7))
+                    memory_type = str(memory_data.get("memory_type", "normal")).strip().lower()
                     
                     # 验证数据完整性
                     if not theme or not content:
@@ -835,22 +1010,37 @@ class MemorySystem:
                     base_strength = 1.0
                     adjusted_strength = base_strength * max(0.0, min(1.0, confidence))
                     
-                    # 添加概念和记忆
-                    concept_id = self.memory_graph.add_concept(theme)
-                    memory_id = self.memory_graph.add_memory(
-                        content=content,
-                        concept_id=concept_id,
-                        details=details,
-                        participants=participants,
-                        location=location,
-                        emotion=emotion,
-                        tags=tags,
-                        strength=adjusted_strength
-                    )
+                    # 特殊处理印象记忆
+                    if memory_type == "impression":
+                        # 从主题中提取人物姓名
+                        person_name = self._extract_person_name_from_theme(theme)
+                        if person_name:
+                            # 使用印象系统记录人物印象
+                            impression_score = adjusted_strength  # 使用记忆强度作为印象分数
+                            self.record_person_impression(group_id, person_name, content, impression_score, details)
+                            valid_impressions += 1
+                        else:
+                            # 如果无法提取人名，作为普通记忆处理
+                            memory_type = "normal"
                     
-                    themes.append(theme)
-                    concept_ids.append(concept_id)
-                    valid_memories += 1
+                    # 处理普通记忆
+                    if memory_type == "normal":
+                        # 添加概念和记忆
+                        concept_id = self.memory_graph.add_concept(theme)
+                        memory_id = self.memory_graph.add_memory(
+                            content=content,
+                            concept_id=concept_id,
+                            details=details,
+                            participants=participants,
+                            location=location,
+                            emotion=emotion,
+                            tags=tags,
+                            strength=adjusted_strength
+                        )
+                        
+                        themes.append(theme)
+                        concept_ids.append(concept_id)
+                        valid_memories += 1
                     
                 except (KeyError, ValueError, TypeError):
                     continue
@@ -867,6 +1057,48 @@ class MemorySystem:
                         self.establish_connections(concept_id, themes)
                     except Exception:
                         continue
+            
+            # 提取人物印象（如果启用）
+            if self.impression_config.get("enable_impression_injection", True):
+                try:
+                    # 检查LLM是否可用
+                    llm_provider = await self.get_llm_provider()
+                    if llm_provider:
+                        extracted_impressions = await self.batch_extractor.extract_impressions_from_conversation(full_history, group_id)
+                        
+                        if extracted_impressions:
+                            valid_impressions = 0
+                            for impression_data in extracted_impressions:
+                                try:
+                                    person_name = impression_data.get("person_name", "").strip()
+                                    summary = impression_data.get("summary", "").strip()
+                                    score = impression_data.get("score", 0.5)
+                                    details = impression_data.get("details", "").strip()
+                                    confidence = impression_data.get("confidence", 0.5)
+                                    
+                                    # 验证数据完整性
+                                    if not person_name or not summary:
+                                        continue
+                                    
+                                    # 根据置信度决定是否记录印象
+                                    if confidence >= 0.3:  # 置信度阈值
+                                        memory_id = self.record_person_impression(
+                                            group_id, person_name, summary, score, details
+                                        )
+                                        if memory_id:
+                                            valid_impressions += 1
+                                            
+                                except (KeyError, ValueError, TypeError):
+                                    continue
+                            
+                            if valid_impressions > 0:
+                                self._debug_log(f"提取印象{group_info}: {valid_impressions}条", "debug")
+                    else:
+                        # LLM不可用时的回退逻辑：基于关键词的简单印象提取
+                        await self._fallback_impression_extraction(full_history, group_id)
+                            
+                except Exception as e:
+                    self._debug_log(f"印象提取失败: {e}", "warning")
             
             # 根据回忆模式决定是否触发回忆
             recall_mode = self.memory_config["recall_mode"]
@@ -1825,7 +2057,7 @@ class MemorySystem:
             return []
 
     async def inject_memories_to_context(self, event: AstrMessageEvent):
-        """将相关记忆注入到对话上下文中"""
+        """将相关记忆和印象注入到对话上下文中"""
         try:
             if not self.memory_config.get("enable_enhanced_memory", True):
                 return
@@ -1842,6 +2074,14 @@ class MemorySystem:
             if len(current_message) < 3:
                 return
             
+            # 获取群组ID
+            group_id = self._extract_group_id_from_event(event)
+            
+            # 注入印象上下文（如果启用）
+            impression_context = ""
+            if self.impression_config.get("enable_impression_injection", True):
+                impression_context = await self._inject_impressions_to_context(current_message, group_id)
+            
             # 使用增强记忆召回系统获取相关记忆
             from .enhanced_memory_recall import EnhancedMemoryRecall
             
@@ -1855,19 +2095,152 @@ class MemorySystem:
             threshold = self.memory_config.get("memory_injection_threshold", 0.3)
             filtered_results = [r for r in results if hasattr(r, 'relevance_score') and r.relevance_score >= threshold]
             
+            # 组合记忆上下文和印象上下文
+            combined_context = ""
+            if impression_context:
+                combined_context += impression_context + "\n\n"
+            
             if filtered_results:
                 # 使用增强格式化
                 memory_context = enhanced_recall.format_memories_for_llm(filtered_results)
-                
+                combined_context += memory_context
+            
+            if combined_context:
                 # 注入到AstrBot的上下文中
                 if not hasattr(event, 'context_extra'):
                     event.context_extra = {}
-                event.context_extra["memory_context"] = memory_context
+                event.context_extra["memory_context"] = combined_context
                 
-                self._debug_log(f"已注入 {len(filtered_results)} 条记忆到上下文", "debug")
+                debug_info = []
+                if impression_context:
+                    debug_info.append("印象")
+                if filtered_results:
+                    debug_info.append(f"{len(filtered_results)}条记忆")
+                self._debug_log(f"已注入 {'+'.join(debug_info)} 到上下文", "debug")
                 
         except Exception as e:
             self._debug_log(f"注入记忆到上下文失败: {e}", "warning")
+
+    async def _inject_impressions_to_context(self, current_message: str, group_id: str) -> str:
+        """注入印象信息到对话上下文"""
+        try:
+            # 从消息中提取人名
+            mentioned_names = self._extract_mentioned_names(current_message)
+            if not mentioned_names:
+                return ""
+            
+            # 获取发送者名称
+            sender_name = self._extract_sender_name_from_message(current_message)
+            
+            # 合并所有相关人名（包括发送者和提及的人）
+            all_names = set()
+            if sender_name:
+                all_names.add(sender_name)
+            all_names.update(mentioned_names)
+            
+            # 获取这些人的印象信息
+            impression_lines = []
+            for name in all_names:
+                impression_summary = self.get_person_impression_summary(group_id, name)
+                if impression_summary and impression_summary.get("summary"):
+                    score = impression_summary.get("score", 0.5)
+                    score_desc = self._score_to_description(score)
+                    impression_lines.append(f"- {name}: {impression_summary['summary']} (好感度: {score_desc})")
+            
+            if impression_lines:
+                return "【人物印象】\n" + "\n".join(impression_lines)
+            
+            return ""
+            
+        except Exception as e:
+            self._debug_log(f"注入印象上下文失败: {e}", "warning")
+            return ""
+
+    def _extract_mentioned_names(self, message: str) -> List[str]:
+        """从消息中提取提到的人名"""
+        try:
+            # 简单的人名提取，匹配常见的中文名模式
+            # 2-4个中文字符，且不是常见词汇
+            common_words = {"你好", "谢谢", "再见", "好的", "是的", "不是", "可以", "不行", "知道", "不知道", "明白", "不明白"}
+            names = set()
+            
+            # 匹配2-4个中文字符
+            chinese_names = re.findall(r'[\u4e00-\u9fff]{2,4}', message)
+            
+            for name in chinese_names:
+                if name not in common_words:
+                    names.add(name)
+            
+            return list(names)
+            
+        except Exception as e:
+            self._debug_log(f"提取人名失败: {e}", "debug")
+            return []
+
+    def _extract_sender_name_from_message(self, message: str) -> Optional[str]:
+        """从消息中提取发送者名称"""
+        try:
+            # 这里可以根据实际情况实现更复杂的逻辑
+            # 目前简单返回None，让调用者处理
+            return None
+            
+        except Exception as e:
+            self._debug_log(f"提取发送者名称失败: {e}", "debug")
+            return None
+
+    def _score_to_description(self, score: float) -> str:
+        """将好感度分数转换为描述性文字"""
+        try:
+            if score >= 0.8:
+                return "很高"
+            elif score >= 0.6:
+                return "较高"
+            elif score >= 0.4:
+                return "一般"
+            elif score >= 0.2:
+                return "较低"
+            else:
+                return "很低"
+                
+        except Exception as e:
+            self._debug_log(f"分数描述转换失败: {e}", "debug")
+            return "一般"
+
+    def _extract_person_name_from_theme(self, theme: str) -> Optional[str]:
+        """从主题中提取人物姓名
+        
+        Args:
+            theme: 主题字符串，可能包含人物姓名
+            
+        Returns:
+            str: 提取的人物姓名，无法提取则返回None
+        """
+        try:
+            # 清理主题字符串
+            theme = theme.strip()
+            if not theme:
+                return None
+            
+            # 分割主题（可能包含多个关键词）
+            parts = theme.split(',')
+            
+            # 查找包含人名的部分
+            for part in parts:
+                part = part.strip()
+                
+                # 跳过明显的非人名关键词
+                if part in ["印象", "评价", "看法", "感觉", "印象", "人际"]:
+                    continue
+                
+                # 检查是否是有效的人名（2-4个中文字符）
+                if len(part) >= 2 and len(part) <= 4 and re.match(r'^[\u4e00-\u9fff]+$', part):
+                    return part
+            
+            return None
+            
+        except Exception as e:
+            self._debug_log(f"从主题提取人名失败: {e}", "debug")
+            return None
 
     async def query_memory(self, query: str, event: AstrMessageEvent = None) -> List[str]:
         """记忆查询接口"""
@@ -1952,6 +2325,311 @@ class MemorySystem:
         except Exception as e:
             logger.error(f"上下文格式化失败: {e}")
             return ""
+    
+    def ensure_person_impression(self, group_id: str, person_name: str) -> str:
+        """确保指定群组的人物印象概念存在，返回概念ID
+        
+        Args:
+            group_id: 群组ID，用于跨群隔离
+            person_name: 人物名称
+            
+        Returns:
+            str: 概念ID
+        """
+        try:
+            # 构建印象概念名称，格式：Imprint:GROUPID:NAME
+            concept_name = f"Imprint:{group_id}:{person_name}"
+            
+            # 检查是否已存在
+            for concept in self.memory_graph.concepts.values():
+                if concept.name == concept_name:
+                    return concept.id
+            
+            # 创建新的印象概念
+            concept_id = self.memory_graph.add_concept(concept_name)
+            self._debug_log(f"创建新印象概念: {concept_name}", "debug")
+            
+            return concept_id
+            
+        except Exception as e:
+            self._debug_log(f"确保印象概念失败: {e}", "error")
+            return ""
+    
+    def record_person_impression(self, group_id: str, person_name: str, summary: str,
+                               score: Optional[float] = None, details: str = "") -> str:
+        """记录或更新人物印象
+        
+        Args:
+            group_id: 群组ID
+            person_name: 人物名称
+            summary: 印象摘要
+            score: 好感度分数 (0-1)，默认使用配置的默认值
+            details: 详细信息
+            
+        Returns:
+            str: 记忆ID
+        """
+        try:
+            # 确保印象概念存在
+            concept_id = self.ensure_person_impression(group_id, person_name)
+            if not concept_id:
+                return ""
+            
+            # 使用默认分数或指定分数
+            if score is None:
+                score = float(self.impression_config["default_score"])
+            
+            # 确保score是float类型
+            score = float(score)
+            
+            # 限制分数范围
+            score = max(float(self.impression_config["min_score"]),
+                       min(float(self.impression_config["max_score"]), score))
+            
+            # 创建印象记忆
+            memory_id = self.memory_graph.add_memory(
+                content=summary,
+                concept_id=concept_id,
+                details=details,
+                participants=person_name,
+                emotion="印象",
+                tags="人际",
+                strength=score
+            )
+            
+            self._debug_log(f"记录印象: {person_name} (分数: {score})", "debug")
+            
+            return memory_id
+            
+        except Exception as e:
+            self._debug_log(f"记录印象失败: {e}", "error")
+            return ""
+    
+    def get_impression_score(self, group_id: str, person_name: str) -> float:
+        """获取人物的好感度分数
+        
+        Args:
+            group_id: 群组ID
+            person_name: 人物名称
+            
+        Returns:
+            float: 好感度分数，未找到返回默认值
+        """
+        try:
+            concept_name = f"Imprint:{group_id}:{person_name}"
+            
+            # 查找对应的印象概念
+            concept_id = None
+            for concept in self.memory_graph.concepts.values():
+                if concept.name == concept_name:
+                    concept_id = concept.id
+                    break
+            
+            if not concept_id:
+                return self.impression_config["default_score"]
+            
+            # 获取该概念下最新的记忆（即最新印象）
+            concept_memories = [
+                m for m in self.memory_graph.memories.values()
+                if m.concept_id == concept_id
+            ]
+            
+            if not concept_memories:
+                return self.impression_config["default_score"]
+            
+            # 按时间排序，获取最新的印象分数
+            latest_memory = max(concept_memories, key=lambda m: m.last_accessed)
+            return latest_memory.strength
+            
+        except Exception as e:
+            self._debug_log(f"获取印象分数失败: {e}", "error")
+            return self.impression_config["default_score"]
+    
+    def adjust_impression_score(self, group_id: str, person_name: str, delta: float) -> float:
+        """调整人物的好感度分数
+        
+        Args:
+            group_id: 群组ID
+            person_name: 人物名称
+            delta: 调整增量（可正可负）
+            
+        Returns:
+            float: 调整后的新分数
+        """
+        try:
+            # 获取当前分数
+            current_score = self.get_impression_score(group_id, person_name)
+            
+            # 计算新分数
+            new_score = current_score + delta
+            new_score = max(self.impression_config["min_score"],
+                           min(self.impression_config["max_score"], new_score))
+            
+            # 获取印象概念
+            concept_name = f"Imprint:{group_id}:{person_name}"
+            concept_id = None
+            for concept in self.memory_graph.concepts.values():
+                if concept.name == concept_name:
+                    concept_id = concept.id
+                    break
+            
+            if concept_id:
+                # 查找现有的印象记忆
+                concept_memories = [
+                    m for m in self.memory_graph.memories.values()
+                    if m.concept_id == concept_id
+                ]
+                
+                if concept_memories:
+                    # 更新最新一条印象记忆的强度
+                    latest_memory = max(concept_memories, key=lambda m: m.last_accessed)
+                    latest_memory.strength = new_score
+                    latest_memory.last_accessed = time.time()
+                    self._debug_log(f"更新现有印象记忆强度: {person_name} -> {new_score:.2f}", "debug")
+                else:
+                    # 如果没有现有记忆，创建新的
+                    summary = f"对{person_name}的印象更新，当前好感度：{new_score:.2f}"
+                    self.record_person_impression(group_id, person_name, summary, new_score)
+            else:
+                # 如果概念不存在，创建新的印象
+                summary = f"对{person_name}的印象更新，当前好感度：{new_score:.2f}"
+                self.record_person_impression(group_id, person_name, summary, new_score)
+            
+            self._debug_log(f"调整印象分数: {person_name} {current_score:.2f} -> {new_score:.2f}", "debug")
+            
+            return new_score
+            
+        except Exception as e:
+            self._debug_log(f"调整印象分数失败: {e}", "error")
+            return self.get_impression_score(group_id, person_name)
+    
+    def get_person_impression_summary(self, group_id: str, person_name: str) -> Dict[str, Any]:
+        """获取人物印象摘要信息
+        
+        Args:
+            group_id: 群组ID
+            person_name: 人物名称
+            
+        Returns:
+            dict: 包含印象摘要的字典
+        """
+        try:
+            concept_name = f"Imprint:{group_id}:{person_name}"
+            
+            # 查找对应的印象概念
+            concept_id = None
+            concept = None
+            for c in self.memory_graph.concepts.values():
+                if c.name == concept_name:
+                    concept_id = c.id
+                    concept = c
+                    break
+            
+            if not concept_id or not concept:
+                return {
+                    "name": person_name,
+                    "score": self.impression_config["default_score"],
+                    "summary": f"尚未建立对{person_name}的印象",
+                    "memory_count": 0,
+                    "last_updated": "无"
+                }
+            
+            # 获取该概念下的所有印象记忆
+            impression_memories = [
+                m for m in self.memory_graph.memories.values()
+                if m.concept_id == concept_id
+            ]
+            
+            if not impression_memories:
+                return {
+                    "name": person_name,
+                    "score": self.impression_config["default_score"],
+                    "summary": f"对{person_name}的印象记录为空",
+                    "memory_count": 0,
+                    "last_updated": "无"
+                }
+            
+            # 获取最新印象
+            latest_memory = max(impression_memories, key=lambda m: m.last_accessed)
+            current_score = latest_memory.strength
+            
+            # 获取印象摘要
+            summary = latest_memory.content
+            
+            # 格式化时间
+            last_updated = latest_memory.last_accessed.strftime("%Y-%m-%d %H:%M:%S")
+            
+            return {
+                "name": person_name,
+                "score": current_score,
+                "summary": summary,
+                "memory_count": len(impression_memories),
+                "last_updated": last_updated
+            }
+            
+        except Exception as e:
+            self._debug_log(f"获取印象摘要失败: {e}", "error")
+            return {
+                "name": person_name,
+                "score": self.impression_config["default_score"],
+                "summary": "获取印象信息失败",
+                "memory_count": 0,
+                "last_updated": "无"
+            }
+    
+    def get_person_impression_memories(self, group_id: str, person_name: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """获取人物印象相关的记忆列表
+        
+        Args:
+            group_id: 群组ID
+            person_name: 人物名称
+            limit: 返回的记忆数量限制
+            
+        Returns:
+            List[dict]: 记忆列表
+        """
+        try:
+            concept_name = f"Imprint:{group_id}:{person_name}"
+            
+            # 查找对应的印象概念
+            concept_id = None
+            for c in self.memory_graph.concepts.values():
+                if c.name == concept_name:
+                    concept_id = c.id
+                    break
+            
+            if not concept_id:
+                return []
+            
+            # 获取该概念下的所有印象记忆
+            impression_memories = [
+                m for m in self.memory_graph.memories.values()
+                if m.concept_id == concept_id
+            ]
+            
+            # 按时间倒序排序
+            impression_memories.sort(key=lambda m: m.last_accessed, reverse=True)
+            
+            # 限制数量
+            impression_memories = impression_memories[:limit]
+            
+            # 转换为字典格式
+            memories_list = []
+            for memory in impression_memories:
+                memories_list.append({
+                    "id": memory.id,
+                    "content": memory.content,
+                    "details": memory.details or "",
+                    "score": memory.strength,
+                    "created": memory.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    "last_accessed": memory.last_accessed.strftime("%Y-%m-%d %H:%M:%S")
+                })
+            
+            return memories_list
+            
+        except Exception as e:
+            self._debug_log(f"获取印象记忆失败: {e}", "error")
+            return []
 
 
 class BatchMemoryExtractor:
@@ -1986,6 +2664,7 @@ class BatchMemoryExtractor:
    - 重要事件（高置信度：0.7-1.0）
    - 日常小事（中置信度：0.4-0.7）
    - 有趣细节（低置信度：0.1-0.4）
+   - 人物印象（对他人评价、看法或互动）
 2. 为每个记忆生成完整信息：
    - 主题（theme）：核心关键词，用逗号分隔
    - 内容（content）：简洁的核心记忆
@@ -1995,6 +2674,7 @@ class BatchMemoryExtractor:
    - 情感（emotion）：情感色彩
    - 标签（tags）：分类标签
    - 置信度（confidence）：0-1之间的数值
+   - 记忆类型（memory_type）："normal"（普通记忆）或"impression"（人物印象）
 3. 可以生成多个记忆，包括小事
 4. 返回JSON格式
 
@@ -2002,6 +2682,9 @@ class BatchMemoryExtractor:
 - 请仔细区分[Bot]和用户的发言
 - 当[Bot]发言时，在参与者字段使用第一人称"我"而不是"其他用户"
 - 确保LLM在后续上下文引用时能准确区分Bot的自我表述与用户的外部输入
+- 对于人物印象记忆：memory_type设为"impression"，并在theme中包含人物姓名
+- 对于普通记忆：memory_type设为"normal"
+- 当对话中涉及对他人（非Bot）的评价、看法或互动时，创建印象记忆
 
 返回格式：
 {{
@@ -2014,7 +2697,19 @@ class BatchMemoryExtractor:
       "location": "会议室",
       "emotion": "兴奋,满意",
       "tags": "重要,成功",
-      "confidence": 0.9
+      "confidence": 0.9,
+      "memory_type": "normal"
+    }},
+    {{
+      "theme": "张三,印象",
+      "content": "张三很友善且乐于助人",
+      "details": "在讨论中主动提供帮助，态度友好",
+      "participants": "我,张三",
+      "location": "会议室",
+      "emotion": "赞赏",
+      "tags": "印象,人际",
+      "confidence": 0.8,
+      "memory_type": "impression"
     }},
     {{
       "theme": "午餐,同事",
@@ -2024,7 +2719,8 @@ class BatchMemoryExtractor:
       "location": "公司食堂",
       "emotion": "轻松,愉快",
       "tags": "日常,社交",
-      "confidence": 0.5
+      "confidence": 0.5,
+      "memory_type": "normal"
     }}
   ]
 }}
@@ -2034,6 +2730,8 @@ class BatchMemoryExtractor:
 - 小事也可以记录，降低置信度即可
 - 内容要具体、生动
 - 可以生成5-8个记忆
+- 特别注意识别人物印象，当涉及对他人评价时创建印象记忆
+- 印象记忆的theme应包含人物姓名和"印象"关键词
 - 只返回JSON
 """
 
@@ -2148,6 +2846,7 @@ class BatchMemoryExtractor:
                     location = str(mem.get("location", "")).strip()
                     emotion = str(mem.get("emotion", "")).strip()
                     tags = str(mem.get("tags", "")).strip()
+                    memory_type = str(mem.get("memory_type", "normal")).strip().lower()
                     
                     # 清理主题中的特殊字符
                     theme = re.sub(r'[^\w\u4e00-\u9fff,，]', '', theme)
@@ -2161,7 +2860,8 @@ class BatchMemoryExtractor:
                             "location": location,
                             "emotion": emotion,
                             "tags": tags,
-                            "confidence": max(0.0, min(1.0, confidence))
+                            "confidence": max(0.0, min(1.0, confidence)),
+                            "memory_type": memory_type if memory_type in ["normal", "impression"] else "normal"
                         })
                         
                 except (ValueError, TypeError):
