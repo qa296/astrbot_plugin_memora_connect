@@ -20,7 +20,7 @@ from astrbot.api import AstrBotConfig
 from astrbot.api.star import StarTools
 import astrbot.api.message_components as Comp
 
-@register("astrbot_plugin_memora_connect", "qa296", "一个模仿人类记忆方式的记忆插件", "0.2.1", "https://github.com/qa296/astrbot_plugin_memora_connect")
+@register("astrbot_plugin_memora_connect", "qa296", "一个模仿人类记忆方式的记忆插件", "0.2.2", "https://github.com/qa296/astrbot_plugin_memora_connect")
 class MemoraConnectPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -40,22 +40,6 @@ class MemoraConnectPlugin(Star):
         except Exception as e:
             logger.error(f"记忆系统初始化失败: {e}", exc_info=True)
         
-<<<<<<< HEAD
-    @filter.command("记忆")
-    async def memory_command(self, event: AstrMessageEvent):
-        """记忆相关指令"""
-        message = event.message_str.strip()
-        if message == "/记忆":
-            yield event.plain_result("记忆系统已加载！")
-        elif message.startswith("/记忆 回忆"):
-            keyword = message[5:].strip()
-            memories = await self.memory_system.recall_memories_full(keyword)
-            response = self.memory_display.format_memory_search_result(memories, keyword)
-            yield event.plain_result(response)
-        elif message.startswith("/记忆 状态"):
-            stats = self.memory_display.format_memory_statistics()
-            yield event.plain_result(stats)
-=======
     @filter.command_group("记忆")
     def memory(self):
         """记忆管理指令组"""
@@ -71,7 +55,6 @@ class MemoraConnectPlugin(Star):
     async def memory_status(self, event: AstrMessageEvent):
         stats = self.memory_display.format_memory_statistics()
         yield event.plain_result(stats)
->>>>>>> 850c4430bdf3cf49aec011daad012c4de5167cab
     
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
