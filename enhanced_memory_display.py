@@ -15,46 +15,54 @@ class EnhancedMemoryDisplay:
         try:
             # 基础信息
             parts = [
-                f"📌 **{concept.name}**",
-                f"💭 {memory.content}"
+                f"**{concept.name}**",
+                f"{memory.content}"
             ]
             
             # 详细信息
             if memory.details:
-                parts.append(f"📝 细节: {memory.details}")
+                parts.append(f"细节: {memory.details}")
             
             if memory.participants:
                 participants = memory.participants.split(',') if isinstance(memory.participants, str) else memory.participants
-                parts.append(f"👥 参与者: {', '.join(participants)}")
+                # 特殊处理Bot身份标识
+                formatted_participants = []
+                for participant in participants:
+                    participant = participant.strip()
+                    if participant == "我":
+                        formatted_participants.append("我(Bot)")
+                    else:
+                        formatted_participants.append(participant)
+                parts.append(f"参与者: {', '.join(formatted_participants)}")
             
             if memory.location:
-                parts.append(f"📍 地点: {memory.location}")
+                parts.append(f"地点: {memory.location}")
             
             if memory.emotion:
-                parts.append(f"😊 情感: {memory.emotion}")
+                parts.append(f"情感: {memory.emotion}")
             
             if memory.tags:
                 tags = memory.tags.split(',') if isinstance(memory.tags, str) else memory.tags
-                parts.append(f"🏷️ 标签: {', '.join(tags)}")
+                parts.append(f"标签: {', '.join(tags)}")
             
             # 时间信息
             created_time = datetime.fromtimestamp(memory.created_at).strftime('%Y-%m-%d %H:%M')
-            parts.append(f"⏰ 创建时间: {created_time}")
+            parts.append(f"创建时间: {created_time}")
             
             # 记忆强度
             strength_bar = self._create_strength_bar(memory.strength)
-            parts.append(f"💪 记忆强度: {strength_bar} ({memory.strength:.2f})")
+            parts.append(f"记忆强度: {strength_bar} ({memory.strength:.2f})")
             
             # 访问统计
             if memory.access_count > 0:
                 last_access = datetime.fromtimestamp(memory.last_accessed).strftime('%Y-%m-%d %H:%M')
-                parts.append(f"👀 访问次数: {memory.access_count} (最后访问: {last_access})")
+                parts.append(f"访问次数: {memory.access_count} (最后访问: {last_access})")
             
             return "\n".join(parts)
             
         except Exception as e:
             logger.error(f"格式化详细记忆失败: {e}")
-            return f"💭 {memory.content}"
+            return f"{memory.content}"
     
     def _create_strength_bar(self, strength: float) -> str:
         """创建记忆强度进度条"""
@@ -73,7 +81,7 @@ class EnhancedMemoryDisplay:
             if not memories:
                 return "没有找到相关记忆"
             
-            parts = [f"📚 找到 {len(memories)} 条相关记忆\n"]
+            parts = [f"找到 {len(memories)} 条相关记忆\n"]
             
             for i, memory in enumerate(memories, 1):
                 concept = concepts.get(memory.concept_id)
@@ -89,14 +97,19 @@ class EnhancedMemoryDisplay:
                         details.append(f"地点: {memory.location}")
                     if memory.participants:
                         participants = memory.participants.split(',') if isinstance(memory.participants, str) else memory.participants
-                        details.append(f"参与者: {len(participants)}人")
+                        # 特殊处理Bot身份标识，统计Bot参与的记忆
+                        bot_count = sum(1 for p in participants if p.strip() == "我")
+                        if bot_count > 0:
+                            details.append(f"参与者: {len(participants)}人 (含Bot)")
+                        else:
+                            details.append(f"参与者: {len(participants)}人")
                     
                     if details:
-                        parts.append(f"   📌 {', '.join(details)}")
+                        parts.append(f"   {', '.join(details)}")
                     
                     # 记忆强度
                     strength_bar = self._create_strength_bar(memory.strength)
-                    parts.append(f"   💪 {strength_bar} ({memory.strength:.2f})\n")
+                    parts.append(f"   {strength_bar} ({memory.strength:.2f})\n")
             
             return "\n".join(parts)
             
@@ -108,9 +121,9 @@ class EnhancedMemoryDisplay:
         """格式化记忆搜索结果"""
         try:
             if not memories:
-                return f"🔍 没有找到与 '{query}' 相关的记忆"
-            
-            parts = [f"🔍 搜索 '{query}' 的结果: 找到 {len(memories)} 条相关记忆\n"]
+                return f"没有找到与 '{query}' 相关的记忆"
+        
+            parts = [f"搜索 '{query}' 的结果: 找到 {len(memories)} 条相关记忆\n"]
             
             # 按记忆强度排序
             memories.sort(key=lambda m: m.strength, reverse=True)
@@ -136,24 +149,32 @@ class EnhancedMemoryDisplay:
         try:
             lines = [
                 f"{'='*50}",
-                f"📋 记忆 #{index} - {concept.name}",
-                f"💭 内容: {memory.content}"
+                f"记忆 #{index} - {concept.name}",
+                f"内容: {memory.content}"
             ]
             
             # 详细信息
             info_lines = []
             if memory.details:
-                info_lines.append(f"📝 细节: {memory.details}")
+                info_lines.append(f"细节: {memory.details}")
             if memory.participants:
                 participants = memory.participants.split(',') if isinstance(memory.participants, str) else memory.participants
-                info_lines.append(f"👥 参与者: {', '.join(participants)}")
+                # 特殊处理Bot身份标识
+                formatted_participants = []
+                for participant in participants:
+                    participant = participant.strip()
+                    if participant == "我":
+                        formatted_participants.append("🤖 我(Bot)")
+                    else:
+                        formatted_participants.append(participant)
+                info_lines.append(f"参与者: {', '.join(formatted_participants)}")
             if memory.location:
-                info_lines.append(f"📍 地点: {memory.location}")
+                info_lines.append(f"地点: {memory.location}")
             if memory.emotion:
-                info_lines.append(f"😊 情感: {memory.emotion}")
+                info_lines.append(f"情感: {memory.emotion}")
             if memory.tags:
                 tags = memory.tags.split(',') if isinstance(memory.tags, str) else memory.tags
-                info_lines.append(f"🏷️ 标签: {', '.join(tags)}")
+                info_lines.append(f"标签: {', '.join(tags)}")
             
             if info_lines:
                 lines.extend(info_lines)
@@ -161,8 +182,8 @@ class EnhancedMemoryDisplay:
             # 时间和统计信息
             created_time = datetime.fromtimestamp(memory.created_at).strftime('%Y-%m-%d %H:%M')
             lines.extend([
-                f"⏰ 创建: {created_time}",
-                f"💪 强度: {memory.strength:.2f} | 👀 访问: {memory.access_count}次",
+                f"创建: {created_time}",
+                f"强度: {memory.strength:.2f} | 👀 访问: {memory.access_count}次",
                 f"{'='*50}"
             ])
             
@@ -178,7 +199,7 @@ class EnhancedMemoryDisplay:
             graph = self.memory_system.memory_graph
             
             if not graph.memories:
-                return "📊 记忆库为空"
+                return "记忆库为空"
             
             # 基础统计
             total_memories = len(graph.memories)
@@ -202,16 +223,16 @@ class EnhancedMemoryDisplay:
             top_concepts = sorted(concept_counts.items(), key=lambda x: x, reverse=True)[:5]
             
             parts = [
-                "📊 记忆库统计",
-                f"📚 总记忆数: {total_memories}",
-                f"🎯 总概念数: {total_concepts}",
-                f"🔗 总连接数: {total_connections}",
-                f"💪 平均记忆强度: {avg_strength:.2f}",
-                f"🆕 最近7天新增: {len(recent_memories)}条记忆"
+                "记忆库统计",
+                f"总记忆数: {total_memories}",
+                f"总概念数: {total_concepts}",
+                f"总连接数: {total_connections}",
+                f"平均记忆强度: {avg_strength:.2f}",
+                f"最近7天新增: {len(recent_memories)}条记忆"
             ]
             
             if top_concepts:
-                parts.append("\n🔥 热门概念:")
+                parts.append("\n热门概念:")
                 for concept, count in top_concepts:
                     parts.append(f"   {concept}: {count}条记忆")
             

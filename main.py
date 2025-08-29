@@ -13,6 +13,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from .database_migration import DatabaseMigration
 from .enhanced_memory_display import EnhancedMemoryDisplay
+from .embedding_cache_manager import EmbeddingCacheManager
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api import AstrBotConfig
@@ -44,7 +45,7 @@ class MemoraConnectPlugin(Star):
         """记忆相关指令"""
         message = event.message_str.strip()
         if message == "/记忆":
-            yield event.plain_result("记忆系统已激活！我可以帮你记住对话中的重要信息。")
+            yield event.plain_result("记忆系统已加载！")
         elif message.startswith("/记忆 回忆"):
             keyword = message[5:].strip()
             memories = await self.memory_system.recall_memories_full(keyword)
@@ -58,17 +59,42 @@ class MemoraConnectPlugin(Star):
     async def on_message(self, event: AstrMessageEvent):
         """监听所有消息，形成记忆并注入相关记忆"""
         if not self._initialized:
-            logger.debug("记忆系统尚未初始化完成，跳过消息处理")
+            self._debug_log("记忆系统尚未初始化完成，跳过消息处理", "debug")
             return
             
         try:
-            # 1. 注入相关记忆到上下文
-            await self.memory_system.inject_memories_to_context(event)
+            # 提取群聊ID，用于群聊隔离
+            group_id = self.memory_system._extract_group_id_from_event(event)
             
-            # 2. 使用优化后的单次LLM调用处理消息
-            await self.memory_system.process_message_optimized(event)
+            # 1. 为当前群聊加载相应的记忆状态（异步优化）
+            if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
+                # 清空当前记忆图，重新加载群聊特定的记忆
+                self.memory_system.memory_graph = MemoryGraph()
+                self.memory_system.load_memory_state(group_id)
+            
+            # 2. 注入相关记忆到上下文（快速异步操作）
+            asyncio.create_task(self.memory_system.inject_memories_to_context(event))
+            
+            # 3. 消息处理使用异步队列，避免阻塞主流程
+            asyncio.create_task(self._process_message_async(event, group_id))
+                
         except Exception as e:
-            logger.error(f"on_message处理错误: {e}", exc_info=True)
+            self._debug_log(f"on_message处理错误: {e}", "error")
+    
+    async def _process_message_async(self, event: AstrMessageEvent, group_id: str):
+        """异步消息处理，避免阻塞主流程"""
+        try:
+            # 使用优化后的单次LLM调用处理消息
+            await self.memory_system.process_message_optimized(event, group_id)
+            
+            # 使用队列化保存，减少I/O操作
+            if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
+                await self.memory_system._queue_save_memory_state(group_id)
+            else:
+                await self.memory_system._queue_save_memory_state("")  # 默认数据库
+                
+        except Exception as e:
+            self._debug_log(f"异步消息处理失败: {e}", "error")
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -107,8 +133,23 @@ class MemoraConnectPlugin(Star):
     
     async def terminate(self):
         """插件卸载时保存记忆"""
+        # 等待待处理的保存任务完成
+        if self.memory_system._pending_save_task and not self.memory_system._pending_save_task.done():
+            await self.memory_system._pending_save_task
+        
+        # 保存默认数据库
         await self.memory_system.save_memory_state()
-        logger.info("记忆系统已保存并关闭")
+        
+        # 如果启用了群聊隔离，保存所有群聊数据库
+        if self.memory_system.memory_config.get("enable_group_isolation", True):
+            db_dir = os.path.dirname(self.memory_system.db_path)
+            if os.path.exists(db_dir):
+                for filename in os.listdir(db_dir):
+                    if filename.startswith("memory_group_") and filename.endswith(".db"):
+                        group_id = filename[12:-3]
+                        await self.memory_system.save_memory_state(group_id)
+        
+        self._debug_log("记忆系统已保存并关闭", "info")
 
     # ---------- LLM 函数工具 ----------
     @filter.llm_tool(name="create_memory")
@@ -132,7 +173,7 @@ class MemoraConnectPlugin(Star):
             theme(string): 核心关键词，用逗号分隔
             topic(string): 该记忆所属的主题或关键词（向后兼容）
             details(string): 具体细节和背景信息
-            participants(string): 涉及的人物，用逗号分隔
+            participants(string): 涉及的人物，用逗号分隔。特别注意：如果是Bot的发言，请使用"我"作为参与者
             location(string): 相关场景或地点
             emotion(string): 情感色彩，如"开心,兴奋"
             tags(string): 分类标签，如"工作,重要"
@@ -239,10 +280,12 @@ class MemorySystem:
         self.llm_provider = None
         self.embedding_provider = None
         self.batch_extractor = BatchMemoryExtractor(self)
+        self.embedding_cache = None  # 嵌入向量缓存管理器
         
         # 配置初始化
         config = config or {}
         self.memory_config = {
+            "enable_group_isolation": config.get("enable_group_isolation", True),
             "recall_mode": config.get("recall_mode", "llm"),
             "enable_associative_recall": config.get("enable_associative_recall", True),
             "forget_threshold_days": config.get("forget_threshold_days", 30),
@@ -262,116 +305,208 @@ class MemorySystem:
             "memory_injection_threshold": config.get("memory_injection_threshold", 0.3)
         }
         
+        # 群聊隔离的数据库表前缀映射
+        self.group_table_prefixes = {}
+        
+        # 日志限制计数器
+        self.debug_log_count = 0
+        self.debug_log_reset_time = time.time()
+        
+        # 优化：缓存和批量操作
+        self._save_cache = {}  # 保存缓存 {group_id: pending_changes}
+        self._save_locks = {}  # 保存锁 {group_id: asyncio.Lock}
+        self._last_save_time = {}  # 最后保存时间 {group_id: timestamp}
+        self._pending_save_task = None  # 待处理的保存任务
+        
+    def _get_group_db_path(self, group_id: str) -> str:
+        """获取群聊专用的数据库路径"""
+        if not self.memory_config.get("enable_group_isolation", True) or not group_id:
+            return self.db_path
+        
+        # 为每个群创建独立的数据库文件
+        db_dir = os.path.dirname(self.db_path)
+        group_db_path = os.path.join(db_dir, f"memory_group_{group_id}.db")
+        
+        # 确保目录存在
+        os.makedirs(os.path.dirname(group_db_path), exist_ok=True)
+        
+        return group_db_path
+    
+    def _extract_group_id_from_event(self, event: AstrMessageEvent) -> str:
+        """从事件中提取群聊ID"""
+        try:
+            # 尝试从消息来源中提取群聊信息
+            if hasattr(event, 'unified_msg_origin'):
+                origin = event.unified_msg_origin
+                # 如果是群聊，通常来源格式为 "group:群组ID" 或类似格式
+                if isinstance(origin, str) and (origin.startswith('group:') or ':' in origin):
+                    parts = origin.split(':')
+                    if len(parts) > 1:
+                        group_id = parts[1].strip()
+                        # 过滤掉通用标识符，只返回实际群聊名称
+                        if group_id.lower() not in ['groupmessage', 'group', '']:
+                            return group_id
+            
+            # 尝试从消息对象中获取群聊信息
+            if hasattr(event, 'message') and hasattr(event.message, 'group_id'):
+                group_id = str(event.message.group_id)
+                # 过滤掉通用标识符，只返回实际群聊名称
+                if group_id.lower() not in ['groupmessage', 'group', '']:
+                    return group_id
+                
+        except Exception as e:
+            self._debug_log(f"提取群聊ID失败: {e}", "debug")
+        
+        # 如果无法提取到有效的群聊ID，返回空字符串（使用默认数据库）
+        return ""
+    
+    async def _queue_save_memory_state(self, group_id: str = ""):
+        """队列化保存操作，减少频繁的I/O"""
+        try:
+            # 获取或创建锁
+            if group_id not in self._save_locks:
+                self._save_locks[group_id] = asyncio.Lock()
+            
+            # 获取最后保存时间
+            last_save = self._last_save_time.get(group_id, 0)
+            current_time = time.time()
+            
+            # 如果距离上次保存时间少于2秒，延迟保存
+            if current_time - last_save < 2:
+                # 取消之前的保存任务
+                if self._pending_save_task and not self._pending_save_task.done():
+                    self._pending_save_task.cancel()
+                
+                # 创建新的延迟保存任务
+                self._pending_save_task = asyncio.create_task(
+                    self._delayed_save(group_id, current_time)
+                )
+            else:
+                # 立即保存
+                await self.save_memory_state(group_id)
+                self._last_save_time[group_id] = current_time
+                
+        except Exception as e:
+            self._debug_log(f"队列保存失败: {e}", "warning")
+    
+    async def _delayed_save(self, group_id: str, creation_time: float):
+        """延迟保存任务"""
+        try:
+            # 延迟2秒执行
+            await asyncio.sleep(2)
+            
+            # 检查是否还有新的保存请求
+            if self._last_save_time.get(group_id, 0) > creation_time:
+                return  # 如果有更新的请求，跳过这次保存
+            
+            # 执行实际保存
+            await self.save_memory_state(group_id)
+            self._last_save_time[group_id] = time.time()
+            
+        except asyncio.CancelledError:
+            pass  # 任务被取消，正常情况
+        except Exception as e:
+            self._debug_log(f"延迟保存失败: {e}", "warning")
+    
+    def _debug_log(self, message: str, level: str = "debug"):
+        """优化的调试日志输出，限制日志频率"""
+        current_time = time.time()
+        
+        # 每分钟重置计数器
+        if current_time - self.debug_log_reset_time > 60:
+            self.debug_log_count = 0
+            self.debug_log_reset_time = current_time
+        
+        # 限制每分钟最多10条调试日志
+        if level == "debug" and self.debug_log_count >= 10:
+            return
+        
+        if level == "debug":
+            self.debug_log_count += 1
+        
+        # 使用不同的日志级别
+        if level == "debug":
+            logger.debug(message)
+        elif level == "info":
+            logger.info(message)
+        elif level == "warning":
+            logger.warning(message)
+        elif level == "error":
+            logger.error(message)
+    
     async def initialize(self):
         """初始化记忆系统"""
-        logger.info("开始初始化记忆系统...")
-        logger.info(f"数据库路径: {self.db_path}")
-        logger.info(f"配置参数: {json.dumps({k:v for k,v in self.memory_config.items() if k not in ['llm_system_prompt']}, ensure_ascii=False, indent=2)}")
+        self._debug_log("开始初始化记忆系统...", "info")
         
-        # 添加提供商配置调试信息（仅初始化时显示）
-        logger.info(f"配置的LLM提供商: {self.memory_config['llm_provider']}")
-        logger.info(f"配置的嵌入提供商: {self.memory_config['embedding_provider']}")
-        
-        # 检查数据库文件状态
-        logger.info(f"检查数据库文件: {self.db_path}")
+        # 检查默认数据库文件状态
         if os.path.exists(self.db_path):
             file_size = os.path.getsize(self.db_path)
-            logger.info(f"数据库文件存在，大小: {file_size} 字节")
+            self._debug_log(f"默认数据库文件存在，大小: {file_size} 字节", "info")
         else:
-            logger.info("数据库文件不存在，将创建新数据库")
+            self._debug_log("默认数据库文件不存在，将创建新数据库", "info")
         
-        # 强制测试指定的提供商，完全忽略AstrBot默认设置
-        logger.info("=== 测试配置指定的提供商 ===")
+        # 测试提供商连接 - 简化为单一日志
+        llm_ready = False
+        embedding_ready = False
         
-        # 测试LLM提供商
-        llm_provider = await self.get_llm_provider()
-        if llm_provider:
-            provider_name = getattr(llm_provider, 'name', 'unknown')
-            provider_id = getattr(llm_provider, 'id', 'unknown')
-            logger.info(f"成功使用LLM提供商: {provider_name} (ID: {provider_id})")
-            
-            # 测试text_chat功能
-            try:
-                test_response = await llm_provider.text_chat(
-                    prompt="这是一个测试消息，请回复'测试成功'",
-                    contexts=[],
-                    system_prompt="你是一个测试助手，请简洁回复"
-                )
-                logger.info(f"LLM text_chat功能测试成功: {test_response.completion_text[:50]}...")
-            except Exception as e:
-                logger.error(f"LLM text_chat功能测试失败: {e}")
-        else:
-            logger.error("无法获取配置的LLM提供商，请检查配置")
+        try:
+            llm_provider = await self.get_llm_provider()
+            if llm_provider:
+                llm_ready = True
+                
+            embedding_provider = await self.get_embedding_provider()
+            if embedding_provider:
+                embedding_ready = True
+                
+            self._debug_log(f"提供商状态 - LLM: {'已连接' if llm_ready else '未连接'}, 嵌入: {'已连接' if embedding_ready else '未连接'}", "info")
+        except Exception as e:
+            self._debug_log("提供商连接异常，系统将继续运行", "warning")
         
-        # 测试嵌入提供商
-        embedding_provider = await self.get_embedding_provider()
-        if embedding_provider:
-            provider_name = getattr(embedding_provider, 'name', 'unknown')
-            provider_id = getattr(embedding_provider, 'id', 'unknown')
-            logger.info(f"成功测试嵌入提供商: {provider_name} (ID: {provider_id})")
-            
-            # 测试嵌入功能
-            try:
-                test_embedding = await self.get_embedding("测试文本")
-                if test_embedding:
-                    logger.info(f"嵌入功能测试成功，维度: {len(test_embedding)}")
-                else:
-                    logger.warning("嵌入功能测试失败：返回空结果")
-            except Exception as e:
-                logger.error(f"嵌入功能测试失败: {e}")
-        else:
-            logger.error("无法获取配置的嵌入提供商，请检查配置")
-        
-        # 数据库迁移调试
-        logger.info("=== 开始数据库迁移检查 ===")
+        # 执行数据库迁移
         try:
             migration = DatabaseMigration(self.db_path, self.context)
-            
-            # 检查当前数据库结构
-            if os.path.exists(self.db_path):
-                import sqlite3
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                    tables = cursor.fetchall()
-                    logger.info(f"当前数据库表: {[t[0] for t in tables]}")
-                    
-                    for table in [t[0] for t in tables]:
-                        cursor.execute(f"PRAGMA table_info('{table}')")
-                        columns = cursor.fetchall()
-                        logger.info(f"表 {table} 的列: {[c[1] for c in columns]}")
-            
             migration_success = await migration.run_smart_migration()
             
             if migration_success:
-                logger.info("数据库迁移成功")
+                self._debug_log("数据库迁移成功", "info")
+                # 加载默认数据库（用于私有对话）
                 self.load_memory_state()
                 asyncio.create_task(self.memory_maintenance_loop())
-                logger.info("记忆系统初始化完成")
+                
+                # 初始化嵌入向量缓存管理器
+                self.embedding_cache = EmbeddingCacheManager(self, self.db_path)
+                await self.embedding_cache.initialize()
+                
+                # 调度初始预计算任务
+                if self.memory_graph.memories:
+                    asyncio.create_task(self.embedding_cache.schedule_initial_precompute())
+                    logger.info(f"已调度 {len(self.memory_graph.memories)} 条记忆的预计算任务")
+                
+                self._debug_log("记忆系统初始化完成", "info")
             else:
-                logger.error("数据库迁移失败，记忆系统可能无法正常工作。")
+                self._debug_log("数据库迁移失败，记忆系统可能无法正常工作", "error")
                 
         except Exception as e:
-            logger.error(f"数据库迁移过程异常: {e}", exc_info=True)
+            self._debug_log(f"数据库迁移过程异常: {e}", "error")
         
-    def load_memory_state(self):
+    def load_memory_state(self, group_id: str = ""):
         """从数据库加载记忆状态"""
         import sqlite3
         import os
         
-        if not os.path.exists(self.db_path):
-            logger.info("数据库文件不存在，跳过加载")
+        # 获取对应的数据库路径
+        db_path = self._get_group_db_path(group_id)
+        
+        if not os.path.exists(db_path):
             return
             
         try:
-            logger.info(f"正在加载记忆数据库: {self.db_path}")
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(db_path) as conn:
                 cursor = conn.cursor()
                 
                 # 检查表是否存在
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='concepts'")
                 if not cursor.fetchone():
-                    logger.info("数据库表不存在，跳过加载")
                     return
                 
                 # 加载概念
@@ -417,78 +552,152 @@ class MemorySystem:
                         last_strengthened=conn_data[4]
                     )
                     
-            logger.info(f"记忆系统已加载，包含 {len(concepts)} 个概念，{len(memories)} 条记忆")
+            # 仅在成功加载时输出一次统计信息
+            group_info = f" (群: {group_id})" if group_id else ""
+            self._debug_log(f"记忆系统加载{group_info}，包含 {len(concepts)} 个概念，{len(memories)} 条记忆", "debug")
             
         except sqlite3.Error as e:
-            logger.error(f"加载记忆数据库失败: {e}")
+            self._debug_log(f"数据库加载失败: {e}", "error")
         except Exception as e:
-            logger.error(f"加载记忆状态时发生未知错误: {e}")
+            self._debug_log(f"状态加载异常: {e}", "error")
 
-    async def save_memory_state(self):
+    async def save_memory_state(self, group_id: str = ""):
         """保存记忆状态到数据库"""
         import sqlite3
         try:
-            logger.debug(f"正在保存记忆到数据库: {self.db_path}")
+            # 获取对应的数据库路径
+            db_path = self._get_group_db_path(group_id)
             
-            with sqlite3.connect(self.db_path) as conn:
+            # 确保数据库和表存在
+            await self._ensure_database_structure(db_path)
+            
+            with sqlite3.connect(db_path) as conn:
                 cursor = conn.cursor()
                 
                 # 使用事务确保数据一致性
                 cursor.execute("BEGIN TRANSACTION")
                 
                 try:
-                    # 清空现有数据
-                    cursor.execute("DELETE FROM connections")
-                    cursor.execute("DELETE FROM memories")
-                    cursor.execute("DELETE FROM concepts")
                     
-                    # 批量保存概念
-                    concept_data = [
-                        (c.id, c.name, c.created_at, c.last_accessed, c.access_count)
-                        for c in self.memory_graph.concepts.values()
-                    ]
-                    if concept_data:
-                        cursor.executemany('''
-                            INSERT INTO concepts (id, name, created_at, last_accessed, access_count)
+                    # 增量更新概念
+                    for concept in self.memory_graph.concepts.values():
+                        cursor.execute('''
+                            INSERT OR REPLACE INTO concepts
+                            (id, name, created_at, last_accessed, access_count)
                             VALUES (?, ?, ?, ?, ?)
-                        ''', concept_data)
+                        ''', (concept.id, concept.name, concept.created_at, concept.last_accessed, concept.access_count))
                     
-                    # 批量保存记忆
-                    memory_data = [
-                        (m.id, m.concept_id, m.content, m.details, m.participants, m.location,
-                         m.emotion, m.tags, m.created_at, m.last_accessed, m.access_count, m.strength)
-                        for m in self.memory_graph.memories.values()
-                    ]
-                    if memory_data:
-                        cursor.executemany('''
-                            INSERT INTO memories (id, concept_id, content, details, participants,
+                    # 增量更新记忆
+                    for memory in self.memory_graph.memories.values():
+                        cursor.execute('''
+                            INSERT OR REPLACE INTO memories
+                            (id, concept_id, content, details, participants,
                             location, emotion, tags, created_at, last_accessed, access_count, strength)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', memory_data)
+                        ''', (memory.id, memory.concept_id, memory.content, memory.details,
+                             memory.participants, memory.location, memory.emotion, memory.tags,
+                             memory.created_at, memory.last_accessed, memory.access_count, memory.strength))
                     
-                    # 批量保存连接
-                    connection_data = [
-                        (c.id, c.from_concept, c.to_concept, c.strength, c.last_strengthened)
-                        for c in self.memory_graph.connections
-                    ]
-                    if connection_data:
-                        cursor.executemany('''
-                            INSERT INTO connections (id, from_concept, to_concept, strength, last_strengthened)
-                            VALUES (?, ?, ?, ?, ?)
-                        ''', connection_data)
+                    # 增量更新连接
+                    existing_connections = set()
+                    cursor.execute("SELECT id FROM connections")
+                    for row in cursor.fetchall():
+                        existing_connections.add(row[0])
+                    
+                    # 更新现有连接
+                    for conn in self.memory_graph.connections:
+                        if conn.id in existing_connections:
+                            cursor.execute('''
+                                UPDATE connections
+                                SET from_concept=?, to_concept=?, strength=?, last_strengthened=?
+                                WHERE id=?
+                            ''', (conn.from_concept, conn.to_concept, conn.strength, conn.last_strengthened, conn.id))
+                        else:
+                            cursor.execute('''
+                                INSERT INTO connections (id, from_concept, to_concept, strength, last_strengthened)
+                                VALUES (?, ?, ?, ?, ?)
+                            ''', (conn.id, conn.from_concept, conn.to_concept, conn.strength, conn.last_strengthened))
                     
                     conn.commit()
-                    logger.info(f"记忆状态已保存: {len(concept_data)}个概念, {len(memory_data)}条记忆, {len(connection_data)}个连接")
+                    # 简化的保存完成日志
+                    group_info = f" (群: {group_id})" if group_id else ""
+                    self._debug_log(f"记忆保存完成{group_info}: {len(self.memory_graph.concepts)}个概念, {len(self.memory_graph.memories)}条记忆", "debug")
                     
                 except Exception as e:
                     conn.rollback()
-                    logger.error(f"保存记忆状态失败，已回滚: {e}")
+                    self._debug_log(f"保存失败，已回滚: {e}", "error")
                     raise
                     
         except sqlite3.Error as e:
-            logger.error(f"数据库错误导致保存失败: {e}")
+            self._debug_log(f"数据库保存错误: {e}", "error")
         except Exception as e:
-            logger.error(f"保存记忆状态时发生未知错误: {e}")
+            self._debug_log(f"保存过程异常: {e}", "error")
+    
+    async def _ensure_database_structure(self, db_path: str):
+        """确保数据库和所需的表结构存在"""
+        try:
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                
+                # 检查表是否存在
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                existing_tables = {row[0] for row in cursor.fetchall()}
+                
+                # 创建所需的表（如果不存在）
+                if 'concepts' not in existing_tables:
+                    cursor.execute('''
+                        CREATE TABLE concepts (
+                            id TEXT PRIMARY KEY,
+                            name TEXT NOT NULL,
+                            created_at REAL,
+                            last_accessed REAL,
+                            access_count INTEGER DEFAULT 0
+                        )
+                    ''')
+                    self._debug_log(f"创建表: concepts", "debug")
+                
+                if 'memories' not in existing_tables:
+                    cursor.execute('''
+                        CREATE TABLE memories (
+                            id TEXT PRIMARY KEY,
+                            concept_id TEXT NOT NULL,
+                            content TEXT NOT NULL,
+                            details TEXT,
+                            participants TEXT,
+                            location TEXT,
+                            emotion TEXT,
+                            tags TEXT,
+                            created_at REAL,
+                            last_accessed REAL,
+                            access_count INTEGER DEFAULT 0,
+                            strength REAL DEFAULT 1.0,
+                            FOREIGN KEY (concept_id) REFERENCES concepts (id)
+                        )
+                    ''')
+                    self._debug_log(f"创建表: memories", "debug")
+                
+                if 'connections' not in existing_tables:
+                    cursor.execute('''
+                        CREATE TABLE connections (
+                            id TEXT PRIMARY KEY,
+                            from_concept TEXT NOT NULL,
+                            to_concept TEXT NOT NULL,
+                            strength REAL DEFAULT 1.0,
+                            last_strengthened REAL,
+                            FOREIGN KEY (from_concept) REFERENCES concepts (id),
+                            FOREIGN KEY (to_concept) REFERENCES concepts (id)
+                        )
+                    ''')
+                    self._debug_log(f"创建表: connections", "debug")
+                
+                conn.commit()
+                
+        except sqlite3.Error as e:
+            self._debug_log(f"创建数据库表结构失败: {e}", "error")
+            raise
+        except Exception as e:
+            self._debug_log(f"确保数据库结构异常: {e}", "error")
+            raise
     
     async def process_message(self, event: AstrMessageEvent):
         """处理消息，形成记忆（旧方法，保留兼容性）"""
@@ -531,7 +740,7 @@ class MemorySystem:
         except Exception as e:
             logger.error(f"处理消息时出错: {e}")
 
-    async def process_message_optimized(self, event: AstrMessageEvent):
+    async def process_message_optimized(self, event: AstrMessageEvent, group_id: str = ""):
         """优化的消息处理，使用单次LLM调用"""
         try:
             # 获取完整的对话历史
@@ -544,7 +753,6 @@ class MemorySystem:
             
             # 根据概率决定是否提取和创建记忆
             if random.random() > formation_probability:
-                logger.debug(f"跳过记忆提取与创建 (概率: {formation_probability})")
                 return
 
             # 使用批量提取器，单次LLM调用获取多个记忆
@@ -556,6 +764,7 @@ class MemorySystem:
             # 批量处理提取的记忆
             themes = []
             concept_ids = []  # 存储创建的概念ID
+            valid_memories = 0
             
             for memory_data in extracted_memories:
                 try:
@@ -570,7 +779,6 @@ class MemorySystem:
                     
                     # 验证数据完整性
                     if not theme or not content:
-                        logger.warning(f"跳过无效的记忆数据: 主题或内容为空")
                         continue
                     
                     # 根据置信度调整记忆强度
@@ -592,20 +800,22 @@ class MemorySystem:
                     
                     themes.append(theme)
                     concept_ids.append(concept_id)
+                    valid_memories += 1
                     
-                    logger.debug(f"丰富记忆创建: {theme} (置信度: {confidence}, 概率: {formation_probability}, 参与者: {participants})")
-                    
-                except (KeyError, ValueError, TypeError) as e:
-                    logger.error(f"处理提取的记忆数据失败: {e}, 数据: {memory_data}")
+                except (KeyError, ValueError, TypeError):
                     continue
+            
+            # 仅在成功创建记忆时输出一次日志
+            if valid_memories > 0:
+                group_info = f" (群: {group_id})" if group_id else ""
+                self._debug_log(f"批量创建记忆{group_info}: {valid_memories}条", "debug")
             
             # 建立概念之间的连接 - 使用存储的概念ID
             if concept_ids:
                 for concept_id in concept_ids:
                     try:
                         self.establish_connections(concept_id, themes)
-                    except Exception as e:
-                        logger.error(f"建立概念连接失败: {e}, 概念ID: {concept_id}")
+                    except Exception:
                         continue
             
             # 根据回忆模式决定是否触发回忆
@@ -630,10 +840,10 @@ class MemorySystem:
                     recalled = await self._recall_simple("")
                     
                 if recalled:
-                    logger.debug(f"优化模式触发了回忆: {len(recalled)}条 (模式: {recall_mode})")
+                    self._debug_log(f"回忆触发: {len(recalled)}条", "debug")
                     
         except Exception as e:
-            logger.error(f"优化消息处理失败: {e}", exc_info=True)
+            self._debug_log(f"消息处理失败: {e}", "error")
             # 回退到旧方法
             await self.process_message(event)
     
@@ -750,10 +960,11 @@ class MemorySystem:
             对话内容：{" ".join(map(str, history[-3:]))}
             
             要求：
-            1. 用第三人称
-            2. 简洁自然
-            3. 包含关键信息
-            4. 不超过50字
+            1. 如果记忆内容涉及Bot的发言，请使用第一人称"我"来表述
+            2. 如果记忆内容涉及用户的发言，请使用第三人称
+            3. 简洁自然
+            4. 包含关键信息
+            5. 不超过50字
             """
             
             if self.memory_config["recall_mode"] == "llm":
@@ -925,10 +1136,14 @@ class MemorySystem:
                         # 确保返回的是列表
                         if isinstance(recalled, list):
                             return recalled[:5]
+                    self._debug_log("LLM响应中未找到JSON格式", "warning")
                     return [] # 如果没有找到JSON或解析失败
-                except json.JSONDecodeError:
-                    logger.error("LLM返回的不是有效的JSON格式")
+                except json.JSONDecodeError as e:
+                    self._debug_log(f"JSON解析失败: {e}, 响应: {completion_text[:200]}...", "error")
                     return [] # JSON解析失败
+                except Exception as e:
+                    self._debug_log(f"JSON解析异常: {e}", "error")
+                    return []
             
             # LLM不可用，回退到简单模式
             return await self._recall_simple(keyword)
@@ -1211,26 +1426,68 @@ class MemorySystem:
     
     async def memory_maintenance_loop(self):
         """记忆维护循环"""
+        db_dir = os.path.dirname(self.db_path)
+        
         while True:
             try:
                 consolidation_interval = self.memory_config["consolidation_interval_hours"] * 3600
                 await asyncio.sleep(consolidation_interval)  # 按配置间隔检查
                 
-                # 遗忘机制
+                maintenance_actions = []
+                
+                # 处理默认数据库（私有对话）
                 if self.memory_config["enable_forgetting"]:
                     await self.forget_memories()
+                    maintenance_actions.append("遗忘")
                 
-                # 记忆整理
                 if self.memory_config["enable_consolidation"]:
                     await self.consolidate_memories()
+                    maintenance_actions.append("整理")
                 
-                # 保存状态
-                self.save_memory_state()
+                await self.save_memory_state()
+                maintenance_actions.append("保存")
                 
-                logger.debug("记忆维护完成")
+                # 如果启用了群聊隔离，处理所有群聊数据库
+                if self.memory_config.get("enable_group_isolation", True):
+                    # 扫描群聊数据库文件
+                    group_files = []
+                    if os.path.exists(db_dir):
+                        for filename in os.listdir(db_dir):
+                            if filename.startswith("memory_group_") and filename.endswith(".db"):
+                                group_id = filename[12:-3]  # 提取群聊ID
+                                group_files.append(group_id)
+                    
+                    # 为每个群聊数据库执行维护
+                    for group_id in group_files:
+                        try:
+                            # 清空当前记忆图，加载群聊数据库
+                            self.memory_graph = MemoryGraph()
+                            self.load_memory_state(group_id)
+                            
+                            # 执行群聊的维护操作
+                            if self.memory_config["enable_forgetting"]:
+                                await self.forget_memories()
+                            
+                            if self.memory_config["enable_consolidation"]:
+                                await self.consolidate_memories()
+                            
+                            # 保存群聊数据库
+                            await self.save_memory_state(group_id)
+                            
+                            self._debug_log(f"群聊 {group_id} 维护完成", "debug")
+                            
+                        except Exception as group_e:
+                            self._debug_log(f"群聊 {group_id} 维护失败: {group_e}", "warning")
+                
+                # 简化维护日志输出
+                if maintenance_actions:
+                    action_text = f"记忆维护完成: {', '.join(maintenance_actions)}"
+                    if self.memory_config.get("enable_group_isolation", True):
+                        action_text += f" (包含 {len(group_files) if 'group_files' in locals() else 0} 个群聊)"
+                    self._debug_log(action_text, "debug")
                 
             except Exception as e:
-                logger.error(f"记忆维护失败: {e}")
+                self._debug_log(f"记忆维护失败: {e}", "error")
     
     async def forget_memories(self):
         """遗忘机制"""
@@ -1261,7 +1518,9 @@ class MemorySystem:
         for memory_id in memories_to_remove:
             self.memory_graph.remove_memory(memory_id)
         
-        logger.debug(f"遗忘机制：移除{len(memories_to_remove)}条记忆，{len(connections_to_remove)}个连接")
+        # 仅在有实际清理时输出日志
+        if len(memories_to_remove) > 0 or len(connections_to_remove) > 0:
+            self._debug_log(f"遗忘完成: 清理{len(memories_to_remove)}条记忆, {len(connections_to_remove)}个连接", "debug")
     
     async def consolidate_memories(self):
         """记忆整理机制 - 智能合并相似记忆"""
@@ -1312,8 +1571,9 @@ class MemorySystem:
                             for mem_id in memories_to_remove_in_group:
                                 self.memory_graph.remove_memory(mem_id)
         
+        # 仅在有实际合并时输出日志
         if consolidation_count > 0:
-            logger.debug(f"记忆整理：合并了{consolidation_count}条相似记忆")
+            self._debug_log(f"记忆整理完成: 合并{consolidation_count}条相似记忆", "debug")
     
     async def _merge_memories(self, memories: List['Memory']) -> str:
         """智能合并多条相似记忆"""
@@ -1462,8 +1722,17 @@ class MemorySystem:
             return None
 
     async def get_embedding(self, text: str) -> List[float]:
-        """获取文本的嵌入向量"""
+        """获取文本的嵌入向量 - 优先使用缓存"""
         try:
+            # 如果启用了嵌入向量缓存，尝试从缓存获取
+            if self.embedding_cache:
+                # 生成一个临时ID用于缓存查询
+                temp_id = f"temp_{hash(text)}"
+                cached_embedding = await self.embedding_cache.get_embedding(temp_id, text)
+                if cached_embedding:
+                    return cached_embedding
+            
+            # 缓存未命中或未启用，直接计算
             provider = await self.get_embedding_provider()
             if not provider:
                 logger.debug("嵌入提供商不可用")
@@ -1477,7 +1746,6 @@ class MemorySystem:
                         method = getattr(provider, method_name)
                         result = await method(text)
                         if result and isinstance(result, list) and len(result) > 0:
-                            logger.debug(f"成功获取嵌入向量，维度: {len(result)}")
                             return result
                     except Exception as e:
                         logger.debug(f"方法 {method_name} 失败: {e}")
@@ -1516,6 +1784,14 @@ class MemorySystem:
             if not current_message:
                 return
             
+            # 避免重复注入：检查是否已经有记忆上下文
+            if hasattr(event, 'context_extra') and event.context_extra and 'memory_context' in event.context_extra:
+                return
+            
+            # 短消息过滤：避免为过短的消息注入记忆
+            if len(current_message) < 3:
+                return
+            
             # 使用增强记忆召回系统获取相关记忆
             from .enhanced_memory_recall import EnhancedMemoryRecall
             
@@ -1525,19 +1801,23 @@ class MemorySystem:
                 max_memories=self.memory_config.get("max_injected_memories", 5)
             )
             
-            if results:
+            # 过滤低相关性的记忆
+            threshold = self.memory_config.get("memory_injection_threshold", 0.3)
+            filtered_results = [r for r in results if hasattr(r, 'relevance_score') and r.relevance_score >= threshold]
+            
+            if filtered_results:
                 # 使用增强格式化
-                memory_context = enhanced_recall.format_memories_for_llm(results)
+                memory_context = enhanced_recall.format_memories_for_llm(filtered_results)
                 
                 # 注入到AstrBot的上下文中
                 if not hasattr(event, 'context_extra'):
                     event.context_extra = {}
                 event.context_extra["memory_context"] = memory_context
                 
-                logger.debug(f"已注入 {len(results)} 条增强记忆到上下文")
+                self._debug_log(f"已注入 {len(filtered_results)} 条记忆到上下文", "debug")
                 
         except Exception as e:
-            logger.error(f"注入记忆到上下文失败: {e}")
+            self._debug_log(f"注入记忆到上下文失败: {e}", "warning")
 
     async def query_memory(self, query: str, event: AstrMessageEvent = None) -> List[str]:
         """记忆查询接口"""
@@ -1660,13 +1940,18 @@ class BatchMemoryExtractor:
    - 主题（theme）：核心关键词，用逗号分隔
    - 内容（content）：简洁的核心记忆
    - 细节（details）：具体细节和背景，丰富、详细、准确的记忆信息
-   - 参与者（participants）：涉及的人物
+   - 参与者（participants）：涉及的人物，特别注意：如果发言者是[Bot]，则使用"我"或Bot的身份作为参与者；如果是用户，则使用用户名称
    - 地点（location）：相关场景
    - 情感（emotion）：情感色彩
    - 标签（tags）：分类标签
    - 置信度（confidence）：0-1之间的数值
 3. 可以生成多个记忆，包括小事
 4. 返回JSON格式
+
+特别注意：
+- 请仔细区分[Bot]和用户的发言
+- 当[Bot]发言时，在参与者字段使用第一人称"我"而不是"其他用户"
+- 确保LLM在后续上下文引用时能准确区分Bot的自我表述与用户的外部输入
 
 返回格式：
 {{
@@ -1732,12 +2017,13 @@ class BatchMemoryExtractor:
             return await self._fallback_extraction(conversation_history)
     
     def _format_conversation_history(self, history: List[Dict[str, Any]]) -> str:
-        """格式化对话历史，包含完整信息"""
+        """格式化对话历史，包含完整信息，并区分Bot和用户发言"""
         formatted_lines = []
         for msg in history:
-            sender = msg.get('sender_name', '用户')
             content = msg.get('content', '')
             timestamp = msg.get('timestamp', '')
+            role = msg.get('role', 'user')
+            sender = msg.get('sender_name', '用户')
             
             # 格式化时间戳
             if isinstance(timestamp, (int, float)):
@@ -1746,15 +2032,19 @@ class BatchMemoryExtractor:
             else:
                 time_str = str(timestamp)
             
-            formatted_lines.append(f"[{time_str}] {sender}: {content}")
+            # 根据角色区分Bot和用户消息
+            if role == "assistant":
+                # Bot消息，标识为"[Bot]"
+                formatted_lines.append(f"[{time_str}] [Bot]: {content}") #会改
+            else:
+                # 用户消息，保持原格式
+                formatted_lines.append(f"[{time_str}] {sender}: {content}")
         
         return "\n".join(formatted_lines)
     
     def _parse_batch_response(self, response_text: str) -> List[Dict[str, Any]]:
         """解析批量提取的LLM响应"""
         try:
-            logger.debug(f"开始解析LLM响应: {response_text[:500]}...")
-            
             # 清理响应文本，处理中文引号和格式问题
             cleaned_text = response_text
             for old, new in [('“', '"'), ('”', '"'), ('‘', "'"), ('’', "'"), ('，', ','), ('：', ':')]:
@@ -1775,7 +2065,6 @@ class BatchMemoryExtractor:
                     break
             
             if not json_str:
-                logger.warning("未找到有效的JSON响应")
                 return []
             
             # 修复常见的JSON格式问题
@@ -1785,15 +2074,13 @@ class BatchMemoryExtractor:
             
             try:
                 data = json.loads(json_str)
-            except json.JSONDecodeError as e:
-                logger.warning(f"第一次JSON解析失败，尝试修复: {e}")
-                # 更激进的修复
+            except json.JSONDecodeError:
+                # 更激进的修复，记录错误但不输出过多日志
                 json_str = re.sub(r'([{,]\s*)"([^"]*)"\s*:\s*([^",}\]]+)([,\}])', r'\1"\2": "\3"\4', json_str)
                 data = json.loads(json_str)
             
             memories = data.get("memories", [])
             if not isinstance(memories, list):
-                logger.warning("memories不是列表格式")
                 return []
             
             # 过滤和验证记忆
@@ -1801,7 +2088,6 @@ class BatchMemoryExtractor:
             for i, mem in enumerate(memories):
                 try:
                     if not isinstance(mem, dict):
-                        logger.warning(f"跳过非字典的记忆数据: {type(mem)}")
                         continue
                     
                     confidence = float(mem.get("confidence", 0.7))
@@ -1827,17 +2113,13 @@ class BatchMemoryExtractor:
                             "tags": tags,
                             "confidence": max(0.0, min(1.0, confidence))
                         })
-                        logger.debug(f"成功提取记忆 {i+1}: {theme}")
                         
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"跳过无效的记忆数据: {mem}, 错误: {e}")
+                except (ValueError, TypeError):
                     continue
             
-            logger.debug(f"成功解析 {len(filtered_memories)} 条记忆")
             return filtered_memories
             
-        except Exception as e:
-            logger.error(f"JSON解析失败: {e}, 响应: {response_text[:300]}...")
+        except Exception:
             return []
     
     async def _fallback_extraction(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1928,8 +2210,12 @@ class MemoryGraph:
             strength=strength
         )
         self.memories[memory_id] = memory
+        
+        # 如果启用了嵌入向量缓存，调度预计算任务
+        if hasattr(self, 'embedding_cache') and self.embedding_cache:
+            asyncio.create_task(self.embedding_cache.schedule_precompute_task([memory_id], priority=3))
+        
         return memory_id
-    
     def add_connection(self, from_concept: str, to_concept: str,
                       strength: float = 1.0, connection_id: str = None,
                       last_strengthened: float = None) -> str:

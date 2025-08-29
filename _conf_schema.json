@@ -1,4 +1,10 @@
 {
+  "enable_group_isolation": {
+    "description": "启用群聊隔离",
+    "type": "bool",
+    "hint": "是否启用群聊记忆隔离，防止不同群之间的记忆互相泄露",
+    "default": true
+  },
   "recall_mode": {
     "description": "主要工作模式",
     "type": "string",

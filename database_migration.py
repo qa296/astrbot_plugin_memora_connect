@@ -455,7 +455,7 @@ class SmartDatabaseMigration:
 class DatabaseMigration(SmartDatabaseMigration):
     """
     向后兼容的迁移类。
-    这个类现在完全依赖于 SmartDatabaseMigration 的智能迁移逻辑，
+    这个类现在完全依赖于 SmartDatabaseMigration 的迁移逻辑，
     旧的版本号检查和迁移方法已被重写，以确保所有路径都使用新的、更可靠的系统。
     """
     CURRENT_VERSION = "v0.2.0"  # 保持版本号用于识别，但不再用于迁移逻辑
@@ -465,6 +465,6 @@ class DatabaseMigration(SmartDatabaseMigration):
         兼容旧的启动接口。
         现在直接调用智能迁移，完全跳过版本号检查。
         """
-        logger.info("调用兼容接口 run_migration_if_needed()，将执行智能迁移。")
+        logger.info("调用兼容接口 run_migration_if_needed()，将执行迁移。")
         return await self.run_smart_migration()
         
