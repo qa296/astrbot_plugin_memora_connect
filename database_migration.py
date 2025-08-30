@@ -466,5 +466,5 @@ class DatabaseMigration(SmartDatabaseMigration):
         现在直接调用智能迁移，完全跳过版本号检查。
         """
         logger.info("调用兼容接口 run_migration_if_needed()，将执行迁移。")
-        return await self.run_smart_migration()
+        return await self.run_smart_migration() 
         

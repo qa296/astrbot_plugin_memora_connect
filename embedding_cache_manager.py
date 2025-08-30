@@ -248,6 +248,9 @@ class EmbeddingCacheManager:
         """反序列化嵌入向量"""
         try:
             # 首先尝试 numpy 格式
+            if isinstance(embedding_blob, str):
+                # 如果意外传入字符串，尝试转换为字节
+                embedding_blob = embedding_blob.encode('utf-8')
             embedding_array = np.frombuffer(embedding_blob, dtype=np.float32)
             if len(embedding_array) == vector_dim:
                 return embedding_array.tolist()
@@ -256,7 +259,10 @@ class EmbeddingCacheManager:
             
         try:
             # 降级到 JSON 格式
-            embedding_json = embedding_blob.decode('utf-8')
+            if isinstance(embedding_blob, bytes):
+                embedding_json = embedding_blob.decode('utf-8')
+            else:
+                embedding_json = str(embedding_blob)
             return json.loads(embedding_json)
         except Exception as e:
             logger.error(f"反序列化嵌入向量失败: {e}")

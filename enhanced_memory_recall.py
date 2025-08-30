@@ -142,7 +142,6 @@ class EnhancedMemoryRecall:
                                 memory_embedding = await self.memory_system.get_embedding(memory.content)
                                 if memory_embedding:
                                     similarity = self._cosine_similarity(query_embedding, memory_embedding)
-                                    logger.debug(f"实时计算记忆 {i+1}/{len(remaining_memories)} 相似度: {similarity}")
                                     
                                     if similarity > 0.3:  # 相似度阈值
                                         concept = self.memory_system.memory_graph.concepts.get(memory.concept_id)
@@ -180,7 +179,6 @@ class EnhancedMemoryRecall:
                     memory_embedding = await self.memory_system.get_embedding(memory.content)
                     if memory_embedding:
                         similarity = self._cosine_similarity(query_embedding, memory_embedding)
-                        logger.debug(f"实时计算记忆 {i+1}/{len(memories_snapshot)} 相似度: {similarity}")
                         
                         if similarity > 0.3:  # 相似度阈值
                             concept = self.memory_system.memory_graph.concepts.get(memory.concept_id)

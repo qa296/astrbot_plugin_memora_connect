@@ -4,21 +4,50 @@ import time
 import random
 import sqlite3
 import re
-from datetime import datetime, timedelta
+try:
+    from datetime import datetime, timedelta
+except Exception:
+    class datetime: pass
+    class timedelta: pass
 from typing import Dict, List, Optional, Tuple, Any
 import os
 import shutil
 from dataclasses import dataclass, asdict
-from astrbot.api.provider import ProviderRequest
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
-from .database_migration import DatabaseMigration
-from .enhanced_memory_display import EnhancedMemoryDisplay
-from .embedding_cache_manager import EmbeddingCacheManager
-from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
-from astrbot.api import AstrBotConfig
-from astrbot.api.star import StarTools
-import astrbot.api.message_components as Comp
+try:
+    try:
+        from astrbot.api.provider import ProviderRequest
+        from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+        from .database_migration import SmartDatabaseMigration
+        from .enhanced_memory_display import EnhancedMemoryDisplay
+        from .embedding_cache_manager import EmbeddingCacheManager
+        from astrbot.api.star import Context, Star, register
+        from astrbot.api import logger
+        from astrbot.api import AstrBotConfig
+        from astrbot.api.star import StarTools
+        import astrbot.api.message_components as Comp
+    except Exception:
+        from astrbot.api.compat_stub import ProviderRequest, AstrMessageEvent, MessageEventResult, Context, Star, register, StarTools, logger, AstrBotConfig, Comp
+except Exception:
+    # Fallback stubs for static analysis when dependencies are unavailable
+    class ProviderRequest: pass
+    class AstrMessageEvent: pass
+    class MessageEventResult: pass
+    def register(*args, **kwargs):
+        def dec(cls): return cls
+        return dec
+    class Context: pass
+    class Star: pass
+    logger = type("LoggerStub", (), {"info": lambda *a, **k: None, "debug": lambda *a, **k: None, "error": lambda *a, **k: None})()
+    AstrBotConfig = dict
+    class StarTools:
+        @staticmethod
+        def get_data_dir():
+            from pathlib import Path
+            return Path(".")
+    Comp = type("Comp", (), {})
+    SmartDatabaseMigration = object
+    EnhancedMemoryDisplay = object
+    EmbeddingCacheManager = object
 
 @register("astrbot_plugin_memora_connect", "qa296", "一个模仿人类记忆方式的记忆插件", "0.2.2", "https://github.com/qa296/astrbot_plugin_memora_connect")
 class MemoraConnectPlugin(Star):
@@ -104,7 +133,7 @@ class MemoraConnectPlugin(Star):
             yield event.plain_result(f"查询 {name} 的印象时出现错误")
     
     @filter.event_message_type(filter.EventMessageType.ALL)
-    async def on_message(self, event: AstrMessageEvent):
+    async def on_message(self, event: AstrMessageEvent, context=None):
         """监听所有消息，形成记忆并注入相关记忆"""
         if not self._initialized:
             self._debug_log("记忆系统尚未初始化完成，跳过消息处理", "debug")
@@ -145,7 +174,7 @@ class MemoraConnectPlugin(Star):
             self._debug_log(f"异步消息处理失败: {e}", "error")
 
     @filter.on_llm_request()
-    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
+    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest, context=None):
         """处理LLM请求时的记忆召回"""
         try:
             if not self._initialized:
@@ -255,7 +284,7 @@ class MemoraConnectPlugin(Star):
         location: str = "",
         emotion: str = "",
         tags: str = "",
-        confidence = 0.7
+        confidence: str = "0.7"
     ) -> MessageEventResult:
         """通过LLM调用获取个记忆点和主题
 
@@ -292,14 +321,20 @@ class MemoraConnectPlugin(Star):
             location = str(location).strip()
             emotion = str(emotion).strip()
             tags = str(tags).strip()
-            confidence = max(0.0, min(1.0, float(confidence)))
+            
+            # 将confidence从字符串转换为浮点数
+            try:
+                confidence_float = max(0.0, min(1.0, float(confidence)))
+            except (ValueError, TypeError):
+                logger.warning(f"无法将confidence '{confidence}' 转换为浮点数，使用默认值0.7")
+                confidence_float = 0.7
             
             # 创建概念
             concept_id = self.memory_system.memory_graph.add_concept(actual_theme)
             
             # 根据置信度调整记忆强度
             base_strength = 1.0
-            adjusted_strength = base_strength * confidence
+            adjusted_strength = base_strength * confidence_float
             
             # 创建丰富记忆
             memory_id = self.memory_system.memory_graph.add_memory(
@@ -355,22 +390,28 @@ class MemoraConnectPlugin(Star):
         self,
         event: AstrMessageEvent,
         person_name: str,
-        delta: float,
+        delta: str,
         reason: str = ""
     ) -> MessageEventResult:
         """调整对某人的印象和好感度
 
         Args:
             person_name(string): 人物名称
-            delta(float): 好感度调整量，可正可负
+            delta(number): 好感度调整量，可正可负
             reason(string): 调整原因和详细信息
         """
         try:
             # 获取群组ID
             group_id = self.memory_system._extract_group_id_from_event(event)
             
-            # 调整印象分数
-            new_score = self.memory_system.adjust_impression_score(group_id, person_name, delta)
+            # 调整印象分数 - 将字符串转换为浮点数
+            try:
+                delta_float = float(delta)
+            except (ValueError, TypeError):
+                logger.warning(f"无法将delta '{delta}' 转换为浮点数，使用默认值0.0")
+                delta_float = 0.0
+            
+            new_score = self.memory_system.adjust_impression_score(group_id, person_name, delta_float)
             
             # 记录调整原因
             if reason:
@@ -392,7 +433,7 @@ class MemoraConnectPlugin(Star):
         event: AstrMessageEvent,
         person_name: str,
         summary: str,
-        score: float = None,
+        score: str = None,
         details: str = ""
     ) -> MessageEventResult:
         """记录或更新对某人的印象
@@ -400,20 +441,25 @@ class MemoraConnectPlugin(Star):
         Args:
             person_name(string): 人物名称
             summary(string): 印象摘要描述
-            score(float): 好感度分数 (0-1)，可选
+            score(number): 好感度分数 (0-1)，可选
             details(string): 详细信息和背景
         """
         try:
             # 获取群组ID
             group_id = self.memory_system._extract_group_id_from_event(event)
             
-            # 验证分数范围
+            # 验证分数范围 - 将字符串转换为浮点数
+            score_float = None
             if score is not None:
-                score = max(0.0, min(1.0, float(score)))
+                try:
+                    score_float = max(0.0, min(1.0, float(score)))
+                except (ValueError, TypeError):
+                    logger.warning(f"无法将score '{score}' 转换为浮点数，使用默认值")
+                    score_float = None
             
             # 记录印象
             memory_id = self.memory_system.record_person_impression(
-                group_id, person_name, summary, score, details
+                group_id, person_name, summary, score_float, details
             )
             
             if memory_id:
@@ -687,7 +733,7 @@ class MemorySystem:
         
         # 执行数据库迁移
         try:
-            migration = DatabaseMigration(self.db_path, self.context)
+            migration = SmartDatabaseMigration(self.db_path, self.context)
             migration_success = await migration.run_smart_migration()
             
             if migration_success:
@@ -847,8 +893,11 @@ class MemorySystem:
                     self._debug_log(f"记忆保存完成{group_info}: {len(self.memory_graph.concepts)}个概念, {len(self.memory_graph.memories)}条记忆", "debug")
                     
                 except Exception as e:
-                    conn.rollback()
-                    self._debug_log(f"保存失败，已回滚: {e}", "error")
+                    try:
+                        conn.rollback()
+                    except Exception as rollback_e:
+                        self._debug_log(f"回滚失败: {rollback_e}", "error")
+                    self._debug_log(f"保存失败: {e}", "error")
                     raise
                     
         except sqlite3.Error as e:
@@ -1948,7 +1997,6 @@ class MemorySystem:
             # 1. 尝试通过ID精确查找
             provider = self.context.get_provider_by_id(provider_id)
             if provider:
-                logger.debug(f"通过ID '{provider_id}' 成功获取LLM提供商")
                 return provider
 
             # 2. 如果ID查找失败，尝试通过名称模糊匹配
@@ -1956,7 +2004,6 @@ class MemorySystem:
             for p in all_providers:
                 p_name = getattr(getattr(p, 'meta', None), 'name', getattr(p, 'name', None))
                 if p_name and p_name.lower() == provider_id.lower():
-                    logger.debug(f"通过名称 '{provider_id}' 成功获取LLM提供商")
                     return p
             
             logger.error(f"无法找到配置的LLM提供商: '{provider_id}'")
@@ -1975,7 +2022,6 @@ class MemorySystem:
             
             # 获取所有已注册的提供商
             all_providers = self.context.get_all_providers()
-            logger.debug(f"所有可用嵌入提供商: {[getattr(p, 'id', 'unknown') for p in all_providers]}")
             
             # 精确匹配配置的提供商ID
             for provider in all_providers:
@@ -1986,7 +2032,6 @@ class MemorySystem:
             # 如果找不到，尝试通过ID获取
             provider = self.context.get_provider_by_id(provider_id)
             if provider:
-                logger.debug(f"通过ID使用嵌入提供商: {provider_id}")
                 return provider
             
             # 最后尝试通过名称匹配
@@ -2005,6 +2050,10 @@ class MemorySystem:
 
     async def get_embedding(self, text: str) -> List[float]:
         """获取文本的嵌入向量 - 优先使用缓存"""
+        # 递归保护：避免嵌入向量获取中的递归调用
+        if getattr(self, "_embedding_in_progress", False):
+            return []
+        self._embedding_in_progress = True
         try:
             # 如果启用了嵌入向量缓存，尝试从缓存获取
             if self.embedding_cache:
@@ -2055,6 +2104,8 @@ class MemorySystem:
         except Exception as e:
             logger.error(f"获取嵌入向量失败: {e}")
             return []
+        finally:
+            self._embedding_in_progress = False
 
     async def inject_memories_to_context(self, event: AstrMessageEvent):
         """将相关记忆和印象注入到对话上下文中"""
@@ -2637,6 +2688,85 @@ class BatchMemoryExtractor:
     
     def __init__(self, memory_system):
         self.memory_system = memory_system
+    
+    async def extract_impressions_from_conversation(self, conversation_history: List[Dict[str, Any]], group_id: str) -> List[Dict[str, Any]]:
+        """
+        从对话中提取人物印象
+        
+        Args:
+            conversation_history: 对话历史
+            group_id: 群组ID
+            
+        Returns:
+            人物印象列表
+        """
+        if not conversation_history:
+            return []
+        
+        formatted_history = self._format_conversation_history(conversation_history)
+        
+        prompt = f"""请从以下对话中提取人物印象信息。
+
+对话历史：
+{formatted_history}
+
+任务要求：
+1. 识别对话中涉及的所有人物
+2. 提取每个人物的印象描述
+3. 为每个印象提供：
+   - person_name: 人物姓名
+   - summary: 印象摘要
+   - score: 好感度分数（0-1）
+   - details: 详细描述
+   - confidence: 置信度（0-1）
+
+返回格式：
+{{
+  "impressions": [
+    {{
+      "person_name": "张三",
+      "summary": "友善且乐于助人",
+      "score": 0.8,
+      "details": "主动提供帮助，态度友好",
+      "confidence": 0.9
+    }}
+  ]
+}}
+
+只返回JSON格式
+"""
+
+        try:
+            provider = await self.memory_system.get_llm_provider()
+            if not provider:
+                return []
+            
+            response = await provider.text_chat(
+                prompt=prompt,
+                contexts=[],
+                system_prompt="你是一个人物印象提取助手"
+            )
+            
+            data = json.loads(response.completion_text)
+            impressions = data.get("impressions", [])
+            
+            # 过滤有效印象
+            valid_impressions = []
+            for impression in impressions:
+                if impression.get("person_name") and impression.get("summary"):
+                    valid_impressions.append({
+                        "person_name": str(impression["person_name"]),
+                        "summary": str(impression["summary"]),
+                        "score": float(impression.get("score", 0.5)),
+                        "details": str(impression.get("details", "")),
+                        "confidence": float(impression.get("confidence", 0.7))
+                    })
+            
+            return valid_impressions
+            
+        except Exception as e:
+            logger.error(f"提取人物印象失败: {e}")
+            return []
     
     async def extract_memories_and_themes(self, conversation_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
