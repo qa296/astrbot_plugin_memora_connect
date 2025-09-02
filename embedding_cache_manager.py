@@ -250,20 +250,50 @@ class EmbeddingCacheManager:
             # 首先尝试 numpy 格式
             if isinstance(embedding_blob, str):
                 # 如果意外传入字符串，尝试转换为字节
-                embedding_blob = embedding_blob.encode('utf-8')
-            embedding_array = np.frombuffer(embedding_blob, dtype=np.float32)
-            if len(embedding_array) == vector_dim:
-                return embedding_array.tolist()
-        except Exception:
-            pass
+                try:
+                    embedding_blob = embedding_blob.encode('utf-8')
+                except UnicodeEncodeError as e:
+                    logger.debug(f"字符串编码失败: {e}")
+                    return []
+            
+            # 检查是否为有效的二进制数据
+            if not isinstance(embedding_blob, (bytes, bytearray)):
+                logger.debug(f"不支持的嵌入向量数据类型: {type(embedding_blob)}")
+                return []
+                
+            try:
+                embedding_array = np.frombuffer(embedding_blob, dtype=np.float32)
+                if len(embedding_array) == vector_dim:
+                    return embedding_array.tolist()
+            except (ValueError, TypeError, BufferError) as e:
+                logger.debug(f"numpy反序列化失败: {e}")
+                pass
+            
+        except Exception as e:
+            logger.debug(f"numpy格式处理失败: {e}")
             
         try:
             # 降级到 JSON 格式
             if isinstance(embedding_blob, bytes):
-                embedding_json = embedding_blob.decode('utf-8')
+                try:
+                    embedding_json = embedding_blob.decode('utf-8')
+                except UnicodeDecodeError as e:
+                    logger.debug(f"UTF-8解码失败: {e}")
+                    # 尝试其他编码
+                    try:
+                        embedding_json = embedding_blob.decode('latin-1')
+                    except UnicodeDecodeError:
+                        logger.debug("所有编码尝试都失败")
+                        return []
             else:
                 embedding_json = str(embedding_blob)
-            return json.loads(embedding_json)
+            
+            try:
+                return json.loads(embedding_json)
+            except json.JSONDecodeError as e:
+                logger.debug(f"JSON解析失败: {e}")
+                return []
+                
         except Exception as e:
             logger.error(f"反序列化嵌入向量失败: {e}")
             return []

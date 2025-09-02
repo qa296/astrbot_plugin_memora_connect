@@ -1,10 +1,17 @@
 import asyncio
-import json
 import time
 import re
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Any, TYPE_CHECKING
 from dataclasses import dataclass
-from astrbot.api import logger
+try:
+    from astrbot.api import logger
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
+
+
+if TYPE_CHECKING:
+    from .main import MemorySystem
 
 
 @dataclass
@@ -20,7 +27,7 @@ class MemoryRecallResult:
 class EnhancedMemoryRecall:
     """增强记忆召回系统"""
     
-    def __init__(self, memory_system):
+    def __init__(self, memory_system: 'MemorySystem'):
         self.memory_system = memory_system
         self.recall_strategies = {
             'semantic': 0.4,      # 语义相似度
@@ -79,12 +86,12 @@ class EnhancedMemoryRecall:
             return []
     
     async def _semantic_recall(self, query: str) -> List[MemoryRecallResult]:
-        """基于语义相似度的召回 - 优化版使用缓存"""
+        """基于语义相似度的召回 - 使用并填充缓存"""
         try:
-            if not query:
+            if not query or not self.memory_system.embedding_cache:
                 return []
                 
-            # 获取查询的嵌入向量
+            # 1. 获取查询的嵌入向量
             query_embedding = await self.memory_system.get_embedding(query)
             if not query_embedding:
                 logger.debug("无法获取查询的嵌入向量")
@@ -95,112 +102,46 @@ class EnhancedMemoryRecall:
             
             logger.debug(f"开始语义召回，查询: {query}, 记忆总数: {len(memories_snapshot)}")
             
-            # 检查是否有可用的嵌入向量缓存
-            if self.memory_system.embedding_cache:
+            # 2. 批量获取所有记忆的嵌入向量（智能利用缓存）
+            memory_embeddings = {}
+            tasks = []
+            for memory in memories_snapshot:
+                # get_embedding 会自动处理缓存：命中则返回，未命中则计算、缓存后返回
+                task = asyncio.create_task(self.memory_system.embedding_cache.get_embedding(memory.id, memory.content))
+                tasks.append((memory.id, task))
+
+            # 并发执行所有获取任务
+            for memory_id, task in tasks:
                 try:
-                    # 首先尝试使用缓存管理器的语义搜索功能
-                    semantic_search_results = await self.memory_system.embedding_cache.semantic_search(
-                        query_embedding, limit=25
-                    )
-                    
-                    logger.debug(f"语义搜索找到 {len(semantic_search_results)} 个相关记忆")
-                    
-                    # 处理语义搜索结果
-                    for memory_id, similarity in semantic_search_results:
-                        memory = self.memory_system.memory_graph.memories.get(memory_id)
-                        if memory and similarity > 0.2:  # 降低阈值以获取更多结果
-                            concept = self.memory_system.memory_graph.concepts.get(memory.concept_id)
-                            if concept:
-                                results.append(MemoryRecallResult(
-                                    memory=memory.content,
-                                    relevance_score=similarity * self.recall_strategies['semantic'],
-                                    memory_type='semantic',
-                                    concept_id=memory.concept_id,
-                                    metadata={
-                                        'concept_name': concept.name,
-                                        'memory_strength': memory.strength,
-                                        'last_accessed': memory.last_accessed,
-                                        'source': 'semantic_search',
-                                        'similarity': similarity
-                                    }
-                                ))
-                    
-                    # 如果找到了足够的缓存认忆，直接返回
-                    if len(results) >= 10:
-                        logger.debug(f"使用语义搜索找到 {len(results)} 条记忆，已足够")
-                        return results
-                    
-                    # 如果缓存认忆不足，尝试批量获取并实时计算剩余部分
-                    remaining_memories = [m for m in memories_snapshot if m.id not in {r.metadata.get('memory_id', '') for r in results}]
-                    
-                    if remaining_memories:
-                        logger.debug(f"继续实时计算 {len(remaining_memories)} 条记忆的语义相似度")
-                        
-                        # 批量获取剩余记忆的嵌入向量
-                        for i, memory in enumerate(remaining_memories):
-                            try:
-                                memory_embedding = await self.memory_system.get_embedding(memory.content)
-                                if memory_embedding:
-                                    similarity = self._cosine_similarity(query_embedding, memory_embedding)
-                                    
-                                    if similarity > 0.3:  # 相似度阈值
-                                        concept = self.memory_system.memory_graph.concepts.get(memory.concept_id)
-                                        if concept:
-                                            results.append(MemoryRecallResult(
-                                                memory=memory.content,
-                                                relevance_score=similarity * self.recall_strategies['semantic'],
-                                                memory_type='semantic',
-                                                concept_id=memory.concept_id,
-                                                metadata={
-                                                    'concept_name': concept.name,
-                                                    'memory_strength': memory.strength,
-                                                    'last_accessed': memory.last_accessed,
-                                                    'source': 'realtime',
-                                                    'similarity': similarity
-                                                }
-                                            ))
-                            except Exception as e:
-                                logger.debug(f"处理记忆 {i+1} 时出错: {e}")
-                                continue
-                            
-                            # 避免过于频繁的计算
-                            if i % 5 == 0:
-                                await asyncio.sleep(0.1)
-                    
-                    logger.debug(f"混合语义召回完成，找到 {len(results)} 条相关记忆")
-                    return results
-                    
+                    embedding = await task
+                    if embedding:
+                        memory_embeddings[memory_id] = embedding
                 except Exception as e:
-                    logger.warning(f"使用嵌入向量缓存的语义召回失败: {e}，回退到实时计算")
+                    logger.warning(f"获取记忆 {memory_id} 的嵌入向量失败: {e}")
+
+            # 3. 在内存中计算相似度
+            for memory in memories_snapshot:
+                if memory.id in memory_embeddings:
+                    similarity = self._cosine_similarity(query_embedding, memory_embeddings[memory.id])
+                    
+                    if similarity > 0.3:  # 相似度阈值
+                        concept = self.memory_system.memory_graph.concepts.get(memory.concept_id)
+                        if concept:
+                            results.append(MemoryRecallResult(
+                                memory=memory.content,
+                                relevance_score=similarity * self.recall_strategies['semantic'],
+                                memory_type='semantic',
+                                concept_id=memory.concept_id,
+                                metadata={
+                                    'concept_name': concept.name,
+                                    'memory_strength': memory.strength,
+                                    'last_accessed': memory.last_accessed,
+                                    'source': 'cached_semantic',
+                                    'similarity': similarity
+                                }
+                            ))
             
-            # 如果没有缓存或缓存失败，使用原来的实时计算方式
-            for i, memory in enumerate(memories_snapshot):
-                try:
-                    memory_embedding = await self.memory_system.get_embedding(memory.content)
-                    if memory_embedding:
-                        similarity = self._cosine_similarity(query_embedding, memory_embedding)
-                        
-                        if similarity > 0.3:  # 相似度阈值
-                            concept = self.memory_system.memory_graph.concepts.get(memory.concept_id)
-                            if concept:
-                                results.append(MemoryRecallResult(
-                                    memory=memory.content,
-                                    relevance_score=similarity * self.recall_strategies['semantic'],
-                                    memory_type='semantic',
-                                    concept_id=memory.concept_id,
-                                    metadata={
-                                        'concept_name': concept.name,
-                                        'memory_strength': memory.strength,
-                                        'last_accessed': memory.last_accessed,
-                                        'source': 'realtime',
-                                        'similarity': similarity
-                                    }
-                                ))
-                except Exception as e:
-                    logger.debug(f"处理记忆 {i+1} 时出错: {e}")
-                    continue
-            
-            logger.debug(f"实时语义召回完成，找到 {len(results)} 条相关记忆")
+            logger.debug(f"缓存语义召回完成，找到 {len(results)} 条相关记忆")
             return results
             
         except Exception as e:

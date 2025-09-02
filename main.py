@@ -49,7 +49,7 @@ except Exception:
     EnhancedMemoryDisplay = object
     EmbeddingCacheManager = object
 
-@register("astrbot_plugin_memora_connect", "qa296", "一个模仿人类记忆方式的记忆插件", "0.2.3", "https://github.com/qa296/astrbot_plugin_memora_connect")
+@register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.4", "https://github.com/qa296/astrbot_plugin_memora_connect")
 class MemoraConnectPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -76,18 +76,31 @@ class MemoraConnectPlugin(Star):
 
     @memory.command("回忆")
     async def memory_recall(self, event: AstrMessageEvent, keyword: str):
+        # 检查记忆系统是否启用
+        if not self.memory_system.config_manager.is_memory_system_enabled():
+            yield event.plain_result("记忆系统已禁用，无法使用回忆功能。")
+            return
         memories = await self.memory_system.recall_memories_full(keyword)
         response = self.memory_display.format_memory_search_result(memories, keyword)
         yield event.plain_result(response)
 
     @memory.command("状态")
     async def memory_status(self, event: AstrMessageEvent):
+        # 检查记忆系统是否启用
+        if not self.memory_system.config_manager.is_memory_system_enabled():
+            yield event.plain_result("记忆系统已禁用，无法查看状态。")
+            return
+            
         stats = self.memory_display.format_memory_statistics()
         yield event.plain_result(stats)
-
     @memory.command("印象")
     async def memory_impression(self, event: AstrMessageEvent, name: str):
         """查询人物印象摘要和相关记忆"""
+        # 检查记忆系统是否启用
+        if not self.memory_system.config_manager.is_memory_system_enabled():
+            yield event.plain_result("记忆系统已禁用，无法查询印象。")
+            return
+            
         try:
             # 获取群组ID
             group_id = self.memory_system._extract_group_id_from_event(event)
@@ -137,6 +150,9 @@ class MemoraConnectPlugin(Star):
         """监听所有消息，形成记忆并注入相关记忆"""
         if not self._initialized:
             self._debug_log("记忆系统尚未初始化完成，跳过消息处理", "debug")
+            return
+        # 检查记忆系统是否启用
+        if not self.memory_system.config_manager.is_memory_system_enabled():
             return
             
         try:
@@ -474,11 +490,137 @@ class MemoraConnectPlugin(Star):
             yield event.plain_result("")
 
 
+class MemorySystemConfig:
+    """记忆系统配置数据类"""
+    def __init__(self, enable_memory_system: bool = True):
+        self.enable_memory_system = enable_memory_system
+    
+    @classmethod
+    def from_dict(cls, config_dict):
+        """从字典创建配置对象"""
+        return cls(
+            enable_memory_system=config_dict.get('enable_memory_system', True)
+        )
+    
+    def to_dict(self):
+        """转换为字典"""
+        return {
+            'enable_memory_system': self.enable_memory_system
+        }
+
+class MemoryConfigManager:
+    """记忆系统配置管理器"""
+    
+    def __init__(self, config=None):
+        """
+        初始化配置管理器
+        
+        Args:
+            config: 配置字典，如果为None则使用默认配置
+        """
+        if config is None:
+            config = {}
+        
+        # 从配置中提取记忆系统相关配置
+        memory_config_dict = {}
+        
+        # 处理主开关
+        if 'enable_memory_system' in config:
+            memory_config_dict['enable_memory_system'] = bool(config['enable_memory_system'])
+        
+        # 创建配置对象
+        self.config = MemorySystemConfig.from_dict(memory_config_dict)
+        
+        logger.info(f"记忆系统配置管理器初始化完成，主开关: {'开启' if self.config.enable_memory_system else '关闭'}")
+    
+    def is_memory_system_enabled(self):
+        """
+        检查记忆系统是否启用
+        
+        Returns:
+            bool: 记忆系统是否启用
+        """
+        return self.config.enable_memory_system
+    
+    def set_memory_system_enabled(self, enabled):
+        """
+        设置记忆系统启用状态
+        
+        Args:
+            enabled: 是否启用记忆系统
+        """
+        self.config.enable_memory_system = enabled
+        logger.info(f"记忆系统主开关设置为: {'开启' if enabled else '关闭'}")
+    
+    def get_config(self):
+        """
+        获取当前配置对象
+        
+        Returns:
+            MemorySystemConfig: 当前配置对象
+        """
+        return self.config
+    
+    def update_config(self, config_dict):
+        """
+        更新配置
+        
+        Args:
+            config_dict: 新的配置字典
+        """
+        old_enabled = self.config.enable_memory_system
+        
+        # 更新配置
+        self.config = MemorySystemConfig.from_dict(config_dict)
+        
+        # 记录配置变更
+        if old_enabled != self.config.enable_memory_system:
+            logger.info(f"记忆系统主开关变更: {'开启' if self.config.enable_memory_system else '关闭'}")
+    
+    def get_config_dict(self):
+        """
+        获取配置字典
+        
+        Returns:
+            Dict[str, Any]: 配置字典
+        """
+        return self.config.to_dict()
+    
+    def validate_config(self):
+        """
+        验证配置是否有效
+        
+        Returns:
+            bool: 配置是否有效
+        """
+        try:
+            # 检查主开关是否为布尔值
+            if not isinstance(self.config.enable_memory_system, bool):
+                logger.error("enable_memory_system 必须是布尔值")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"配置验证失败: {e}")
+            return False
+
 class MemorySystem:
     """核心记忆系统，模仿人类海马体功能"""
     
     def __init__(self, context: Context, config=None, data_dir=None):
         self.context = context
+        
+        # 初始化配置管理器
+        self.config_manager = MemoryConfigManager(config)
+        
+        # 检查记忆系统是否启用
+        if not self.config_manager.is_memory_system_enabled():
+            logger.info("记忆系统已禁用，跳过初始化")
+            self.memory_system_enabled = False
+            return
+        
+        self.memory_system_enabled = True
         
         # 使用AstrBot标准数据目录
         if data_dir:
@@ -705,6 +847,11 @@ class MemorySystem:
     
     async def initialize(self):
         """初始化记忆系统"""
+        # 检查记忆系统是否启用
+        if not self.memory_system_enabled:
+            self._debug_log("记忆系统已禁用，跳过初始化", "info")
+            return
+        
         self._debug_log("开始初始化记忆系统...", "info")
         
         # 检查默认数据库文件状态
@@ -887,14 +1034,23 @@ class MemorySystem:
                                 VALUES (?, ?, ?, ?, ?)
                             ''', (conn.id, conn.from_concept, conn.to_concept, conn.strength, conn.last_strengthened))
                     
-                    conn.commit()
+                    # 检查连接对象是否有commit方法
+                    if hasattr(conn, 'commit'):
+                        conn.commit()
+                    else:
+                        # SQLite连接默认自动提交，不需要显式调用commit
+                        self._debug_log("连接对象不支持commit方法，使用自动提交模式", "debug")
                     # 简化的保存完成日志
                     group_info = f" (群: {group_id})" if group_id else ""
                     self._debug_log(f"记忆保存完成{group_info}: {len(self.memory_graph.concepts)}个概念, {len(self.memory_graph.memories)}条记忆", "debug")
                     
                 except Exception as e:
                     try:
-                        conn.rollback()
+                        # 检查连接对象是否有rollback方法
+                        if hasattr(conn, 'rollback'):
+                            conn.rollback()
+                        else:
+                            self._debug_log("连接对象不支持rollback方法", "warning")
                     except Exception as rollback_e:
                         self._debug_log(f"回滚失败: {rollback_e}", "error")
                     self._debug_log(f"保存失败: {e}", "error")
@@ -2607,8 +2763,21 @@ class MemorySystem:
             # 获取印象摘要
             summary = latest_memory.content
             
-            # 格式化时间
-            last_updated = latest_memory.last_accessed.strftime("%Y-%m-%d %H:%M:%S")
+            # 格式化时间 - 确保last_accessed是datetime对象
+            try:
+                if isinstance(latest_memory.last_accessed, (int, float)):
+                    # 如果是时间戳，转换为datetime
+                    dt = datetime.fromtimestamp(latest_memory.last_accessed)
+                    last_updated = dt.strftime("%Y-%m-%d %H:%M:%S")
+                elif hasattr(latest_memory.last_accessed, 'strftime'):
+                    # 如果已经有strftime方法，直接使用
+                    last_updated = latest_memory.last_accessed.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    # 其他情况，使用当前时间
+                    last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            except Exception as time_e:
+                self._debug_log(f"时间格式化失败: {time_e}", "warning")
+                last_updated = "时间格式化失败"
             
             return {
                 "name": person_name,
@@ -2672,14 +2841,27 @@ class MemorySystem:
                     "content": memory.content,
                     "details": memory.details or "",
                     "score": memory.strength,
-                    "created": memory.created_at.strftime("%Y-%m-%d %H:%M:%S"),
-                    "last_accessed": memory.last_accessed.strftime("%Y-%m-%d %H:%M:%S")
+                    "created": self._safe_format_datetime(memory.created_at),
+                    "last_accessed": self._safe_format_datetime(memory.last_accessed)
                 })
             
             return memories_list
             
         except Exception as e:
             self._debug_log(f"获取印象记忆失败: {e}", "error")
+    def _safe_format_datetime(self, dt_obj) -> str:
+        """安全地格式化datetime对象或时间戳"""
+        try:
+            if isinstance(dt_obj, (int, float)):
+                dt = datetime.fromtimestamp(dt_obj)
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            elif hasattr(dt_obj, 'strftime'):
+                return dt_obj.strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                return str(dt_obj)
+        except Exception as e:
+            self._debug_log(f"安全格式化时间失败: {e}", "warning")
+            return "未知时间"
             return []
 
 
@@ -2968,15 +3150,72 @@ class BatchMemoryExtractor:
                     if not isinstance(mem, dict):
                         continue
                     
-                    confidence = float(mem.get("confidence", 0.7))
-                    theme = str(mem.get("theme", "")).strip()
-                    content = str(mem.get("content", "")).strip()
-                    details = str(mem.get("details", "")).strip()
-                    participants = str(mem.get("participants", "")).strip()
-                    location = str(mem.get("location", "")).strip()
-                    emotion = str(mem.get("emotion", "")).strip()
-                    tags = str(mem.get("tags", "")).strip()
-                    memory_type = str(mem.get("memory_type", "normal")).strip().lower()
+                    # 安全地获取每个字段，确保类型正确
+                    confidence = 0.7
+                    try:
+                        confidence_val = mem.get("confidence", 0.7)
+                        if isinstance(confidence_val, (int, float)):
+                            confidence = float(confidence_val)
+                        elif isinstance(confidence_val, str):
+                            confidence = float(confidence_val)
+                    except (ValueError, TypeError):
+                        confidence = 0.7
+                    
+                    theme = ""
+                    try:
+                        theme_val = mem.get("theme", "")
+                        theme = str(theme_val).strip()
+                    except (ValueError, TypeError):
+                        theme = ""
+                    
+                    content = ""
+                    try:
+                        content_val = mem.get("content", "")
+                        content = str(content_val).strip()
+                    except (ValueError, TypeError):
+                        content = ""
+                    
+                    details = ""
+                    try:
+                        details_val = mem.get("details", "")
+                        details = str(details_val).strip()
+                    except (ValueError, TypeError):
+                        details = ""
+                    
+                    participants = ""
+                    try:
+                        participants_val = mem.get("participants", "")
+                        participants = str(participants_val).strip()
+                    except (ValueError, TypeError):
+                        participants = ""
+                    
+                    location = ""
+                    try:
+                        location_val = mem.get("location", "")
+                        location = str(location_val).strip()
+                    except (ValueError, TypeError):
+                        location = ""
+                    
+                    emotion = ""
+                    try:
+                        emotion_val = mem.get("emotion", "")
+                        emotion = str(emotion_val).strip()
+                    except (ValueError, TypeError):
+                        emotion = ""
+                    
+                    tags = ""
+                    try:
+                        tags_val = mem.get("tags", "")
+                        tags = str(tags_val).strip()
+                    except (ValueError, TypeError):
+                        tags = ""
+                    
+                    memory_type = "normal"
+                    try:
+                        memory_type_val = mem.get("memory_type", "normal")
+                        memory_type = str(memory_type_val).strip().lower()
+                    except (ValueError, TypeError):
+                        memory_type = "normal"
                     
                     # 清理主题中的特殊字符
                     theme = re.sub(r'[^\w\u4e00-\u9fff,，]', '', theme)
@@ -2994,7 +3233,7 @@ class BatchMemoryExtractor:
                             "memory_type": memory_type if memory_type in ["normal", "impression"] else "normal"
                         })
                         
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, AttributeError):
                     continue
             
             return filtered_memories

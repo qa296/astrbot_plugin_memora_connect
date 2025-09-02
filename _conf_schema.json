@@ -1,4 +1,11 @@
 {
+  "enable_memory_system": {
+    "description": "启用印象系统",
+    "type": "bool",
+    "hint": "是否启用印象记忆系统，关闭后将停止所有记忆相关的功能",
+    "default": true,
+    "obvious_hint": true
+  },
   "enable_group_isolation": {
     "description": "启用群聊隔离",
     "type": "bool",
