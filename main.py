@@ -1368,6 +1368,8 @@ class MemorySystem:
                             
                 except Exception as e:
                     self._debug_log(f"印象提取失败: {e}", "warning")
+        except Exception as e:
+            self._debug_log(f"优化消息处理失败: {e}", "error")
 
     async def _fallback_impression_extraction(self, conversation_history: List[Dict[str, Any]], group_id: str):
         """基于关键词的简单印象提取（备用方案）"""
