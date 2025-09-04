@@ -1399,35 +1399,6 @@ class MemorySystem:
                             
         except Exception as e:
             self._debug_log(f"备用印象提取方案失败: {e}", "warning")
-            
-            # 根据回忆模式决定是否触发回忆
-            recall_mode = self.memory_config["recall_mode"]
-            should_trigger = False
-            
-            if recall_mode == "simple" or recall_mode == "embedding":
-                # 关键词和嵌入模式每次都触发
-                should_trigger = True
-            elif recall_mode == "llm":
-                # LLM模式按概率触发
-                trigger_probability = self.memory_config.get("recall_trigger_probability", 0.6)
-                should_trigger = random.random() < trigger_probability
-            
-            if should_trigger:
-                # 修复：使用正确的回忆方法
-                if recall_mode == "llm":
-                    recalled = await self._recall_llm("", event)
-                elif recall_mode == "embedding":
-                    recalled = await self._recall_embedding("")
-                else:
-                    recalled = await self._recall_simple("")
-                    
-                if recalled:
-                    self._debug_log(f"回忆触发: {len(recalled)}条", "debug")
-                    
-        except Exception as e:
-            self._debug_log(f"消息处理失败: {e}", "error")
-            # 回退到旧方法
-            await self.process_message(event)
     
     async def get_conversation_history(self, event: AstrMessageEvent) -> List[str]:
         """获取对话历史（兼容旧版本）"""

@@ -476,8 +476,7 @@ class EmbeddingCacheManager:
             
             total_count = len(task.memory_ids)
             completed_count = 0
-            
-            logger.info(f"开始处理预计算任务: {task.task_id}, 共 {total_count} 条记忆")
+
             
             # 批量处理记忆
             for i in range(0, total_count, self.batch_size):
