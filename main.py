@@ -4,50 +4,21 @@ import time
 import random
 import sqlite3
 import re
-try:
-    from datetime import datetime, timedelta
-except Exception:
-    class datetime: pass
-    class timedelta: pass
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 import os
-import shutil
-from dataclasses import dataclass, asdict
-try:
-    try:
-        from astrbot.api.provider import ProviderRequest
-        from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
-        from .database_migration import SmartDatabaseMigration
-        from .enhanced_memory_display import EnhancedMemoryDisplay
-        from .embedding_cache_manager import EmbeddingCacheManager
-        from astrbot.api.star import Context, Star, register
-        from astrbot.api import logger
-        from astrbot.api import AstrBotConfig
-        from astrbot.api.star import StarTools
-        import astrbot.api.message_components as Comp
-    except Exception:
-        from astrbot.api.compat_stub import ProviderRequest, AstrMessageEvent, MessageEventResult, Context, Star, register, StarTools, logger, AstrBotConfig, Comp
-except Exception:
-    # Fallback stubs for static analysis when dependencies are unavailable
-    class ProviderRequest: pass
-    class AstrMessageEvent: pass
-    class MessageEventResult: pass
-    def register(*args, **kwargs):
-        def dec(cls): return cls
-        return dec
-    class Context: pass
-    class Star: pass
-    logger = type("LoggerStub", (), {"info": lambda *a, **k: None, "debug": lambda *a, **k: None, "error": lambda *a, **k: None})()
-    AstrBotConfig = dict
-    class StarTools:
-        @staticmethod
-        def get_data_dir():
-            from pathlib import Path
-            return Path(".")
-    Comp = type("Comp", (), {})
-    SmartDatabaseMigration = object
-    EnhancedMemoryDisplay = object
-    EmbeddingCacheManager = object
+from dataclasses import dataclass
+
+from astrbot.api.provider import ProviderRequest
+from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from .database_migration import SmartDatabaseMigration
+from .enhanced_memory_display import EnhancedMemoryDisplay
+from .embedding_cache_manager import EmbeddingCacheManager
+from .enhanced_memory_recall import EnhancedMemoryRecall
+from astrbot.api.star import Context, Star, register
+from astrbot.api import logger
+from astrbot.api import AstrBotConfig
+from astrbot.api.star import StarTools
 
 @register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.4", "https://github.com/qa296/astrbot_plugin_memora_connect")
 class MemoraConnectPlugin(Star):
@@ -146,7 +117,7 @@ class MemoraConnectPlugin(Star):
             yield event.plain_result(f"查询 {name} 的印象时出现错误")
     
     @filter.event_message_type(filter.EventMessageType.ALL)
-    async def on_message(self, event: AstrMessageEvent, context=None):
+    async def on_message(self, event: AstrMessageEvent):
         """监听所有消息，形成记忆并注入相关记忆"""
         if not self._initialized:
             self._debug_log("记忆系统尚未初始化完成，跳过消息处理", "debug")
@@ -157,7 +128,7 @@ class MemoraConnectPlugin(Star):
             
         try:
             # 提取群聊ID，用于群聊隔离
-            group_id = self.memory_system._extract_group_id_from_event(event)
+            group_id = event.get_group_id() if event.get_group_id() else ""
             
             # 1. 为当前群聊加载相应的记忆状态（异步优化）
             if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
@@ -190,7 +161,7 @@ class MemoraConnectPlugin(Star):
             self._debug_log(f"异步消息处理失败: {e}", "error")
 
     @filter.on_llm_request()
-    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest, context=None):
+    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         """处理LLM请求时的记忆召回"""
         try:
             if not self._initialized:
@@ -202,8 +173,6 @@ class MemoraConnectPlugin(Star):
                 return
             
             # 使用增强记忆召回系统
-            from .enhanced_memory_recall import EnhancedMemoryRecall
-            
             enhanced_recall = EnhancedMemoryRecall(self.memory_system)
             results = await enhanced_recall.recall_all_relevant_memories(
                 query=current_message,
@@ -381,8 +350,6 @@ class MemoraConnectPlugin(Star):
             keyword(string): 要查询的关键词或内容
         """
         try:
-            from .enhanced_memory_recall import EnhancedMemoryRecall
-            
             enhanced_recall = EnhancedMemoryRecall(self.memory_system)
             results = await enhanced_recall.recall_all_relevant_memories(
                 query=keyword,
@@ -647,27 +614,7 @@ class MemorySystem:
         }
         
         # 配置初始化
-        config = config or {}
-        self.memory_config = {
-            "enable_group_isolation": config.get("enable_group_isolation", True),
-            "recall_mode": config.get("recall_mode", "llm"),
-            "enable_associative_recall": config.get("enable_associative_recall", True),
-            "forget_threshold_days": config.get("forget_threshold_days", 30),
-            "consolidation_interval_hours": config.get("consolidation_interval_hours", 24),
-            "max_memories_per_topic": config.get("max_memories_per_topic", 10),
-            "memory_formation_probability": config.get("memory_formation_probability", 0.3),
-            "recall_trigger_probability": config.get("recall_trigger_probability", 0.6),
-            "enable_forgetting": config.get("enable_forgetting", True),
-            "enable_consolidation": config.get("enable_consolidation", True),
-            "bimodal_recall": config.get("bimodal_recall", True),
-            "llm_provider": config.get("llm_provider", "openai"),
-            "llm_system_prompt": config.get("llm_system_prompt", "你是一个记忆总结助手，请将对话内容总结成简洁自然的记忆。"),
-            "embedding_provider": config.get("embedding_provider", "openai"),
-            "embedding_model": config.get("embedding_model", ""),
-            "max_injected_memories": config.get("max_injected_memories", 5),
-            "enable_enhanced_memory": config.get("enable_enhanced_memory", True),
-            "memory_injection_threshold": config.get("memory_injection_threshold", 0.3)
-        }
+        self.memory_config = config or {}
         
         # 群聊隔离的数据库表前缀映射
         self.group_table_prefixes = {}
@@ -697,11 +644,13 @@ class MemorySystem:
         task = asyncio.create_task(coro)
         self._managed_tasks.add(task)
         
+        self._debug_log(f"创建新任务: {coro.__name__}。当前任务数: {len(self._managed_tasks)}", "debug")
         # 添加任务完成回调，自动清理
         def _task_done_callback(t):
             self._managed_tasks.discard(t)
             if t.exception():
                 self._debug_log(f"托管任务异常: {t.exception()}", "error")
+            self._debug_log(f"任务 {coro.__name__} 完成。当前任务数: {len(self._managed_tasks)}", "debug")
         
         task.add_done_callback(_task_done_callback)
         return task
@@ -745,31 +694,8 @@ class MemorySystem:
     
     def _extract_group_id_from_event(self, event: AstrMessageEvent) -> str:
         """从事件中提取群聊ID"""
-        try:
-            # 尝试从消息来源中提取群聊信息
-            if hasattr(event, 'unified_msg_origin'):
-                origin = event.unified_msg_origin
-                # 如果是群聊，通常来源格式为 "group:群组ID" 或类似格式
-                if isinstance(origin, str) and (origin.startswith('group:') or ':' in origin):
-                    parts = origin.split(':')
-                    if len(parts) > 1:
-                        group_id = parts[1].strip()
-                        # 过滤掉通用标识符，只返回实际群聊名称
-                        if group_id.lower() not in ['groupmessage', 'group', '']:
-                            return group_id
-            
-            # 尝试从消息对象中获取群聊信息
-            if hasattr(event, 'message') and hasattr(event.message, 'group_id'):
-                group_id = str(event.message.group_id)
-                # 过滤掉通用标识符，只返回实际群聊名称
-                if group_id.lower() not in ['groupmessage', 'group', '']:
-                    return group_id
-                
-        except Exception as e:
-            self._debug_log(f"提取群聊ID失败: {e}", "debug")
-        
-        # 如果无法提取到有效的群聊ID，返回空字符串（使用默认数据库）
-        return ""
+        group_id = event.get_group_id()
+        return group_id if group_id else ""
     
     async def _queue_save_memory_state(self, group_id: str = ""):
         """队列化保存操作，减少频繁的I/O"""
@@ -1304,6 +1230,37 @@ class MemorySystem:
                             
                 except Exception as e:
                     self._debug_log(f"印象提取失败: {e}", "warning")
+
+    async def _fallback_impression_extraction(self, conversation_history: List[Dict[str, Any]], group_id: str):
+        """基于关键词的简单印象提取（备用方案）"""
+        try:
+            impression_keywords = {
+                "觉得": 0.1, "感觉": 0.1, "印象": 0.2,
+                "人不错": 0.3, "挺好的": 0.2, "很厉害": 0.3,
+                "有点": -0.1, "不太行": -0.3, "很差": -0.4
+            }
+            
+            for msg in conversation_history:
+                content = msg.get("content", "")
+                sender_name = msg.get("sender_name", "用户")
+                
+                # 提取潜在人名
+                mentioned_names = self._extract_mentioned_names(content)
+                
+                for name in mentioned_names:
+                    if name == sender_name or name == "我":
+                        continue
+                        
+                    for keyword, score_delta in impression_keywords.items():
+                        if keyword in content:
+                            # 找到了一个关于某个人的印象
+                            summary = f"感觉 {name} {keyword}"
+                            self.record_person_impression(group_id, name, summary, score=None, details=f"来自 {sender_name} 的评价: {content}")
+                            self.adjust_impression_score(group_id, name, score_delta)
+                            self._debug_log(f"备用方案提取印象: {name} ({keyword})", "debug")
+                            
+        except Exception as e:
+            self._debug_log(f"备用印象提取方案失败: {e}", "warning")
             
             # 根据回忆模式决定是否触发回忆
             recall_mode = self.memory_config["recall_mode"]
@@ -2007,7 +1964,9 @@ class MemorySystem:
         
         # 仅在有实际清理时输出日志
         if len(memories_to_remove) > 0 or len(connections_to_remove) > 0:
-            self._debug_log(f"遗忘完成: 清理{len(memories_to_remove)}条记忆, {len(connections_to_remove)}个连接", "debug")
+            self._debug_log(f"遗忘完成: 清理{len(memories_to_remove)}条记忆, {len(connections_to_remove)}个连接", "info")
+        else:
+            self._debug_log("遗忘检查完成: 没有需要清理的记忆或连接", "debug")
     
     async def consolidate_memories(self):
         """记忆整理机制 - 智能合并相似记忆"""
