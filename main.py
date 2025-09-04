@@ -256,6 +256,144 @@ class MemoraConnectPlugin(Star):
         """安全清理方法，用于在 terminate 之外调用的情况"""
         await self.terminate()
 
+    # ---------- 插件API ----------
+    async def add_memory_api(self, content: str, theme: str, group_id: str = "", details: str = "", participants: str = "", location: str = "", emotion: str = "", tags: str = "") -> Optional[str]:
+        """
+        【API】添加一条记忆。
+        :param content: 记忆的核心内容。
+        :param theme: 记忆的主题或关键词，用逗号分隔。
+        :param group_id: 群组ID，如果需要在特定群聊中操作。
+        :param details: 记忆的详细信息。
+        :param participants: 参与者，用逗号分隔。
+        :param location: 相关地点。
+        :param emotion: 情感色彩。
+        :param tags: 标签，用逗号分隔。
+        :return: 成功则返回记忆ID，否则返回None。
+        """
+        if not self._initialized or not self.memory_system.memory_system_enabled:
+            logger.warning("API调用失败：记忆系统未启用或未初始化。")
+            return None
+        
+        try:
+            # 切换到正确的群聊上下文
+            if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
+                self.memory_system.memory_graph = MemoryGraph()
+                self.memory_system.load_memory_state(group_id)
+
+            concept_id = self.memory_system.memory_graph.add_concept(theme)
+            memory_id = self.memory_system.memory_graph.add_memory(
+                content=content,
+                concept_id=concept_id,
+                details=details,
+                participants=participants,
+                location=location,
+                emotion=emotion,
+                tags=tags
+            )
+            
+            # 异步保存
+            await self.memory_system._queue_save_memory_state(group_id)
+            
+            logger.info(f"通过API添加记忆成功: {memory_id}")
+            return memory_id
+        except Exception as e:
+            logger.error(f"API add_memory_api 失败: {e}", exc_info=True)
+            return None
+
+    async def recall_memories_api(self, keyword: str, group_id: str = "") -> List[Dict[str, Any]]:
+        """
+        【API】根据关键词回忆相关记忆。
+        :param keyword: 要查询的关键词。
+        :param group_id: 群组ID，如果需要在特定群聊中操作。
+        :return: 记忆对象字典的列表。
+        """
+        if not self._initialized or not self.memory_system.memory_system_enabled:
+            logger.warning("API调用失败：记忆系统未启用或未初始化。")
+            return []
+
+        try:
+            # 切换到正确的群聊上下文
+            if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
+                self.memory_system.memory_graph = MemoryGraph()
+                self.memory_system.load_memory_state(group_id)
+
+            memories = await self.memory_system.recall_memories_full(keyword)
+            return [memory.__dict__ for memory in memories]
+        except Exception as e:
+            logger.error(f"API recall_memories_api 失败: {e}", exc_info=True)
+            return []
+
+    async def record_impression_api(self, person_name: str, summary: str, score: Optional[float], details: str = "", group_id: str = "") -> bool:
+        """
+        【API】记录对某个人的印象。
+        :param person_name: 人物名称。
+        :param summary: 印象摘要。
+        :param score: 好感度分数 (0-1)。
+        :param details: 详细信息。
+        :param group_id: 群组ID。
+        :return: 操作是否成功。
+        """
+        if not self._initialized or not self.memory_system.memory_system_enabled:
+            logger.warning("API调用失败：记忆系统未启用或未初始化。")
+            return False
+
+        try:
+            if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
+                self.memory_system.memory_graph = MemoryGraph()
+                self.memory_system.load_memory_state(group_id)
+
+            memory_id = self.memory_system.record_person_impression(group_id, person_name, summary, score, details)
+            await self.memory_system._queue_save_memory_state(group_id)
+            return bool(memory_id)
+        except Exception as e:
+            logger.error(f"API record_impression_api 失败: {e}", exc_info=True)
+            return False
+
+    async def get_impression_summary_api(self, person_name: str, group_id: str = "") -> Optional[Dict[str, Any]]:
+        """
+        【API】获取对某个人的印象摘要。
+        :param person_name: 人物名称。
+        :param group_id: 群组ID。
+        :return: 包含摘要信息的字典，或在找不到时返回None。
+        """
+        if not self._initialized or not self.memory_system.memory_system_enabled:
+            logger.warning("API调用失败：记忆系统未启用或未初始化。")
+            return None
+
+        try:
+            if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
+                self.memory_system.memory_graph = MemoryGraph()
+                self.memory_system.load_memory_state(group_id)
+
+            return self.memory_system.get_person_impression_summary(group_id, person_name)
+        except Exception as e:
+            logger.error(f"API get_impression_summary_api 失败: {e}", exc_info=True)
+            return None
+
+    async def adjust_impression_score_api(self, person_name: str, delta: float, group_id: str = "") -> Optional[float]:
+        """
+        【API】调整对某个人的好感度分数。
+        :param person_name: 人物名称。
+        :param delta: 好感度调整量，可正可负。
+        :param group_id: 群组ID。
+        :return: 调整后的新分数，或在失败时返回None。
+        """
+        if not self._initialized or not self.memory_system.memory_system_enabled:
+            logger.warning("API调用失败：记忆系统未启用或未初始化。")
+            return None
+
+        try:
+            if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
+                self.memory_system.memory_graph = MemoryGraph()
+                self.memory_system.load_memory_state(group_id)
+
+            new_score = self.memory_system.adjust_impression_score(group_id, person_name, delta)
+            await self.memory_system._queue_save_memory_state(group_id)
+            return new_score
+        except Exception as e:
+            logger.error(f"API adjust_impression_score_api 失败: {e}", exc_info=True)
+            return None
+
     # ---------- LLM 函数工具 ----------
     @filter.llm_tool(name="create_memory")
     async def create_memory_tool(
