@@ -4,7 +4,6 @@
 
 ![AstrBot Memora Connect](https://img.shields.io/badge/AstrBot-Memora%20Connect-blue?style=for-the-badge&logo=robot&logoColor=white)
 ![Version](https://img.shields.io/badge/version-v0.2.3-green?style=for-the-badge)
-![License](https://img.shields.io/badge/license-MIT-yellow?style=for-the-badge)
 
 **模仿人类记忆方式的智能记忆插件**
 
