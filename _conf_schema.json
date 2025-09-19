@@ -43,12 +43,6 @@
     "hint": "单个主题下最多保留多少条记忆",
     "default": 10
   },
-  "memory_formation_probability": {
-    "description": "记忆形成概率",
-    "type": "float",
-    "hint": "每条消息形成记忆的概率(0-1)",
-    "default": 0.3
-  },
   "recall_trigger_probability": {
     "description": "回忆触发概率",
     "type": "float",
@@ -114,6 +108,23 @@
     "type": "float",
     "hint": "记忆相关性阈值，低于此值的记忆不会被注入(0-1)",
     "default": 0.3
+  },
+  "conversation_history_count": {
+    "description": "对话历史条数",
+    "type": "int",
+    "hint": "获取对话历史时的最大条数，影响记忆提取的上下文范围",
+    "default": 20
+  },
+  "enable_batch_memory_extraction": {
+    "description": "启用批量记忆提取",
+    "type": "bool",
+    "hint": "是否启用批量记忆提取优化，减少LLM调用次数，提高性能。注意：在能力较差的LLM上可能会导致无法正常提取",
+    "default": true
+  },
+  "memory_formation_interval": {
+    "description": "记忆形成间隔",
+    "type": "int",
+    "hint": "每隔多少轮对话形成一次记忆。",
+    "default": 15
   }
 }
-

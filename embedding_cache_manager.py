@@ -1,13 +1,33 @@
 import asyncio
 import json
 import sqlite3
+import threading
 import time
-import logging
-from typing import Dict, List, Optional, Tuple, Any, Set
-from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta
-import numpy as np
-from astrbot.api import logger
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Any, Union, cast
+
+# 尝试导入 numpy，如果失败则使用 None 标记
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    np = None
+    HAS_NUMPY = False
+
+# 尝试导入 astrbot.api.logger，如果失败则使用标准 logging
+try:
+    from astrbot.api import logger
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+
+from .resource_management import resource_manager
 
 @dataclass
 class EmbeddedMemory:
@@ -19,7 +39,7 @@ class EmbeddedMemory:
     created_at: float
     last_updated: float
     embedding_version: str = "v1.0"
-    metadata: Dict[str, Any] = None
+    metadata: Optional[Dict[str, Any]] = field(default_factory=dict)
 
 @dataclass
 class PrecomputeTask:
@@ -35,28 +55,29 @@ class PrecomputeTask:
 class EmbeddingCacheManager:
     """嵌入向量缓存管理器 - 负责预计算、存储和管理记忆的嵌入向量"""
     
-    def __init__(self, memory_system, db_path: str):
-        self.memory_system = memory_system
-        self.db_path = db_path
-        self.cache_db_path = db_path.replace(".db", "_embeddings.db")
-        self.vector_dimension = None  # 将从第一个嵌入结果中推断
-        self.precompute_queue = asyncio.Queue(maxsize=1000)  # 限制队列大小，防止内存溢出
-        self.is_precomputing = False
-        self.precompute_stats = {
+    def __init__(self, memory_system: Any, db_path: str):
+        self.memory_system: Any = memory_system
+        self.db_path: str = db_path
+        self.cache_db_path: str = db_path.replace(".db", "_embeddings.db")
+        self.vector_dimension: Optional[int] = None  # 将从第一个嵌入结果中推断
+        self.precompute_queue: asyncio.Queue[PrecomputeTask] = asyncio.Queue(maxsize=1000)  # 限制队列大小，防止内存溢出
+        self.is_precomputing: bool = False
+        self.precompute_stats: Dict[str, Union[int, float]] = {
             "total_memories": 0,
             "cached_memories": 0,
             "pending_precompute": 0,
-            "last_precompute_time": 0,
+            "last_precompute_time": 0.0,
             "precompute_count": 0,
             "cache_hits": 0,
-            "cache_misses": 0
+            "cache_misses": 0,
+            "cache_hit_rate": 0.0
         }
-        self.batch_size = 10  # 批量处理大小
-        self.max_queue_size = 1000  # 最大队列大小
+        self.batch_size: int = 10  # 批量处理大小
+        self.max_queue_size: int = 1000  # 最大队列大小
         
         # 生命周期管理 - 新增
-        self._worker_task = None
-        self._should_stop_worker = asyncio.Event()
+        self._worker_task: Optional[asyncio.Task[None]] = None
+        self._should_stop_worker: asyncio.Event = asyncio.Event()
         self._should_stop_worker.clear()  # 初始不停止
         
     async def initialize(self):
@@ -71,44 +92,48 @@ class EmbeddingCacheManager:
     async def _ensure_cache_database(self):
         """确保缓存数据库和表结构存在"""
         try:
-            with sqlite3.connect(self.cache_db_path) as conn:
-                cursor = conn.cursor()
-                
-                # 创建嵌入向量表
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS memory_embeddings (
-                        memory_id TEXT PRIMARY KEY,
-                        content TEXT NOT NULL,
-                        concept_id TEXT NOT NULL,
-                        embedding BLOB NOT NULL,
-                        vector_dimension INTEGER NOT NULL,
-                        created_at REAL NOT NULL,
-                        last_updated REAL NOT NULL,
-                        embedding_version TEXT DEFAULT 'v1.0',
-                        metadata TEXT DEFAULT '{}'
-                    )
-                ''')
-                
-                # 创建预计算任务表
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS precompute_tasks (
-                        task_id TEXT PRIMARY KEY,
-                        memory_ids TEXT NOT NULL,
-                        priority INTEGER DEFAULT 1,
-                        created_at REAL NOT NULL,
-                        status TEXT DEFAULT 'pending',
-                        progress INTEGER DEFAULT 0,
-                        error_message TEXT DEFAULT '',
-                        completed_at REAL DEFAULT 0
-                    )
-                ''')
-                
-                # 创建索引
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_concept_embeddings ON memory_embeddings(concept_id)')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_updated_embeddings ON memory_embeddings(last_updated)')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_task_status ON precompute_tasks(status, priority)')
-                
-                conn.commit()
+            # 使用连接池获取数据库连接
+            conn = resource_manager.get_db_connection(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            # 创建嵌入向量表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS memory_embeddings (
+                    memory_id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    concept_id TEXT NOT NULL,
+                    embedding BLOB NOT NULL,
+                    vector_dimension INTEGER NOT NULL,
+                    created_at REAL NOT NULL,
+                    last_updated REAL NOT NULL,
+                    embedding_version TEXT DEFAULT 'v1.0',
+                    metadata TEXT DEFAULT '{}'
+                )
+            ''')
+            
+            # 创建预计算任务表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS precompute_tasks (
+                    task_id TEXT PRIMARY KEY,
+                    memory_ids TEXT NOT NULL,
+                    priority INTEGER DEFAULT 1,
+                    created_at REAL NOT NULL,
+                    status TEXT DEFAULT 'pending',
+                    progress INTEGER DEFAULT 0,
+                    error_message TEXT DEFAULT '',
+                    completed_at REAL DEFAULT 0
+                )
+            ''')
+            
+            # 创建索引
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_concept_embeddings ON memory_embeddings(concept_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_updated_embeddings ON memory_embeddings(last_updated)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_task_status ON precompute_tasks(status, priority)')
+            
+            conn.commit()
+            
+            # 释放连接回连接池
+            resource_manager.release_db_connection(self.cache_db_path, conn)
                 
         except Exception as e:
             logger.error(f"创建缓存数据库失败: {e}")
@@ -117,19 +142,23 @@ class EmbeddingCacheManager:
     async def _load_precompute_stats(self):
         """加载预计算统计信息"""
         try:
-            with sqlite3.connect(self.cache_db_path) as conn:
-                cursor = conn.cursor()
-                
-                # 统计缓存的记忆数量
-                cursor.execute("SELECT COUNT(*) FROM memory_embeddings")
-                cached_count = cursor.fetchone()[0]
-                
-                # 统计待计算的任务数量
-                cursor.execute("SELECT COUNT(*) FROM precompute_tasks WHERE status = 'pending'")
-                pending_count = cursor.fetchone()[0]
-                
-                self.precompute_stats["cached_memories"] = cached_count
-                self.precompute_stats["pending_precompute"] = pending_count
+            # 使用连接池获取数据库连接
+            conn = resource_manager.get_db_connection(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            # 统计缓存的记忆数量
+            cursor.execute("SELECT COUNT(*) FROM memory_embeddings")
+            cached_count = cursor.fetchone()[0]
+            
+            # 统计待计算的任务数量
+            cursor.execute("SELECT COUNT(*) FROM precompute_tasks WHERE status = 'pending'")
+            pending_count = cursor.fetchone()[0]
+            
+            self.precompute_stats["cached_memories"] = cached_count
+            self.precompute_stats["pending_precompute"] = pending_count
+            
+            # 释放连接回连接池
+            resource_manager.release_db_connection(self.cache_db_path, conn)
                 
         except Exception as e:
             logger.error(f"加载预计算统计信息失败: {e}")
@@ -160,25 +189,31 @@ class EmbeddingCacheManager:
     async def _get_cached_embedding(self, memory_id: str) -> Optional[List[float]]:
         """从缓存中获取嵌入向量"""
         try:
-            with sqlite3.connect(self.cache_db_path) as conn:
-                cursor = conn.cursor()
+            # 使用连接池获取数据库连接
+            conn = resource_manager.get_db_connection(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT embedding, vector_dimension, metadata
+                FROM memory_embeddings
+                WHERE memory_id = ?
+            ''', (memory_id,))
+            
+            row = cursor.fetchone()
+            if row:
+                embedding_blob, vector_dim, _metadata_json = row
+                embedding = self._deserialize_embedding(embedding_blob, vector_dim)
                 
-                cursor.execute('''
-                    SELECT embedding, vector_dimension, metadata 
-                    FROM memory_embeddings 
-                    WHERE memory_id = ?
-                ''', (memory_id,))
-                
-                row = cursor.fetchone()
-                if row:
-                    embedding_blob, vector_dim, metadata_json = row
-                    embedding = self._deserialize_embedding(embedding_blob, vector_dim)
+                # 设置向量维度（仅在第一次时）
+                if self.vector_dimension is None:
+                    self.vector_dimension = vector_dim
                     
-                    # 设置向量维度（仅在第一次时）
-                    if self.vector_dimension is None:
-                        self.vector_dimension = vector_dim
-                        
-                    return embedding
+                # 释放连接回连接池
+                resource_manager.release_db_connection(self.cache_db_path, conn)
+                return embedding
+            
+            # 释放连接回连接池
+            resource_manager.release_db_connection(self.cache_db_path, conn)
                     
         except Exception as e:
             logger.debug(f"从缓存获取嵌入向量失败: {e}")
@@ -205,30 +240,34 @@ class EmbeddingCacheManager:
             if not embedding:
                 return
                 
-            with sqlite3.connect(self.cache_db_path) as conn:
-                cursor = conn.cursor()
+            # 使用连接池获取数据库连接
+            conn = resource_manager.get_db_connection(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            embedding_blob = self._serialize_embedding(embedding)
+            current_time = time.time()
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO memory_embeddings
+                (memory_id, content, concept_id, embedding, vector_dimension, created_at, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                memory_id,
+                content,
+                "",  # concept_id 将在后续更新
+                embedding_blob,
+                len(embedding),
+                current_time,
+                current_time
+            ))
+            
+            conn.commit()
+            
+            # 释放连接回连接池
+            resource_manager.release_db_connection(self.cache_db_path, conn)
                 
-                embedding_blob = self._serialize_embedding(embedding)
-                current_time = time.time()
-                
-                cursor.execute('''
-                    INSERT OR REPLACE INTO memory_embeddings 
-                    (memory_id, content, concept_id, embedding, vector_dimension, created_at, last_updated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    memory_id,
-                    content,
-                    "",  # concept_id 将在后续更新
-                    embedding_blob,
-                    len(embedding),
-                    current_time,
-                    current_time
-                ))
-                
-                conn.commit()
-                
-                # 更新统计信息
-                self.precompute_stats["cached_memories"] += 1
+            # 更新统计信息
+            self.precompute_stats["cached_memories"] += 1
                 
         except Exception as e:
             logger.error(f"缓存嵌入向量失败: {e}")
@@ -236,15 +275,19 @@ class EmbeddingCacheManager:
     def _serialize_embedding(self, embedding: List[float]) -> bytes:
         """序列化嵌入向量"""
         try:
-            # 使用 numpy 序列化为二进制格式
-            embedding_array = np.array(embedding, dtype=np.float32)
-            return embedding_array.tobytes()
+            if HAS_NUMPY and np:
+                # 使用 numpy 序列化为二进制格式
+                embedding_array = np.array(embedding, dtype=np.float32)
+                return embedding_array.tobytes()
+            else:
+                # 降级到 JSON 格式
+                return json.dumps(embedding).encode('utf-8')
         except Exception as e:
             logger.error(f"序列化嵌入向量失败: {e}")
             # 降级到 JSON 格式
             return json.dumps(embedding).encode('utf-8')
             
-    def _deserialize_embedding(self, embedding_blob: bytes, vector_dim: int) -> List[float]:
+    def _deserialize_embedding(self, embedding_blob: bytes, vector_dim: int) -> Optional[List[float]]:
         """反序列化嵌入向量"""
         try:
             # 首先尝试 numpy 格式
@@ -254,20 +297,21 @@ class EmbeddingCacheManager:
                     embedding_blob = embedding_blob.encode('utf-8')
                 except UnicodeEncodeError as e:
                     logger.debug(f"字符串编码失败: {e}")
-                    return []
+                    return None
             
             # 检查是否为有效的二进制数据
             if not isinstance(embedding_blob, (bytes, bytearray)):
                 logger.debug(f"不支持的嵌入向量数据类型: {type(embedding_blob)}")
-                return []
+                return None
                 
-            try:
-                embedding_array = np.frombuffer(embedding_blob, dtype=np.float32)
-                if len(embedding_array) == vector_dim:
-                    return embedding_array.tolist()
-            except (ValueError, TypeError, BufferError) as e:
-                logger.debug(f"numpy反序列化失败: {e}")
-                pass
+            if HAS_NUMPY and np:
+                try:
+                    embedding_array = np.frombuffer(embedding_blob, dtype=np.float32)
+                    if len(embedding_array) == vector_dim:
+                        return embedding_array.tolist()
+                except (ValueError, TypeError, BufferError) as e:
+                    logger.debug(f"numpy反序列化失败: {e}")
+                    pass
             
         except Exception as e:
             logger.debug(f"numpy格式处理失败: {e}")
@@ -284,19 +328,24 @@ class EmbeddingCacheManager:
                         embedding_json = embedding_blob.decode('latin-1')
                     except UnicodeDecodeError:
                         logger.debug("所有编码尝试都失败")
-                        return []
+                        return None
             else:
                 embedding_json = str(embedding_blob)
             
             try:
-                return json.loads(embedding_json)
+                result = json.loads(embedding_json)
+                if isinstance(result, list) and len(result) == vector_dim:
+                    return cast(List[float], result)
+                else:
+                    logger.debug(f"反序列化的嵌入向量格式不正确: {type(result)}, 长度: {len(result) if isinstance(result, list) else 'N/A'}")
+                    return None
             except json.JSONDecodeError as e:
                 logger.debug(f"JSON解析失败: {e}")
-                return []
+                return None
                 
         except Exception as e:
             logger.error(f"反序列化嵌入向量失败: {e}")
-            return []
+            return None
             
     async def schedule_precompute_task(self, memory_ids: List[str], priority: int = 1):
         """调度预计算任务"""
@@ -307,7 +356,7 @@ class EmbeddingCacheManager:
             task_id = f"precompute_{int(time.time() * 1000)}_{len(memory_ids)}"
             
             # 过滤已经缓存的记忆
-            uncached_memory_ids = []
+            uncached_memory_ids: List[str] = []
             for memory_id in memory_ids:
                 if not await self._get_cached_embedding(memory_id):
                     uncached_memory_ids.append(memory_id)
@@ -345,7 +394,7 @@ class EmbeddingCacheManager:
             
             # 如果没有预计算任务正在运行，启动预计算器
             if not self.is_precomputing:
-                self._worker_task = asyncio.create_task(self._precompute_worker())
+                self._worker_task = cast(asyncio.Task[None], resource_manager.create_task(self._precompute_worker()))
                 
         except Exception as e:
             logger.error(f"调度预计算任务失败: {e}")
@@ -353,24 +402,28 @@ class EmbeddingCacheManager:
     async def _save_precompute_task(self, task: PrecomputeTask):
         """保存预计算任务到数据库"""
         try:
-            with sqlite3.connect(self.cache_db_path) as conn:
-                cursor = conn.cursor()
-                
-                cursor.execute('''
-                    INSERT OR REPLACE INTO precompute_tasks 
-                    (task_id, memory_ids, priority, created_at, status, progress, error_message)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    task.task_id,
-                    json.dumps(task.memory_ids),
-                    task.priority,
-                    task.created_at,
-                    task.status,
-                    task.progress,
-                    task.error_message
-                ))
-                
-                conn.commit()
+            # 使用连接池获取数据库连接
+            conn = resource_manager.get_db_connection(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO precompute_tasks
+                (task_id, memory_ids, priority, created_at, status, progress, error_message)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                task.task_id,
+                json.dumps(task.memory_ids),
+                task.priority,
+                task.created_at,
+                task.status,
+                task.progress,
+                task.error_message
+            ))
+            
+            conn.commit()
+            
+            # 释放连接回连接池
+            resource_manager.release_db_connection(self.cache_db_path, conn)
                 
         except Exception as e:
             logger.error(f"保存预计算任务失败: {e}")
@@ -513,7 +566,7 @@ class EmbeddingCacheManager:
             
     async def _get_memories_data(self, memory_ids: List[str]) -> List[Dict[str, Any]]:
         """获取记忆数据"""
-        memories_data = []
+        memories_data: List[Dict[str, Any]] = []
         
         for memory_id in memory_ids:
             memory = self.memory_system.memory_graph.memories.get(memory_id)
@@ -528,7 +581,7 @@ class EmbeddingCacheManager:
         
     async def _batch_compute_embeddings(self, memories_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """批量计算嵌入向量"""
-        results = []
+        results: List[Dict[str, Any]] = []
         
         for memory_data in memories_data:
             try:
@@ -548,97 +601,109 @@ class EmbeddingCacheManager:
     async def _batch_cache_embeddings(self, batch_results: List[Dict[str, Any]]):
         """批量缓存嵌入向量"""
         try:
-            with sqlite3.connect(self.cache_db_path) as conn:
-                cursor = conn.cursor()
+            # 使用连接池获取数据库连接
+            conn = resource_manager.get_db_connection(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            current_time = time.time()
+            
+            for result in batch_results:
+                embedding_blob = self._serialize_embedding(result["embedding"])
                 
-                current_time = time.time()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO memory_embeddings
+                    (memory_id, content, concept_id, embedding, vector_dimension, created_at, last_updated)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    result["memory_id"],
+                    result["content"],
+                    result["concept_id"],
+                    embedding_blob,
+                    len(result["embedding"]),
+                    current_time,
+                    current_time
+                ))
                 
-                for result in batch_results:
-                    embedding_blob = self._serialize_embedding(result["embedding"])
-                    
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO memory_embeddings 
-                        (memory_id, content, concept_id, embedding, vector_dimension, created_at, last_updated)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        result["memory_id"],
-                        result["content"],
-                        result["concept_id"],
-                        embedding_blob,
-                        len(result["embedding"]),
-                        current_time,
-                        current_time
-                    ))
-                    
-                conn.commit()
+            conn.commit()
+            
+            # 释放连接回连接池
+            resource_manager.release_db_connection(self.cache_db_path, conn)
                 
         except Exception as e:
             logger.error(f"批量缓存嵌入向量失败: {e}")
             
     async def batch_retrieve_embeddings(self, memory_ids: List[str]) -> Dict[str, List[float]]:
         """批量检索嵌入向量"""
-        embeddings = {}
+        embeddings: Dict[str, List[float]] = {}
         
         try:
-            with sqlite3.connect(self.cache_db_path) as conn:
-                cursor = conn.cursor()
-                
-                # 构建查询条件
-                placeholders = ",".join(["?" for _ in memory_ids])
-                cursor.execute(f'''
-                    SELECT memory_id, embedding, vector_dimension 
-                    FROM memory_embeddings 
-                    WHERE memory_id IN ({placeholders})
-                ''', memory_ids)
-                
-                for row in cursor.fetchall():
-                    memory_id, embedding_blob, vector_dim = row
-                    embedding = self._deserialize_embedding(embedding_blob, vector_dim)
-                    if embedding:
-                        embeddings[memory_id] = embedding
+            # 使用连接池获取数据库连接
+            conn = resource_manager.get_db_connection(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            # 构建查询条件
+            placeholders = ",".join(["?" for _ in memory_ids])
+            cursor.execute(f'''
+                SELECT memory_id, embedding, vector_dimension
+                FROM memory_embeddings
+                WHERE memory_id IN ({placeholders})
+            ''', memory_ids)
+            
+            for row in cursor.fetchall():
+                memory_id, embedding_blob, vector_dim = row
+                embedding = self._deserialize_embedding(embedding_blob, vector_dim)
+                if embedding:
+                    embeddings[memory_id] = embedding
+            
+            # 释放连接回连接池
+            resource_manager.release_db_connection(self.cache_db_path, conn)
                         
         except Exception as e:
             logger.error(f"批量检索嵌入向量失败: {e}")
             
         return embeddings
         
-    async def semantic_search(self, query_embedding: List[float], limit: int = 10, 
+    async def semantic_search(self, query_embedding: List[float], limit: int = 10,
                            concept_filter: Optional[str] = None) -> List[Tuple[str, float]]:
         """基于嵌入向量的语义搜索"""
         try:
             if not query_embedding:
                 return []
                 
-            with sqlite3.connect(self.cache_db_path) as conn:
-                cursor = conn.cursor()
+            # 使用连接池获取数据库连接
+            conn = resource_manager.get_db_connection(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            # 构建查询条件
+            if concept_filter:
+                cursor.execute('''
+                    SELECT memory_id, embedding, vector_dimension
+                    FROM memory_embeddings
+                    WHERE concept_id = ?
+                ''', (concept_filter,))
+            else:
+                cursor.execute('''
+                    SELECT memory_id, embedding, vector_dimension
+                    FROM memory_embeddings
+                ''')
                 
-                # 构建查询条件
-                if concept_filter:
-                    cursor.execute('''
-                        SELECT memory_id, embedding, vector_dimension 
-                        FROM memory_embeddings 
-                        WHERE concept_id = ?
-                    ''', (concept_filter,))
-                else:
-                    cursor.execute('''
-                        SELECT memory_id, embedding, vector_dimension 
-                        FROM memory_embeddings
-                    ''')
-                    
-                results = []
+            results: List[Tuple[str, float]] = []
+            
+            for row in cursor.fetchall():
+                memory_id, embedding_blob, vector_dim = row
+                memory_embedding = self._deserialize_embedding(embedding_blob, vector_dim)
                 
-                for row in cursor.fetchall():
-                    memory_id, embedding_blob, vector_dim = row
-                    memory_embedding = self._deserialize_embedding(embedding_blob, vector_dim)
-                    
-                    if memory_embedding:
-                        similarity = self._cosine_similarity(query_embedding, memory_embedding)
-                        if similarity > 0.3:  # 相似度阈值
-                            results.append((memory_id, similarity))
-                            
-                # 按相似度排序并返回前N个结果
-                results.sort(key=lambda x: x[1], reverse=True)
-                return results[:limit]
+                if memory_embedding:
+                    similarity = self._cosine_similarity(query_embedding, memory_embedding)
+                    if similarity > 0.3:  # 相似度阈值
+                        results.append((memory_id, similarity))
+                        
+            # 释放连接回连接池
+            resource_manager.release_db_connection(self.cache_db_path, conn)
+            
+            # 按相似度排序并返回前N个结果
+            results.sort(key=lambda x: x[1], reverse=True)
+            return results[:limit]
                 
         except Exception as e:
             logger.error(f"语义搜索失败: {e}")
@@ -667,25 +732,29 @@ class EmbeddingCacheManager:
         try:
             stats = self.precompute_stats.copy()
             
-            with sqlite3.connect(self.cache_db_path) as conn:
-                cursor = conn.cursor()
-                
-                # 获取缓存命中率
-                total_requests = stats["cache_hits"] + stats["cache_misses"]
-                hit_rate = stats["cache_hits"] / total_requests if total_requests > 0 else 0
-                
-                # 获取平均向量维度
-                if self.vector_dimension:
-                    stats["vector_dimension"] = self.vector_dimension
-                
-                stats["cache_hit_rate"] = hit_rate
-                stats["total_requests"] = total_requests
-                
-                # 获取数据库大小
-                cursor.execute("SELECT COUNT(*) FROM memory_embeddings WHERE embedding_version = 'v1.0'")
-                current_version_count = cursor.fetchone()[0]
-                stats["current_version_count"] = current_version_count
-                
+            # 使用连接池获取数据库连接
+            conn = resource_manager.get_db_connection(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            # 获取缓存命中率
+            total_requests = stats["cache_hits"] + stats["cache_misses"]
+            hit_rate = stats["cache_hits"] / total_requests if total_requests > 0 else 0
+            
+            # 获取平均向量维度
+            if self.vector_dimension:
+                stats["vector_dimension"] = self.vector_dimension
+            
+            stats["cache_hit_rate"] = hit_rate
+            stats["total_requests"] = total_requests
+            
+            # 获取数据库大小
+            cursor.execute("SELECT COUNT(*) FROM memory_embeddings WHERE embedding_version = 'v1.0'")
+            current_version_count = cursor.fetchone()[0]
+            stats["current_version_count"] = current_version_count
+            
+            # 释放连接回连接池
+            resource_manager.release_db_connection(self.cache_db_path, conn)
+            
             return stats
             
         except Exception as e:
@@ -697,7 +766,7 @@ class EmbeddingCacheManager:
         try:
             
             # 获取所有记忆ID
-            all_memory_ids = list(self.memory_system.memory_graph.memories.keys())
+            all_memory_ids = list(cast(Dict[str, Any], self.memory_system.memory_graph.memories).keys())
             
             if not all_memory_ids:
                 logger.info("没有记忆需要预计算")
@@ -726,21 +795,25 @@ class EmbeddingCacheManager:
         try:
             cutoff_time = time.time() - (days_old * 24 * 3600)
             
-            with sqlite3.connect(self.cache_db_path) as conn:
-                cursor = conn.cursor()
-                
-                # 删除旧的嵌入向量
-                cursor.execute('''
-                    DELETE FROM memory_embeddings 
-                    WHERE last_updated < ?
-                    AND embedding_version != 'v1.0'
-                ''', (cutoff_time,))
-                
-                deleted_count = cursor.rowcount
-                conn.commit()
-                
-                if deleted_count > 0:
-                    logger.info(f"清理了 {deleted_count} 个旧的嵌入向量")
+            # 使用连接池获取数据库连接
+            conn = resource_manager.get_db_connection(self.cache_db_path)
+            cursor = conn.cursor()
+            
+            # 删除旧的嵌入向量
+            cursor.execute('''
+                DELETE FROM memory_embeddings
+                WHERE last_updated < ?
+                AND embedding_version != 'v1.0'
+            ''', (cutoff_time,))
+            
+            deleted_count = cursor.rowcount
+            conn.commit()
+            
+            # 释放连接回连接池
+            resource_manager.release_db_connection(self.cache_db_path, conn)
+            
+            if deleted_count > 0:
+                logger.info(f"清理了 {deleted_count} 个旧的嵌入向量")
                     
         except Exception as e:
             logger.error(f"清理旧嵌入向量失败: {e}")

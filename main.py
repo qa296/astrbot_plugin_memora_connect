@@ -15,10 +15,12 @@ from .database_migration import SmartDatabaseMigration
 from .enhanced_memory_display import EnhancedMemoryDisplay
 from .embedding_cache_manager import EmbeddingCacheManager
 from .enhanced_memory_recall import EnhancedMemoryRecall
+from .memory_graph_visualization import MemoryGraphVisualizer
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api import AstrBotConfig
 from astrbot.api.star import StarTools
+from .resource_management import resource_manager
 
 @register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.4", "https://github.com/qa296/astrbot_plugin_memora_connect")
 class MemoraConnectPlugin(Star):
@@ -27,6 +29,7 @@ class MemoraConnectPlugin(Star):
         data_dir = StarTools.get_data_dir() / "memora_connect"
         self.memory_system = MemorySystem(context, config, data_dir)
         self.memory_display = EnhancedMemoryDisplay(self.memory_system)
+        self.graph_visualizer = MemoryGraphVisualizer(self.memory_system)
         self._initialized = False
         asyncio.create_task(self._async_init())
     
@@ -115,6 +118,57 @@ class MemoraConnectPlugin(Star):
         except Exception as e:
             logger.error(f"查询印象失败: {e}")
             yield event.plain_result(f"查询 {name} 的印象时出现错误")
+    
+    @memory.command("图谱")
+    async def memory_graph(self, event: AstrMessageEvent, layout_style: str = "auto"):
+        """生成记忆图谱可视化图片
+        
+        Args:
+            layout_style: 布局风格，可选值：
+                - auto: 自适应布局（根据图的复杂度自动选择最适合的布局，默认）
+                - force_directed: 力导向布局
+                - circular: 圆形布局
+                - kamada_kawai: Kamada-Kawai布局
+                - spectral: 谱布局
+                - community: 社区布局
+                - hierarchical: 多层次布局
+        """
+        # 检查记忆系统是否启用
+        if not self.memory_system.config_manager.is_memory_system_enabled():
+            yield event.plain_result("记忆系统已禁用，无法生成图谱。")
+            return
+            
+        try:
+            # 发送生成中的提示
+            yield event.plain_result(f"🔄 正在生成记忆图谱（布局风格: {layout_style}），请稍候...")
+            
+            # 异步生成图谱图片
+            image_path = await self.graph_visualizer.generate_graph_image(layout_style=layout_style)
+            
+            if image_path:
+                # 检查文件是否存在
+                if os.path.exists(image_path):
+                    # 发送图片消息
+                    try:
+                        # 尝试使用 AstrBot 的图片发送功能
+                        if hasattr(event, 'send_image'):
+                            await event.send_image(image_path)
+                            yield event.plain_result(f"✅ 记忆图谱已生成！（布局风格: {layout_style}）")
+                        else:
+                            # 如果不支持直接发送图片，尝试使用其他方法
+                            yield event.image_result(image_path)
+                    except Exception as img_e:
+                        logger.error(f"发送图片失败: {img_e}", exc_info=True)
+                        # 如果发送图片失败，发送文件路径
+                        yield event.plain_result(f"✅ 记忆图谱已生成！（布局风格: {layout_style}）\n图片路径: {image_path}")
+                else:
+                    yield event.plain_result("❌ 图谱文件生成失败，请检查权限和磁盘空间。")
+            else:
+                yield event.plain_result("❌ 记忆图谱生成失败，可能是因为：\n1. 未安装依赖库（networkx, matplotlib）\n2. 记忆数据为空\n3. 系统错误")
+                
+        except Exception as e:
+            logger.error(f"生成记忆图谱失败: {e}", exc_info=True)
+            yield event.plain_result(f"❌ 生成记忆图谱时出现错误: {str(e)}")
     
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
@@ -246,6 +300,9 @@ class MemoraConnectPlugin(Star):
                         if filename.startswith("memory_group_") and filename.endswith(".db"):
                             group_id = filename[12:-3]
                             await self.memory_system.save_memory_state(group_id)
+            
+            # 7. 使用资源管理器清理所有资源
+            resource_manager.cleanup()
             
             self._debug_log("记忆系统已保存并安全关闭", "info")
             
@@ -779,7 +836,8 @@ class MemorySystem:
             self._debug_log(f"无法创建任务：传入的不是协程对象", "warning")
             return
         
-        task = asyncio.create_task(coro)
+        # 使用事件循环管理器创建任务
+        task = resource_manager.create_task(coro)
         self._managed_tasks.add(task)
         
         self._debug_log(f"创建新任务: {coro.__name__}。当前任务数: {len(self._managed_tasks)}", "debug")
@@ -971,7 +1029,6 @@ class MemorySystem:
         
     def load_memory_state(self, group_id: str = ""):
         """从数据库加载记忆状态"""
-        import sqlite3
         import os
         
         # 获取对应的数据库路径
@@ -981,69 +1038,70 @@ class MemorySystem:
             return
             
         try:
-            with sqlite3.connect(db_path) as conn:
-                cursor = conn.cursor()
+            # 使用连接池获取数据库连接
+            conn = resource_manager.get_db_connection(db_path)
+            cursor = conn.cursor()
+            
+            # 检查表是否存在
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='concepts'")
+            if not cursor.fetchone():
+                return
+            
+            # 加载概念
+            cursor.execute("SELECT id, name, created_at, last_accessed, access_count FROM concepts")
+            concepts = cursor.fetchall()
+            for concept_data in concepts:
+                self.memory_graph.add_concept(
+                    concept_id=concept_data[0],
+                    name=concept_data[1],
+                    created_at=concept_data[2],
+                    last_accessed=concept_data[3],
+                    access_count=concept_data[4]
+                )
                 
-                # 检查表是否存在
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='concepts'")
-                if not cursor.fetchone():
-                    return
+            # 加载记忆
+            cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories")
+            memories = cursor.fetchall()
+            for memory_data in memories:
+                self.memory_graph.add_memory(
+                    content=memory_data[2],
+                    concept_id=memory_data[1],
+                    memory_id=memory_data[0],
+                    details=memory_data[3] or "",
+                    participants=memory_data[4] or "",
+                    location=memory_data[5] or "",
+                    emotion=memory_data[6] or "",
+                    tags=memory_data[7] or "",
+                    created_at=memory_data[8],
+                    last_accessed=memory_data[9],
+                    access_count=memory_data[10],
+                    strength=memory_data[11]
+                )
                 
-                # 加载概念
-                cursor.execute("SELECT id, name, created_at, last_accessed, access_count FROM concepts")
-                concepts = cursor.fetchall()
-                for concept_data in concepts:
-                    self.memory_graph.add_concept(
-                        concept_id=concept_data[0],
-                        name=concept_data[1],
-                        created_at=concept_data[2],
-                        last_accessed=concept_data[3],
-                        access_count=concept_data[4]
-                    )
-                    
-                # 加载记忆
-                cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories")
-                memories = cursor.fetchall()
-                for memory_data in memories:
-                    self.memory_graph.add_memory(
-                        content=memory_data[2],
-                        concept_id=memory_data[1],
-                        memory_id=memory_data[0],
-                        details=memory_data[3] or "",
-                        participants=memory_data[4] or "",
-                        location=memory_data[5] or "",
-                        emotion=memory_data[6] or "",
-                        tags=memory_data[7] or "",
-                        created_at=memory_data[8],
-                        last_accessed=memory_data[9],
-                        access_count=memory_data[10],
-                        strength=memory_data[11]
-                    )
-                    
-                # 加载连接
-                cursor.execute("SELECT id, from_concept, to_concept, strength, last_strengthened FROM connections")
-                connections = cursor.fetchall()
-                for conn_data in connections:
-                    self.memory_graph.add_connection(
-                        from_concept=conn_data[1],
-                        to_concept=conn_data[2],
-                        strength=conn_data[3],
-                        connection_id=conn_data[0],
-                        last_strengthened=conn_data[4]
-                    )
-                    
+            # 加载连接
+            cursor.execute("SELECT id, from_concept, to_concept, strength, last_strengthened FROM connections")
+            connections = cursor.fetchall()
+            for conn_data in connections:
+                self.memory_graph.add_connection(
+                    from_concept=conn_data[1],
+                    to_concept=conn_data[2],
+                    strength=conn_data[3],
+                    connection_id=conn_data[0],
+                    last_strengthened=conn_data[4]
+                )
+                
+            # 释放连接回连接池
+            resource_manager.release_db_connection(db_path, conn)
+                
             # 仅在成功加载时输出一次统计信息
             group_info = f" (群: {group_id})" if group_id else ""
             self._debug_log(f"记忆系统加载{group_info}，包含 {len(concepts)} 个概念，{len(memories)} 条记忆", "debug")
             
-        except sqlite3.Error as e:
-            self._debug_log(f"数据库加载失败: {e}", "error")
         except Exception as e:
             self._debug_log(f"状态加载异常: {e}", "error")
 
     async def save_memory_state(self, group_id: str = ""):
         """保存记忆状态到数据库"""
-        import sqlite3
         try:
             # 获取对应的数据库路径
             db_path = self._get_group_db_path(group_id)
@@ -1051,142 +1109,141 @@ class MemorySystem:
             # 确保数据库和表存在
             await self._ensure_database_structure(db_path)
             
-            with sqlite3.connect(db_path) as conn:
-                cursor = conn.cursor()
+            # 使用连接池获取数据库连接
+            conn = resource_manager.get_db_connection(db_path)
+            cursor = conn.cursor()
+            
+            # 使用事务确保数据一致性
+            cursor.execute("BEGIN TRANSACTION")
+            
+            try:
                 
-                # 使用事务确保数据一致性
-                cursor.execute("BEGIN TRANSACTION")
+                # 增量更新概念
+                for concept in self.memory_graph.concepts.values():
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO concepts
+                        (id, name, created_at, last_accessed, access_count)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (concept.id, concept.name, concept.created_at, concept.last_accessed, concept.access_count))
                 
-                try:
-                    
-                    # 增量更新概念
-                    for concept in self.memory_graph.concepts.values():
+                # 增量更新记忆
+                for memory in self.memory_graph.memories.values():
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO memories
+                        (id, concept_id, content, details, participants,
+                        location, emotion, tags, created_at, last_accessed, access_count, strength)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (memory.id, memory.concept_id, memory.content, memory.details,
+                         memory.participants, memory.location, memory.emotion, memory.tags,
+                         memory.created_at, memory.last_accessed, memory.access_count, memory.strength))
+                
+                # 增量更新连接
+                existing_connections = set()
+                cursor.execute("SELECT id FROM connections")
+                for row in cursor.fetchall():
+                    existing_connections.add(row[0])
+                
+                # 更新现有连接
+                for conn_obj in self.memory_graph.connections:
+                    if conn_obj.id in existing_connections:
                         cursor.execute('''
-                            INSERT OR REPLACE INTO concepts
-                            (id, name, created_at, last_accessed, access_count)
-                            VALUES (?, ?, ?, ?, ?)
-                        ''', (concept.id, concept.name, concept.created_at, concept.last_accessed, concept.access_count))
-                    
-                    # 增量更新记忆
-                    for memory in self.memory_graph.memories.values():
-                        cursor.execute('''
-                            INSERT OR REPLACE INTO memories
-                            (id, concept_id, content, details, participants,
-                            location, emotion, tags, created_at, last_accessed, access_count, strength)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', (memory.id, memory.concept_id, memory.content, memory.details,
-                             memory.participants, memory.location, memory.emotion, memory.tags,
-                             memory.created_at, memory.last_accessed, memory.access_count, memory.strength))
-                    
-                    # 增量更新连接
-                    existing_connections = set()
-                    cursor.execute("SELECT id FROM connections")
-                    for row in cursor.fetchall():
-                        existing_connections.add(row[0])
-                    
-                    # 更新现有连接
-                    for conn in self.memory_graph.connections:
-                        if conn.id in existing_connections:
-                            cursor.execute('''
-                                UPDATE connections
-                                SET from_concept=?, to_concept=?, strength=?, last_strengthened=?
-                                WHERE id=?
-                            ''', (conn.from_concept, conn.to_concept, conn.strength, conn.last_strengthened, conn.id))
-                        else:
-                            cursor.execute('''
-                                INSERT INTO connections (id, from_concept, to_concept, strength, last_strengthened)
-                                VALUES (?, ?, ?, ?, ?)
-                            ''', (conn.id, conn.from_concept, conn.to_concept, conn.strength, conn.last_strengthened))
-                    
-                    # 检查连接对象是否有commit方法
-                    if hasattr(conn, 'commit'):
-                        conn.commit()
+                            UPDATE connections
+                            SET from_concept=?, to_concept=?, strength=?, last_strengthened=?
+                            WHERE id=?
+                        ''', (conn_obj.from_concept, conn_obj.to_concept, conn_obj.strength, conn_obj.last_strengthened, conn_obj.id))
                     else:
-                        # SQLite连接默认自动提交，不需要显式调用commit
-                        self._debug_log("连接对象不支持commit方法，使用自动提交模式", "debug")
-                    # 简化的保存完成日志
-                    group_info = f" (群: {group_id})" if group_id else ""
-                    self._debug_log(f"记忆保存完成{group_info}: {len(self.memory_graph.concepts)}个概念, {len(self.memory_graph.memories)}条记忆", "debug")
-                    
-                except Exception as e:
-                    try:
-                        # 检查连接对象是否有rollback方法
-                        if hasattr(conn, 'rollback'):
-                            conn.rollback()
-                        else:
-                            self._debug_log("连接对象不支持rollback方法", "warning")
-                    except Exception as rollback_e:
-                        self._debug_log(f"回滚失败: {rollback_e}", "error")
-                    self._debug_log(f"保存失败: {e}", "error")
-                    raise
-                    
-        except sqlite3.Error as e:
-            self._debug_log(f"数据库保存错误: {e}", "error")
+                        cursor.execute('''
+                            INSERT INTO connections (id, from_concept, to_concept, strength, last_strengthened)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', (conn_obj.id, conn_obj.from_concept, conn_obj.to_concept, conn_obj.strength, conn_obj.last_strengthened))
+                
+                # 提交事务
+                conn.commit()
+                
+                # 释放连接回连接池
+                resource_manager.release_db_connection(db_path, conn)
+                
+                # 简化的保存完成日志
+                group_info = f" (群: {group_id})" if group_id else ""
+                self._debug_log(f"记忆保存完成{group_info}: {len(self.memory_graph.concepts)}个概念, {len(self.memory_graph.memories)}条记忆", "debug")
+                
+            except Exception as e:
+                try:
+                    # 回滚事务
+                    conn.rollback()
+                except Exception as rollback_e:
+                    self._debug_log(f"回滚失败: {rollback_e}", "error")
+                # 释放连接回连接池
+                resource_manager.release_db_connection(db_path, conn)
+                self._debug_log(f"保存失败: {e}", "error")
+                raise
+                
         except Exception as e:
             self._debug_log(f"保存过程异常: {e}", "error")
     
     async def _ensure_database_structure(self, db_path: str):
         """确保数据库和所需的表结构存在"""
         try:
-            with sqlite3.connect(db_path) as conn:
-                cursor = conn.cursor()
+            # 使用连接池获取数据库连接
+            conn = resource_manager.get_db_connection(db_path)
+            cursor = conn.cursor()
+            
+            # 检查表是否存在
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            existing_tables = {row[0] for row in cursor.fetchall()}
+            
+            # 创建所需的表（如果不存在）
+            if 'concepts' not in existing_tables:
+                cursor.execute('''
+                    CREATE TABLE concepts (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        created_at REAL,
+                        last_accessed REAL,
+                        access_count INTEGER DEFAULT 0
+                    )
+                ''')
+                self._debug_log(f"创建表: concepts", "debug")
+            
+            if 'memories' not in existing_tables:
+                cursor.execute('''
+                    CREATE TABLE memories (
+                        id TEXT PRIMARY KEY,
+                        concept_id TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        details TEXT,
+                        participants TEXT,
+                        location TEXT,
+                        emotion TEXT,
+                        tags TEXT,
+                        created_at REAL,
+                        last_accessed REAL,
+                        access_count INTEGER DEFAULT 0,
+                        strength REAL DEFAULT 1.0,
+                        FOREIGN KEY (concept_id) REFERENCES concepts (id)
+                    )
+                ''')
+                self._debug_log(f"创建表: memories", "debug")
+            
+            if 'connections' not in existing_tables:
+                cursor.execute('''
+                    CREATE TABLE connections (
+                        id TEXT PRIMARY KEY,
+                        from_concept TEXT NOT NULL,
+                        to_concept TEXT NOT NULL,
+                        strength REAL DEFAULT 1.0,
+                        last_strengthened REAL,
+                        FOREIGN KEY (from_concept) REFERENCES concepts (id),
+                        FOREIGN KEY (to_concept) REFERENCES concepts (id)
+                    )
+                ''')
+                self._debug_log(f"创建表: connections", "debug")
+            
+            conn.commit()
+            
+            # 释放连接回连接池
+            resource_manager.release_db_connection(db_path, conn)
                 
-                # 检查表是否存在
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                existing_tables = {row[0] for row in cursor.fetchall()}
-                
-                # 创建所需的表（如果不存在）
-                if 'concepts' not in existing_tables:
-                    cursor.execute('''
-                        CREATE TABLE concepts (
-                            id TEXT PRIMARY KEY,
-                            name TEXT NOT NULL,
-                            created_at REAL,
-                            last_accessed REAL,
-                            access_count INTEGER DEFAULT 0
-                        )
-                    ''')
-                    self._debug_log(f"创建表: concepts", "debug")
-                
-                if 'memories' not in existing_tables:
-                    cursor.execute('''
-                        CREATE TABLE memories (
-                            id TEXT PRIMARY KEY,
-                            concept_id TEXT NOT NULL,
-                            content TEXT NOT NULL,
-                            details TEXT,
-                            participants TEXT,
-                            location TEXT,
-                            emotion TEXT,
-                            tags TEXT,
-                            created_at REAL,
-                            last_accessed REAL,
-                            access_count INTEGER DEFAULT 0,
-                            strength REAL DEFAULT 1.0,
-                            FOREIGN KEY (concept_id) REFERENCES concepts (id)
-                        )
-                    ''')
-                    self._debug_log(f"创建表: memories", "debug")
-                
-                if 'connections' not in existing_tables:
-                    cursor.execute('''
-                        CREATE TABLE connections (
-                            id TEXT PRIMARY KEY,
-                            from_concept TEXT NOT NULL,
-                            to_concept TEXT NOT NULL,
-                            strength REAL DEFAULT 1.0,
-                            last_strengthened REAL,
-                            FOREIGN KEY (from_concept) REFERENCES concepts (id),
-                            FOREIGN KEY (to_concept) REFERENCES concepts (id)
-                        )
-                    ''')
-                    self._debug_log(f"创建表: connections", "debug")
-                
-                conn.commit()
-                
-        except sqlite3.Error as e:
-            self._debug_log(f"创建数据库表结构失败: {e}", "error")
-            raise
         except Exception as e:
             self._debug_log(f"确保数据库结构异常: {e}", "error")
             raise
@@ -1240,11 +1297,19 @@ class MemorySystem:
             if not full_history:
                 return
             
-            # 获取记忆形成概率
-            formation_probability = self.memory_config.get("memory_formation_probability", 0.3)
+            # 检查是否启用批量记忆提取
+            enable_batch_extraction = self.memory_config.get("enable_batch_memory_extraction", True)
             
-            # 根据概率决定是否提取和创建记忆
-            if random.random() > formation_probability:
+            if not enable_batch_extraction:
+                # 如果禁用批量记忆提取，则跳过记忆形成
+                return
+
+            # 获取记忆形成间隔（对话轮数）
+            memory_formation_interval = self.memory_config.get("memory_formation_interval", 3)
+            
+            # 简单实现：每隔一定轮数形成一次记忆
+            # 这里可以根据实际需求实现更复杂的逻辑
+            if len(full_history) % memory_formation_interval != 0:
                 return
 
             # 使用批量提取器，单次LLM调用获取多个记忆
@@ -1428,7 +1493,9 @@ class MemorySystem:
                     history = json.loads(conversation.history)
                     # 添加发送者信息和时间戳
                     full_history = []
-                    for msg in history[-20:]:  # 最近20条，避免token过多，等会加配置
+                    # 从配置中获取对话历史条数，默认为20条
+                    conversation_history_count = self.memory_config.get("conversation_history_count", 20)
+                    for msg in history[-conversation_history_count:]:  # 使用配置中的条数，避免token过多
                         full_msg = {
                             "role": msg.get("role", "user"),
                             "content": msg.get("content", ""),

@@ -2,3 +2,7 @@ aiohttp>=3.8.0
 numpy>=1.21.0
 scikit-learn>=1.0.0
 jieba>=0.42.1
+Pillow>=10.0.0
+networkx>=2.6.0
+matplotlib>=3.5.0
+python-louvain
