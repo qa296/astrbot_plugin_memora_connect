@@ -33,7 +33,7 @@ AstrBot Memora Connect 是一个为 AstrBot 设计的高级记忆插件，通过
 ## ✨ 功能特性
 
 ### 🧠 记忆系统
-- **自动记忆形成**：基于概率自动从对话中提取记忆点
+- **自动记忆形成**：每隔N轮对话自动提取一次记忆
 - **丰富记忆内容**：支持参与者、地点、情感、标签等多维度信息
 - **记忆强度管理**：模拟人类记忆的强度衰减和强化机制
 - **记忆整理合并**：智能合并相似记忆，保持记忆库的简洁性
@@ -186,7 +186,7 @@ record_impression({
 
 #### 💭 自动记忆形成
 - 监听所有对话消息
-- 根据配置的概率自动提取记忆
+- 根据配置的间隔自动提取记忆
 - 支持批量记忆提取，提高效率
 
 #### 🧠 智能记忆注入
@@ -256,14 +256,14 @@ record_impression({
 }
 ```
 
-#### 📊 概率控制
+#### 📊 间隔控制
 ```json
 {
-  "memory_formation_probability": {
-    "description": "记忆形成概率",
-    "type": "float",
-    "default": 0.3,
-    "hint": "每条消息形成记忆的概率(0-1)"
+  "memory_formation_interval": {
+    "description": "记忆形成间隔",
+    "type": "int",
+    "default": 15,
+    "hint": "每隔多少轮对话形成一次记忆"
   },
   "recall_trigger_probability": {
     "description": "回忆触发概率",
@@ -341,7 +341,7 @@ record_impression({
 {
   "enable_group_isolation": true,
   "recall_mode": "simple",
-  "memory_formation_probability": 0.3,
+  "memory_formation_interval": 15,
   "enable_forgetting": true,
   "enable_consolidation": true
 }
@@ -354,7 +354,7 @@ record_impression({
   "recall_mode": "llm",
   "llm_provider": "openai",
   "llm_system_prompt": "你是一个专业的记忆助手，请准确总结对话中的关键信息。",
-  "memory_formation_probability": 0.5,
+  "memory_formation_interval": 15,
   "recall_trigger_probability": 0.7,
   "enable_associative_recall": true
 }
@@ -368,7 +368,7 @@ record_impression({
   "embedding_provider": "openai",
   "embedding_model": "text-embedding-ada-002",
   "llm_provider": "openai",
-  "memory_formation_probability": 0.4,
+  "memory_formation_interval": 15,
   "enable_enhanced_memory": true,
   "memory_injection_threshold": 0.4,
   "max_injected_memories": 5

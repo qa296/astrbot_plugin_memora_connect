@@ -47,7 +47,7 @@
     "description": "回忆触发概率",
     "type": "float",
     "hint": "对话中触发回忆的概率(0-1)（此选项使用llm）",
-    "default": 0.6
+    "default": 0
   },
   "enable_forgetting": {
     "description": "启用遗忘机制",

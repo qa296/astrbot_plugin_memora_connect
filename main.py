@@ -22,7 +22,7 @@ from astrbot.api import AstrBotConfig
 from astrbot.api.star import StarTools
 from .resource_management import resource_manager
 
-@register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.4", "https://github.com/qa296/astrbot_plugin_memora_connect")
+@register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.5", "https://github.com/qa296/astrbot_plugin_memora_connect")
 class MemoraConnectPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -1305,7 +1305,7 @@ class MemorySystem:
                 return
 
             # 获取记忆形成间隔（对话轮数）
-            memory_formation_interval = self.memory_config.get("memory_formation_interval", 3)
+            memory_formation_interval = self.memory_config.get("memory_formation_interval", 15)
             
             # 简单实现：每隔一定轮数形成一次记忆
             # 这里可以根据实际需求实现更复杂的逻辑
