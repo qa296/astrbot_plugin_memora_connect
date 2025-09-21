@@ -1030,6 +1030,16 @@ class MemorySystem:
         except Exception as e:
             self._debug_log(f"数据库迁移过程异常: {e}", "error")
         
+        # 执行嵌入向量缓存数据库迁移
+        try:
+            embedding_migration_success = await migration.run_embedding_cache_migration()
+            if embedding_migration_success:
+                self._debug_log("嵌入向量缓存数据库迁移成功", "info")
+            else:
+                self._debug_log("嵌入向量缓存数据库迁移失败", "warning")
+        except Exception as embedding_e:
+            self._debug_log(f"嵌入向量缓存数据库迁移异常: {embedding_e}", "warning")
+        
     def load_memory_state(self, group_id: str = ""):
         """从数据库加载记忆状态"""
         import os

@@ -129,6 +129,52 @@ class SmartDatabaseMigration:
                 self._rollback(backup_path)
             return False
     
+    async def run_embedding_cache_migration(self) -> bool:
+        """专门用于嵌入向量缓存数据库的迁移"""
+        try:
+            if not os.path.exists(self.db_path):
+                logger.info("嵌入向量缓存数据库不存在，将创建新数据库")
+                # 创建新数据库时，直接使用新结构，无需迁移
+                self._create_new_structure(self.db_path)
+                return True
+            
+            logger.info(f"开始嵌入向量缓存数据库迁移: {self.db_path}")
+            
+            # 1. 分析现有数据库结构
+            current_schema = self._analyze_current_schema()
+            
+            # 2. 生成目标数据库结构
+            target_schema = self._generate_embedding_cache_schema()
+            
+            # 3. 智能差异检测
+            schema_diff = self._calculate_schema_diff(current_schema, target_schema)
+            
+            if not schema_diff.has_changes():
+                logger.info("嵌入向量缓存数据库结构已是最新，无需迁移")
+                return True
+            
+            # 4. 创建备份
+            backup_path = self._create_smart_backup()
+            logger.info(f"已创建备份: {backup_path}")
+            
+            # 5. 执行智能迁移
+            success = await self._execute_smart_migration(schema_diff)
+            
+            if success:
+                logger.info("嵌入向量缓存数据库迁移成功完成")
+                return True
+            else:
+                logger.error("嵌入向量缓存数据库迁移失败，正在回滚...")
+                self._rollback(backup_path)
+                return False
+                
+        except Exception as e:
+            logger.error(f"嵌入向量缓存数据库迁移失败: {e}", exc_info=True)
+            # 如果发生异常，也尝试回滚
+            if 'backup_path' in locals() and os.path.exists(backup_path):
+                self._rollback(backup_path)
+            return False
+
     def _analyze_current_schema(self) -> DatabaseSchema:
         """分析当前数据库结构"""
         schema = DatabaseSchema()
@@ -170,6 +216,16 @@ class SmartDatabaseMigration:
     
     def _generate_target_schema(self) -> DatabaseSchema:
         """生成目标数据库结构"""
+        schema = DatabaseSchema()
+        
+        # 判断是否为嵌入向量缓存数据库
+        if "_embeddings.db" in self.db_path:
+            return self._generate_embedding_cache_schema()
+        else:
+            return self._generate_main_memory_schema()
+    
+    def _generate_main_memory_schema(self) -> DatabaseSchema:
+        """生成主记忆数据库结构"""
         schema = DatabaseSchema()
         
         # 概念表
@@ -218,6 +274,52 @@ class SmartDatabaseMigration:
             FieldSchema(name="last_strengthened", type="REAL", not_null=True)
         ]
         schema.tables["connections"] = connections_table
+        
+        return schema
+    
+    def _generate_embedding_cache_schema(self) -> DatabaseSchema:
+        """生成嵌入向量缓存数据库结构"""
+        schema = DatabaseSchema()
+        
+        # 嵌入向量表 - 支持群聊隔离
+        memory_embeddings_table = TableSchema(name="memory_embeddings")
+        memory_embeddings_table.fields = [
+            FieldSchema(name="memory_id", type="TEXT", primary_key=True),
+            FieldSchema(name="content", type="TEXT", not_null=True),
+            FieldSchema(name="concept_id", type="TEXT", not_null=True),
+            FieldSchema(name="embedding", type="BLOB", not_null=True),
+            FieldSchema(name="vector_dimension", type="INTEGER", not_null=True),
+            FieldSchema(name="group_id", type="TEXT", default_value=""),
+            FieldSchema(name="created_at", type="REAL", not_null=True),
+            FieldSchema(name="last_updated", type="REAL", not_null=True),
+            FieldSchema(name="embedding_version", type="TEXT", default_value="v1.0"),
+            FieldSchema(name="metadata", type="TEXT", default_value="{}")
+        ]
+        # 添加群聊隔离索引
+        memory_embeddings_table.indexes = [
+            "idx_concept_embeddings",
+            "idx_group_embeddings",
+            "idx_concept_group_embeddings",
+            "idx_updated_embeddings"
+        ]
+        schema.tables["memory_embeddings"] = memory_embeddings_table
+        
+        # 预计算任务表
+        precompute_tasks_table = TableSchema(name="precompute_tasks")
+        precompute_tasks_table.fields = [
+            FieldSchema(name="task_id", type="TEXT", primary_key=True),
+            FieldSchema(name="memory_ids", type="TEXT", not_null=True),
+            FieldSchema(name="priority", type="INTEGER", default_value=1),
+            FieldSchema(name="created_at", type="REAL", not_null=True),
+            FieldSchema(name="status", type="TEXT", default_value="pending"),
+            FieldSchema(name="progress", type="INTEGER", default_value=0),
+            FieldSchema(name="error_message", type="TEXT", default_value=""),
+            FieldSchema(name="completed_at", type="REAL", default_value=0)
+        ]
+        precompute_tasks_table.indexes = [
+            "idx_task_status"
+        ]
+        schema.tables["precompute_tasks"] = precompute_tasks_table
         
         return schema
     
@@ -343,6 +445,16 @@ class SmartDatabaseMigration:
                         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_concept_group ON memories(concept_id, group_id)")
                     elif index_name == "idx_memories_created_group":
                         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_created_group ON memories(created_at, group_id)")
+                    elif index_name == "idx_concept_embeddings":
+                        cursor.execute("CREATE INDEX IF NOT EXISTS idx_concept_embeddings ON memory_embeddings(concept_id)")
+                    elif index_name == "idx_group_embeddings":
+                        cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_embeddings ON memory_embeddings(group_id)")
+                    elif index_name == "idx_concept_group_embeddings":
+                        cursor.execute("CREATE INDEX IF NOT EXISTS idx_concept_group_embeddings ON memory_embeddings(concept_id, group_id)")
+                    elif index_name == "idx_updated_embeddings":
+                        cursor.execute("CREATE INDEX IF NOT EXISTS idx_updated_embeddings ON memory_embeddings(last_updated)")
+                    elif index_name == "idx_task_status":
+                        cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_status ON precompute_tasks(status, priority)")
             
             conn.commit()
     
