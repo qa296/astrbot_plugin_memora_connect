@@ -183,7 +183,7 @@ class SmartDatabaseMigration:
         ]
         schema.tables["concepts"] = concepts_table
         
-        # 记忆表 - 增强版，包含更多详细信息
+        # 记忆表 - 增强版，包含更多详细信息和群聊隔离支持
         memories_table = TableSchema(name="memories")
         memories_table.fields = [
             FieldSchema(name="id", type="TEXT", primary_key=True),
@@ -194,10 +194,17 @@ class SmartDatabaseMigration:
             FieldSchema(name="location", type="TEXT", default_value=""),
             FieldSchema(name="emotion", type="TEXT", default_value=""),
             FieldSchema(name="tags", type="TEXT", default_value=""),
+            FieldSchema(name="group_id", type="TEXT", default_value=""),
             FieldSchema(name="created_at", type="REAL", not_null=True),
             FieldSchema(name="last_accessed", type="REAL", not_null=True),
             FieldSchema(name="access_count", type="INTEGER", default_value=0),
             FieldSchema(name="strength", type="REAL", default_value=1.0)
+        ]
+        # 添加群聊隔离索引
+        memories_table.indexes = [
+            "idx_memories_group_id",
+            "idx_memories_concept_group",
+            "idx_memories_created_group"
         ]
         schema.tables["memories"] = memories_table
         
@@ -327,6 +334,15 @@ class SmartDatabaseMigration:
                 
                 create_table_sql = f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(fields_sql)})"
                 cursor.execute(create_table_sql)
+                
+                # 创建索引
+                for index_name in table_schema.indexes:
+                    if index_name == "idx_memories_group_id":
+                        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_group_id ON memories(group_id)")
+                    elif index_name == "idx_memories_concept_group":
+                        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_concept_group ON memories(concept_id, group_id)")
+                    elif index_name == "idx_memories_created_group":
+                        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_created_group ON memories(created_at, group_id)")
             
             conn.commit()
     

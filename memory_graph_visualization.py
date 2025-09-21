@@ -2,13 +2,13 @@ import os
 import time
 import math
 import asyncio
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 # 背景渲染使用无头后端，避免服务器/无显示环境报错
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-jiru
+
 try:
     import networkx as nx
 except ImportError:
@@ -106,7 +106,7 @@ class MemoryGraphVisualizer:
             matplotlib.rcParams["axes.unicode_minus"] = False
             self.font_prop = FontProperties(family="sans-serif")
 
-    async def generate_graph_image(self, max_nodes: int = 120, max_edges: int = 400, edge_strength_threshold: float = 0.05, layout_style: str = "auto") -> str:
+    async def generate_graph_image(self, max_nodes: int = 120, max_edges: int = 400, edge_strength_threshold: float = 0.05, layout_style: str = "auto", group_id: Optional[str] = None) -> str:
         """
         异步生成记忆图谱 PNG, 返回图片绝对路径
         为避免阻塞事件循环, 将同步绘图放到线程池执行
@@ -120,10 +120,22 @@ class MemoryGraphVisualizer:
                 - spectral: 谱布局
                 - community: 社区布局
                 - hierarchical: 多层次布局
+            group_id: 群组ID，用于群聊隔离。如果为None，则自动获取当前会话ID
         """
         try:
+            # 如果没有提供group_id，尝试从记忆系统获取当前会话ID
+            actual_group_id = ""
+            if group_id is None:
+                # 尝试从记忆系统获取当前会话ID
+                if hasattr(self.ms, 'get_current_group_id'):
+                    actual_group_id = await self.ms.get_current_group_id()
+                elif hasattr(self.ms, 'current_group_id'):
+                    actual_group_id = self.ms.current_group_id
+            else:
+                actual_group_id = group_id
+            
             # 在主事件循环中获取所有需要的数据
-            graph_data = await self._prepare_graph_data(max_nodes, max_edges, edge_strength_threshold)
+            graph_data = await self._prepare_graph_data(max_nodes, max_edges, edge_strength_threshold, actual_group_id)
             
             # 将数据传递给同步绘图函数，在线程池中只执行纯绘图操作
             return await asyncio.to_thread(
@@ -135,19 +147,55 @@ class MemoryGraphVisualizer:
             logger.error(f"生成记忆图谱失败: {e}", exc_info=True)
             return ""
 
-    async def _prepare_graph_data(self, max_nodes: int, max_edges: int, edge_strength_threshold: float) -> Dict[str, Any]:
+    async def _prepare_graph_data(self, max_nodes: int, max_edges: int, edge_strength_threshold: float, group_id: str = "") -> Dict[str, Any]:
         """
         在主事件循环中准备所有需要的数据，避免在线程池中访问异步资源
+        支持群聊隔离：根据group_id过滤记忆、概念和连接
         """
         graph = getattr(self.ms, "memory_graph", None)
         if not graph or not graph.concepts:
             return {"error": "记忆图谱为空, 无法生成图谱"}
 
+        # 获取所有概念、记忆和连接
+        concepts = list(graph.concepts.values())
+        memories = list(graph.memories.values())
+        connections = list(graph.connections)
+
+        # 如果启用了群聊隔离且有group_id，过滤数据
+        if group_id and self.ms.memory_config.get("enable_group_isolation", True):
+            # 过滤记忆：只包含指定群聊的记忆
+            filtered_memory_ids = set()
+            for memory in memories:
+                # 检查记忆是否有group_id字段
+                if hasattr(memory, 'group_id') and memory.group_id == group_id:
+                    filtered_memory_ids.add(memory.id)
+            
+            # 根据过滤后的记忆获取相关的概念
+            filtered_concept_ids = set()
+            for memory_id in filtered_memory_ids:
+                memory = graph.memories.get(memory_id)
+                if memory:
+                    filtered_concept_ids.add(memory.concept_id)
+            
+            # 过滤概念
+            concepts = [c for c in concepts if c.id in filtered_concept_ids]
+            
+            # 过滤连接：只包含过滤后概念之间的连接
+            connections = [
+                conn for conn in connections
+                if conn.from_concept in filtered_concept_ids and conn.to_concept in filtered_concept_ids
+            ]
+            
+            # 更新记忆列表
+            memories = [m for m in memories if m.id in filtered_memory_ids]
+
         # 1) 统计每个概念的记忆数量与强度
         concept_stats: Dict[str, Dict[str, float]] = {}
         for cid in graph.concepts.keys():
             concept_stats[cid] = {"count": 0, "sum_strength": 0.0, "max_strength": 0.0}
-        for m in graph.memories.values():
+        
+        # 只统计过滤后的记忆
+        for m in memories:
             stat = concept_stats.get(m.concept_id)
             if stat is None:
                 continue
@@ -161,7 +209,7 @@ class MemoryGraphVisualizer:
 
         # 2) 节点选择(如概念过多, 选取 Top-N)
         ranked_concepts = sorted(
-            graph.concepts.values(),
+            concepts,  # 使用过滤后的概念
             key=lambda c: (concept_stats.get(c.id, {}).get("count", 0), concept_stats.get(c.id, {}).get("avg_strength", 0.0)),
             reverse=True
         )
@@ -170,7 +218,7 @@ class MemoryGraphVisualizer:
 
         # 3) 过滤边(只保留强度足够且两端都被选中的)
         filtered_edges: List[Any] = []
-        for conn in graph.connections:
+        for conn in connections:  # 使用过滤后的连接
             if conn.strength is None:
                 continue
             if conn.strength < edge_strength_threshold:

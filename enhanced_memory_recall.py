@@ -38,10 +38,11 @@ class EnhancedMemoryRecall:
         }
         
     async def recall_all_relevant_memories(
-        self, 
-        query: str, 
+        self,
+        query: str,
         max_memories: int = 10,
-        include_context: bool = True
+        include_context: bool = True,
+        group_id: str = ""
     ) -> List[MemoryRecallResult]:
         """
         召回所有相关记忆，使用多维度召回策略
@@ -50,6 +51,7 @@ class EnhancedMemoryRecall:
             query: 查询内容
             max_memories: 最大返回记忆数量
             include_context: 是否包含上下文信息
+            group_id: 群组ID，用于群聊隔离
             
         Returns:
             按相关性排序的记忆列表
@@ -62,11 +64,11 @@ class EnhancedMemoryRecall:
             
             # 并发执行全部五种切记策略
             tasks = [
-                self._semantic_recall(query),
-                self._keyword_recall(query),
-                self._associative_recall(query),
-                self._temporal_recall(query),
-                self._strength_based_recall(query)
+                self._semantic_recall(query, group_id),
+                self._keyword_recall(query, group_id),
+                self._associative_recall(query, group_id),
+                self._temporal_recall(query, group_id),
+                self._strength_based_recall(query, group_id)
             ]
             results = await asyncio.gather(*tasks)
             for res in results:
@@ -85,7 +87,7 @@ class EnhancedMemoryRecall:
             logger.error(f"增强记忆召回失败: {e}")
             return []
     
-    async def _semantic_recall(self, query: str) -> List[MemoryRecallResult]:
+    async def _semantic_recall(self, query: str, group_id: str = "") -> List[MemoryRecallResult]:
         """基于语义相似度的召回 - 使用并填充缓存"""
         try:
             if not query or not self.memory_system.embedding_cache:
@@ -98,8 +100,17 @@ class EnhancedMemoryRecall:
                 return []
             
             results = []
-            memories_snapshot = list(self.memory_system.memory_graph.memories.values())
-            
+            # 过滤群聊记忆
+            memories_snapshot = []
+            for memory in self.memory_system.memory_graph.memories.values():
+                # 如果启用了群聊隔离，检查群聊ID
+                if group_id and hasattr(memory, 'group_id'):
+                    if memory.group_id == group_id:
+                        memories_snapshot.append(memory)
+                elif not group_id:  # 如果没有群聊ID，只获取默认记忆
+                    if not hasattr(memory, 'group_id') or not memory.group_id:
+                        memories_snapshot.append(memory)
+
             logger.debug(f"开始语义召回，查询: {query}, 记忆总数: {len(memories_snapshot)}")
             
             # 2. 批量获取所有记忆的嵌入向量（智能利用缓存）
@@ -107,7 +118,7 @@ class EnhancedMemoryRecall:
             tasks = []
             for memory in memories_snapshot:
                 # get_embedding 会自动处理缓存：命中则返回，未命中则计算、缓存后返回
-                task = asyncio.create_task(self.memory_system.embedding_cache.get_embedding(memory.id, memory.content))
+                task = asyncio.create_task(self.memory_system.embedding_cache.get_embedding(memory.id, memory.content, group_id))
                 tasks.append((memory.id, task))
 
             # 并发执行所有获取任务
@@ -137,7 +148,8 @@ class EnhancedMemoryRecall:
                                     'memory_strength': memory.strength,
                                     'last_accessed': memory.last_accessed,
                                     'source': 'cached_semantic',
-                                    'similarity': similarity
+                                    'similarity': similarity,
+                                    'group_id': group_id
                                 }
                             ))
             
@@ -148,7 +160,7 @@ class EnhancedMemoryRecall:
             logger.error(f"语义召回失败: {e}")
             return []
     
-    async def _temporal_recall(self, query: str) -> List[MemoryRecallResult]:
+    async def _temporal_recall(self, query: str, group_id: str = "") -> List[MemoryRecallResult]:
         """基于时间关联的召回"""
         try:
             current_time = time.time()
@@ -157,6 +169,14 @@ class EnhancedMemoryRecall:
             results = []
             
             for memory in self.memory_system.memory_graph.memories.values():
+                # 群聊隔离检查
+                if group_id and hasattr(memory, 'group_id'):
+                    if memory.group_id != group_id:
+                        continue
+                elif not group_id:
+                    if hasattr(memory, 'group_id') and memory.group_id:
+                        continue
+                
                 time_diff = current_time - memory.last_accessed
                 
                 # 时间衰减因子
@@ -174,7 +194,8 @@ class EnhancedMemoryRecall:
                             metadata={
                                 'hours_ago': time_diff / 3600,
                                 'concept_name': concept.name,
-                                'memory_strength': memory.strength
+                                'memory_strength': memory.strength,
+                                'group_id': group_id
                             }
                         ))
             
@@ -184,17 +205,28 @@ class EnhancedMemoryRecall:
             logger.error(f"时间关联召回失败: {e}")
             return []
     
-    async def _strength_based_recall(self, query: str) -> List[MemoryRecallResult]:
+    async def _strength_based_recall(self, query: str, group_id: str = "") -> List[MemoryRecallResult]:
         """基于记忆强度的召回"""
         try:
             # 获取所有记忆，按强度排序
             all_memories = list(self.memory_system.memory_graph.memories.values())
-            all_memories.sort(key=lambda m: m.strength, reverse=True)
+            
+            # 群聊隔离过滤
+            filtered_memories = []
+            for memory in all_memories:
+                if group_id and hasattr(memory, 'group_id'):
+                    if memory.group_id == group_id:
+                        filtered_memories.append(memory)
+                elif not group_id:
+                    if not hasattr(memory, 'group_id') or not memory.group_id:
+                        filtered_memories.append(memory)
+            
+            filtered_memories.sort(key=lambda m: m.strength, reverse=True)
             
             results = []
             
             # 取前20%的高强度记忆
-            top_memories = all_memories[:max(5, len(all_memories) // 5)]
+            top_memories = filtered_memories[:max(5, len(filtered_memories) // 5)]
             
             for memory in top_memories:
                 concept = self.memory_system.memory_graph.concepts.get(memory.concept_id)
@@ -208,7 +240,8 @@ class EnhancedMemoryRecall:
                         metadata={
                             'concept_name': concept.name,
                             'memory_strength': memory.strength,
-                            'access_count': memory.access_count
+                            'access_count': memory.access_count,
+                            'group_id': group_id
                         }
                     ))
             
@@ -364,7 +397,7 @@ class EnhancedMemoryRecall:
             logger.error(f"格式化记忆上下文失败: {e}")
             return ""
     
-    async def _keyword_recall(self, query: str) -> List[MemoryRecallResult]:
+    async def _keyword_recall(self, query: str, group_id: str = "") -> List[MemoryRecallResult]:
         """基于关键词的召回"""
         try:
             if not query:
@@ -378,6 +411,14 @@ class EnhancedMemoryRecall:
             query_lower = query.lower()
             
             for memory in self.memory_system.memory_graph.memories.values():
+                # 群聊隔离过滤
+                if group_id and hasattr(memory, 'group_id'):
+                    if memory.group_id != group_id:
+                        continue
+                elif not group_id:
+                    if hasattr(memory, 'group_id') and memory.group_id:
+                        continue
+                
                 memory_lower = memory.content.lower()
                 concept = self.memory_system.memory_graph.concepts.get(memory.concept_id)
                 
@@ -400,7 +441,8 @@ class EnhancedMemoryRecall:
                         metadata={
                             'matched_keywords': matched_keywords,
                             'concept_name': concept.name if concept else '',
-                            'memory_strength': memory.strength
+                            'memory_strength': memory.strength,
+                            'group_id': group_id
                         }
                     ))
             
@@ -410,7 +452,7 @@ class EnhancedMemoryRecall:
             logger.error(f"关键词召回失败: {e}")
             return []
     
-    async def _associative_recall(self, query: str) -> List[MemoryRecallResult]:
+    async def _associative_recall(self, query: str, group_id: str = "") -> List[MemoryRecallResult]:
         """基于联想记忆的召回"""
         try:
             if not query:
@@ -442,10 +484,20 @@ class EnhancedMemoryRecall:
                             if m.concept_id == neighbor_id
                         ]
                         
-                        # 按强度排序，取前2条
-                        neighbor_memories.sort(key=lambda m: m.strength, reverse=True)
+                        # 群聊隔离过滤
+                        filtered_memories = []
+                        for memory in neighbor_memories:
+                            if group_id and hasattr(memory, 'group_id'):
+                                if memory.group_id == group_id:
+                                    filtered_memories.append(memory)
+                            elif not group_id:
+                                if not hasattr(memory, 'group_id') or not memory.group_id:
+                                    filtered_memories.append(memory)
                         
-                        for memory in neighbor_memories[:2]:
+                        # 按强度排序，取前2条
+                        filtered_memories.sort(key=lambda m: m.strength, reverse=True)
+                        
+                        for memory in filtered_memories[:2]:
                             concept = self.memory_system.memory_graph.concepts.get(neighbor_id)
                             if concept:
                                 relevance = strength * self.recall_strategies['associative']
@@ -457,17 +509,18 @@ class EnhancedMemoryRecall:
                                     metadata={
                                         'original_concept': concept_id,
                                         'connection_strength': strength,
-                                        'concept_name': concept.name
+                                        'concept_name': concept.name,
+                                        'group_id': group_id
                                     }
                                 ))
-                 
+                  
             return results
             
         except Exception as e:
             logger.error(f"联想记忆召回失败: {e}")
             return []
 
-    async def recall_relevant_memories_for_injection(self, message: str) -> List[MemoryRecallResult]:
+    async def recall_relevant_memories_for_injection(self, message: str, group_id: str = "") -> List[MemoryRecallResult]:
         """为自动注入召回相关记忆"""
         try:
             if not self.memory_system.memory_graph.memories:
@@ -477,21 +530,21 @@ class EnhancedMemoryRecall:
             all_results = []
             
             # 基础召回策略（所有模式都包含）
-            keyword_results = await self._keyword_recall(message)
+            keyword_results = await self._keyword_recall(message, group_id)
             all_results.extend(keyword_results)
             
-            associative_results = await self._associative_recall(message)
+            associative_results = await self._associative_recall(message, group_id)
             all_results.extend(associative_results)
             
-            temporal_results = await self._temporal_recall(message)
+            temporal_results = await self._temporal_recall(message, group_id)
             all_results.extend(temporal_results)
             
-            strength_results = await self._strength_based_recall(message)
+            strength_results = await self._strength_based_recall(message, group_id)
             all_results.extend(strength_results)
             
             # 仅在嵌入模式下添加语义召回
             if recall_mode == "embedding":
-                semantic_results = await self._semantic_recall(message)
+                semantic_results = await self._semantic_recall(message, group_id)
                 all_results.extend(semantic_results)
             
             # 去重和排序

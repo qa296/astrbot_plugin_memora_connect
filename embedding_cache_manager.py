@@ -96,7 +96,7 @@ class EmbeddingCacheManager:
             conn = resource_manager.get_db_connection(self.cache_db_path)
             cursor = conn.cursor()
             
-            # 创建嵌入向量表
+            # 创建嵌入向量表（支持群聊隔离）
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS memory_embeddings (
                     memory_id TEXT PRIMARY KEY,
@@ -104,6 +104,7 @@ class EmbeddingCacheManager:
                     concept_id TEXT NOT NULL,
                     embedding BLOB NOT NULL,
                     vector_dimension INTEGER NOT NULL,
+                    group_id TEXT DEFAULT '',
                     created_at REAL NOT NULL,
                     last_updated REAL NOT NULL,
                     embedding_version TEXT DEFAULT 'v1.0',
@@ -125,8 +126,10 @@ class EmbeddingCacheManager:
                 )
             ''')
             
-            # 创建索引
+            # 创建索引（支持群聊隔离）
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_concept_embeddings ON memory_embeddings(concept_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_group_embeddings ON memory_embeddings(group_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_concept_group_embeddings ON memory_embeddings(concept_id, group_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_updated_embeddings ON memory_embeddings(last_updated)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_task_status ON precompute_tasks(status, priority)')
             
@@ -163,11 +166,11 @@ class EmbeddingCacheManager:
         except Exception as e:
             logger.error(f"加载预计算统计信息失败: {e}")
             
-    async def get_embedding(self, memory_id: str, content: str) -> Optional[List[float]]:
-        """获取记忆的嵌入向量，优先从缓存读取"""
+    async def get_embedding(self, memory_id: str, content: str, group_id: str = "") -> Optional[List[float]]:
+        """获取记忆的嵌入向量，优先从缓存读取（支持群聊隔离）"""
         try:
-            # 首先尝试从缓存获取
-            cached_embedding = await self._get_cached_embedding(memory_id)
+            # 首先尝试从缓存获取（传递群聊ID）
+            cached_embedding = await self._get_cached_embedding(memory_id, group_id)
             if cached_embedding:
                 self.precompute_stats["cache_hits"] += 1
                 return cached_embedding
@@ -177,8 +180,8 @@ class EmbeddingCacheManager:
             embedding = await self._compute_embedding_realtime(content)
             
             if embedding:
-                # 异步缓存计算结果
-                asyncio.create_task(self._cache_embedding(memory_id, content, embedding))
+                # 异步缓存计算结果（包含群聊ID）
+                asyncio.create_task(self._cache_embedding(memory_id, content, embedding, group_id))
                 
             return embedding
                 
@@ -186,18 +189,26 @@ class EmbeddingCacheManager:
             logger.error(f"获取嵌入向量失败: {e}")
             return None
             
-    async def _get_cached_embedding(self, memory_id: str) -> Optional[List[float]]:
-        """从缓存中获取嵌入向量"""
+    async def _get_cached_embedding(self, memory_id: str, group_id: str = "") -> Optional[List[float]]:
+        """从缓存中获取嵌入向量（支持群聊隔离）"""
         try:
             # 使用连接池获取数据库连接
             conn = resource_manager.get_db_connection(self.cache_db_path)
             cursor = conn.cursor()
             
-            cursor.execute('''
-                SELECT embedding, vector_dimension, metadata
-                FROM memory_embeddings
-                WHERE memory_id = ?
-            ''', (memory_id,))
+            # 构建查询条件（支持群聊隔离）
+            if group_id:
+                cursor.execute('''
+                    SELECT embedding, vector_dimension, metadata
+                    FROM memory_embeddings
+                    WHERE memory_id = ? AND group_id = ?
+                ''', (memory_id, group_id))
+            else:
+                cursor.execute('''
+                    SELECT embedding, vector_dimension, metadata
+                    FROM memory_embeddings
+                    WHERE memory_id = ?
+                ''', (memory_id,))
             
             row = cursor.fetchone()
             if row:
@@ -234,8 +245,8 @@ class EmbeddingCacheManager:
             
         return None
         
-    async def _cache_embedding(self, memory_id: str, content: str, embedding: List[float]):
-        """缓存嵌入向量"""
+    async def _cache_embedding(self, memory_id: str, content: str, embedding: List[float], group_id: str = ""):
+        """缓存嵌入向量（支持群聊隔离）"""
         try:
             if not embedding:
                 return
@@ -249,14 +260,15 @@ class EmbeddingCacheManager:
             
             cursor.execute('''
                 INSERT OR REPLACE INTO memory_embeddings
-                (memory_id, content, concept_id, embedding, vector_dimension, created_at, last_updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (memory_id, content, concept_id, embedding, vector_dimension, group_id, created_at, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 memory_id,
                 content,
                 "",  # concept_id 将在后续更新
                 embedding_blob,
                 len(embedding),
+                group_id,
                 current_time,
                 current_time
             ))
@@ -347,18 +359,18 @@ class EmbeddingCacheManager:
             logger.error(f"反序列化嵌入向量失败: {e}")
             return None
             
-    async def schedule_precompute_task(self, memory_ids: List[str], priority: int = 1):
-        """调度预计算任务"""
+    async def schedule_precompute_task(self, memory_ids: List[str], priority: int = 1, group_id: str = ""):
+        """调度预计算任务（支持群聊隔离）"""
         try:
             if not memory_ids:
                 return
                 
             task_id = f"precompute_{int(time.time() * 1000)}_{len(memory_ids)}"
             
-            # 过滤已经缓存的记忆
+            # 过滤已经缓存的记忆（传递群聊ID）
             uncached_memory_ids: List[str] = []
             for memory_id in memory_ids:
-                if not await self._get_cached_embedding(memory_id):
+                if not await self._get_cached_embedding(memory_id, group_id):
                     uncached_memory_ids.append(memory_id)
                     
             if not uncached_memory_ids:
@@ -368,7 +380,7 @@ class EmbeddingCacheManager:
             if self.precompute_queue.full():
                 await self._cleanup_low_priority_tasks()
             
-            # 创建任务
+            # 创建任务（存储群聊ID）
             task = PrecomputeTask(
                 task_id=task_id,
                 memory_ids=uncached_memory_ids,
@@ -376,6 +388,8 @@ class EmbeddingCacheManager:
                 created_at=time.time(),
                 status="pending"
             )
+            # 将群聊ID存储在任务的error_message字段中（临时方案）
+            task.error_message = f"group_id:{group_id}"
             
             # 保存任务到数据库
             await self._save_precompute_task(task)
@@ -541,8 +555,13 @@ class EmbeddingCacheManager:
                 # 批量计算嵌入向量
                 batch_results = await self._batch_compute_embeddings(memories_data)
                 
-                # 批量缓存结果
-                await self._batch_cache_embeddings(batch_results)
+                # 批量缓存结果（传递群聊ID）
+                # 从任务中提取群聊ID
+                group_id = ""
+                if task.error_message and task.error_message.startswith("group_id:"):
+                    group_id = task.error_message.replace("group_id:", "")
+                
+                await self._batch_cache_embeddings(batch_results, group_id)
                 
                 completed_count += len(batch_memory_ids)
                 task.progress = int((completed_count / total_count) * 100)
@@ -598,8 +617,8 @@ class EmbeddingCacheManager:
                 
         return results
         
-    async def _batch_cache_embeddings(self, batch_results: List[Dict[str, Any]]):
-        """批量缓存嵌入向量"""
+    async def _batch_cache_embeddings(self, batch_results: List[Dict[str, Any]], group_id: str = ""):
+        """批量缓存嵌入向量（支持群聊隔离）"""
         try:
             # 使用连接池获取数据库连接
             conn = resource_manager.get_db_connection(self.cache_db_path)
@@ -612,14 +631,15 @@ class EmbeddingCacheManager:
                 
                 cursor.execute('''
                     INSERT OR REPLACE INTO memory_embeddings
-                    (memory_id, content, concept_id, embedding, vector_dimension, created_at, last_updated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (memory_id, content, concept_id, embedding, vector_dimension, group_id, created_at, last_updated)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     result["memory_id"],
                     result["content"],
                     result["concept_id"],
                     embedding_blob,
                     len(result["embedding"]),
+                    group_id,
                     current_time,
                     current_time
                 ))
@@ -632,8 +652,8 @@ class EmbeddingCacheManager:
         except Exception as e:
             logger.error(f"批量缓存嵌入向量失败: {e}")
             
-    async def batch_retrieve_embeddings(self, memory_ids: List[str]) -> Dict[str, List[float]]:
-        """批量检索嵌入向量"""
+    async def batch_retrieve_embeddings(self, memory_ids: List[str], group_id: str = "") -> Dict[str, List[float]]:
+        """批量检索嵌入向量（支持群聊隔离）"""
         embeddings: Dict[str, List[float]] = {}
         
         try:
@@ -641,13 +661,20 @@ class EmbeddingCacheManager:
             conn = resource_manager.get_db_connection(self.cache_db_path)
             cursor = conn.cursor()
             
-            # 构建查询条件
+            # 构建查询条件（支持群聊隔离）
             placeholders = ",".join(["?" for _ in memory_ids])
-            cursor.execute(f'''
-                SELECT memory_id, embedding, vector_dimension
-                FROM memory_embeddings
-                WHERE memory_id IN ({placeholders})
-            ''', memory_ids)
+            if group_id:
+                cursor.execute(f'''
+                    SELECT memory_id, embedding, vector_dimension
+                    FROM memory_embeddings
+                    WHERE memory_id IN ({placeholders}) AND group_id = ?
+                ''', memory_ids + [group_id])
+            else:
+                cursor.execute(f'''
+                    SELECT memory_id, embedding, vector_dimension
+                    FROM memory_embeddings
+                    WHERE memory_id IN ({placeholders})
+                ''', memory_ids)
             
             for row in cursor.fetchall():
                 memory_id, embedding_blob, vector_dim = row
@@ -664,8 +691,8 @@ class EmbeddingCacheManager:
         return embeddings
         
     async def semantic_search(self, query_embedding: List[float], limit: int = 10,
-                           concept_filter: Optional[str] = None) -> List[Tuple[str, float]]:
-        """基于嵌入向量的语义搜索"""
+                           concept_filter: Optional[str] = None, group_id: str = "") -> List[Tuple[str, float]]:
+        """基于嵌入向量的语义搜索（支持群聊隔离）"""
         try:
             if not query_embedding:
                 return []
@@ -674,13 +701,25 @@ class EmbeddingCacheManager:
             conn = resource_manager.get_db_connection(self.cache_db_path)
             cursor = conn.cursor()
             
-            # 构建查询条件
-            if concept_filter:
+            # 构建查询条件（支持群聊隔离）
+            if concept_filter and group_id:
+                cursor.execute('''
+                    SELECT memory_id, embedding, vector_dimension
+                    FROM memory_embeddings
+                    WHERE concept_id = ? AND group_id = ?
+                ''', (concept_filter, group_id))
+            elif concept_filter:
                 cursor.execute('''
                     SELECT memory_id, embedding, vector_dimension
                     FROM memory_embeddings
                     WHERE concept_id = ?
                 ''', (concept_filter,))
+            elif group_id:
+                cursor.execute('''
+                    SELECT memory_id, embedding, vector_dimension
+                    FROM memory_embeddings
+                    WHERE group_id = ?
+                ''', (group_id,))
             else:
                 cursor.execute('''
                     SELECT memory_id, embedding, vector_dimension
@@ -852,11 +891,11 @@ class EmbeddingCacheManager:
         except Exception as e:
             logger.error(f"清理嵌入向量缓存管理器时发生错误: {e}", exc_info=True)
     
-    def get_queue_status(self) -> Dict[str, int]:
+    def get_queue_status(self) -> Dict[str, Union[int, bool]]:
         """获取队列状态信息"""
         return {
             "queue_size": self.precompute_queue.qsize(),
             "max_queue_size": self.max_queue_size,
             "is_precomputing": self.is_precomputing,
-            "pending_precompute": self.precompute_stats.get("pending_precompute", 0)
+            "pending_precompute": int(self.precompute_stats.get("pending_precompute", 0))
         }

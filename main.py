@@ -516,6 +516,9 @@ class MemoraConnectPlugin(Star):
             base_strength = 1.0
             adjusted_strength = base_strength * confidence_float
             
+            # 获取群组ID
+            group_id = self.memory_system._extract_group_id_from_event(event)
+            
             # 创建丰富记忆
             memory_id = self.memory_system.memory_graph.add_memory(
                 content=content,
@@ -1059,8 +1062,11 @@ class MemorySystem:
                     access_count=concept_data[4]
                 )
                 
-            # 加载记忆
-            cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories")
+            # 加载记忆 - 支持群聊隔离
+            if group_id:
+                cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories WHERE group_id = ?", (group_id,))
+            else:
+                cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories WHERE group_id = '' OR group_id IS NULL")
             memories = cursor.fetchall()
             for memory_data in memories:
                 self.memory_graph.add_memory(
@@ -1131,11 +1137,11 @@ class MemorySystem:
                     cursor.execute('''
                         INSERT OR REPLACE INTO memories
                         (id, concept_id, content, details, participants,
-                        location, emotion, tags, created_at, last_accessed, access_count, strength)
+                        location, emotion, tags, created_at, last_accessed, access_count, strength, group_id)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (memory.id, memory.concept_id, memory.content, memory.details,
                          memory.participants, memory.location, memory.emotion, memory.tags,
-                         memory.created_at, memory.last_accessed, memory.access_count, memory.strength))
+                         memory.created_at, memory.last_accessed, memory.access_count, memory.strength, group_id))
                 
                 # 增量更新连接
                 existing_connections = set()
@@ -1220,10 +1226,23 @@ class MemorySystem:
                         last_accessed REAL,
                         access_count INTEGER DEFAULT 0,
                         strength REAL DEFAULT 1.0,
+                        group_id TEXT DEFAULT "",
                         FOREIGN KEY (concept_id) REFERENCES concepts (id)
                     )
                 ''')
                 self._debug_log(f"创建表: memories", "debug")
+                
+                # 创建群聊隔离相关的索引
+                cursor.execute('''
+                    CREATE INDEX idx_memories_group_id ON memories(group_id)
+                ''')
+                cursor.execute('''
+                    CREATE INDEX idx_memories_concept_group ON memories(concept_id, group_id)
+                ''')
+                cursor.execute('''
+                    CREATE INDEX idx_memories_created_group ON memories(created_at, group_id)
+                ''')
+                self._debug_log(f"创建群聊隔离索引", "debug")
             
             if 'connections' not in existing_tables:
                 cursor.execute('''
@@ -2432,7 +2451,8 @@ class MemorySystem:
             enhanced_recall = EnhancedMemoryRecall(self)
             results = await enhanced_recall.recall_all_relevant_memories(
                 query=current_message,
-                max_memories=self.memory_config.get("max_injected_memories", 5)
+                max_memories=self.memory_config.get("max_injected_memories", 5),
+                group_id=group_id  # 传递群聊ID实现群聊隔离
             )
             
             # 过滤低相关性的记忆
@@ -3575,6 +3595,7 @@ class Memory:
     last_accessed: float = None
     access_count: int = 0
     strength: float = 1.0
+    group_id: str = ""  # 群组ID，用于群聊隔离
     
     def __post_init__(self):
         if self.created_at is None:
