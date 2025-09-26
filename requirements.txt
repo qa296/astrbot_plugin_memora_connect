@@ -6,3 +6,6 @@ Pillow>=10.0.0
 networkx>=2.6.0
 matplotlib>=3.5.0
 python-louvain
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-mock>=3.10.0

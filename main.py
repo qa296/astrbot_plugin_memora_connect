@@ -345,7 +345,8 @@ class MemoraConnectPlugin(Star):
                 participants=participants,
                 location=location,
                 emotion=emotion,
-                tags=tags
+                tags=tags,
+                group_id=group_id
             )
             
             # 异步保存
@@ -773,6 +774,59 @@ class MemoryConfigManager:
 class MemorySystem:
     """核心记忆系统，模仿人类海马体功能"""
     
+    @staticmethod
+    def filter_memories_by_group(memories: List['Memory'], group_id: str = "") -> List['Memory']:
+        """
+        统一的群聊隔离过滤函数
+        
+        Args:
+            memories: 记忆列表
+            group_id: 群组ID，如果为空字符串则获取默认记忆
+            
+        Returns:
+            过滤后的记忆列表
+        """
+        if not group_id:
+            # 私聊场景：只获取没有group_id的记忆
+            return [m for m in memories if not hasattr(m, 'group_id') or not m.group_id]
+        else:
+            # 群聊场景：只获取匹配group_id的记忆
+            return [m for m in memories if hasattr(m, 'group_id') and m.group_id == group_id]
+    
+    @staticmethod
+    def filter_concepts_by_group(concepts: Dict[str, 'Concept'], memories: Dict[str, 'Memory'], group_id: str = "") -> Dict[str, 'Concept']:
+        """
+        根据群聊隔离过滤概念
+        
+        Args:
+            concepts: 概念字典
+            memories: 记忆字典（用于判断概念是否属于指定群组）
+            group_id: 群组ID
+            
+        Returns:
+            过滤后的概念字典
+        """
+        filtered_concepts = {}
+        
+        for concept_id, concept in concepts.items():
+            # 检查该概念下是否有属于指定群组的记忆
+            concept_has_group_memory = False
+            for memory in memories.values():
+                if memory.concept_id == concept_id:
+                    if not group_id and (not hasattr(memory, 'group_id') or not memory.group_id):
+                        # 私聊场景：概念有无group_id的记忆
+                        concept_has_group_memory = True
+                        break
+                    elif group_id and hasattr(memory, 'group_id') and memory.group_id == group_id:
+                        # 群聊场景：概念有匹配group_id的记忆
+                        concept_has_group_memory = True
+                        break
+            
+            if concept_has_group_memory:
+                filtered_concepts[concept_id] = concept
+        
+        return filtered_concepts
+    
     def __init__(self, context: Context, config=None, data_dir=None):
         self.context = context
         
@@ -878,18 +932,9 @@ class MemorySystem:
         self._debug_log("已清理所有托管任务", "debug")
         
     def _get_group_db_path(self, group_id: str) -> str:
-        """获取群聊专用的数据库路径"""
-        if not self.memory_config.get("enable_group_isolation", True) or not group_id:
-            return self.db_path
-        
-        # 为每个群创建独立的数据库文件
-        db_dir = os.path.dirname(self.db_path)
-        group_db_path = os.path.join(db_dir, f"memory_group_{group_id}.db")
-        
-        # 确保目录存在
-        os.makedirs(os.path.dirname(group_db_path), exist_ok=True)
-        
-        return group_db_path
+        """获取群聊专用的数据库路径 - 统一使用主数据库，通过逻辑隔离实现群聊分离"""
+        # 统一使用主数据库，通过 group_id 字段实现逻辑隔离
+        return self.db_path
     
     def _extract_group_id_from_event(self, event: AstrMessageEvent) -> str:
         """从事件中提取群聊ID"""
@@ -1006,10 +1051,33 @@ class MemorySystem:
         # 执行数据库迁移
         try:
             migration = SmartDatabaseMigration(self.db_path, self.context)
+            
+            # 1. 先执行主数据库迁移
             migration_success = await migration.run_smart_migration()
             
             if migration_success:
-                self._debug_log("数据库迁移成功", "info")
+                self._debug_log("主数据库迁移成功", "info")
+            else:
+                self._debug_log("主数据库迁移失败，记忆系统可能无法正常工作", "error")
+                
+        except Exception as e:
+            self._debug_log(f"主数据库迁移过程异常: {e}", "error")
+            migration_success = False
+        
+        # 2. 执行嵌入向量缓存数据库迁移
+        embedding_migration_success = False
+        try:
+            embedding_migration_success = await migration.run_embedding_cache_migration()
+            if embedding_migration_success:
+                self._debug_log("嵌入向量缓存数据库迁移成功", "info")
+            else:
+                self._debug_log("嵌入向量缓存数据库迁移失败", "warning")
+        except Exception as embedding_e:
+            self._debug_log(f"嵌入向量缓存数据库迁移异常: {embedding_e}", "warning")
+        
+        # 3. 只有在两个迁移都成功的情况下，才继续初始化
+        if migration_success and embedding_migration_success:
+            try:
                 # 加载默认数据库（用于私有对话）
                 self.load_memory_state()
                 asyncio.create_task(self.memory_maintenance_loop())
@@ -1024,21 +1092,10 @@ class MemorySystem:
                     logger.info(f"已调度 {len(self.memory_graph.memories)} 条记忆的预计算任务")
                 
                 self._debug_log("记忆系统初始化完成", "info")
-            else:
-                self._debug_log("数据库迁移失败，记忆系统可能无法正常工作", "error")
-                
-        except Exception as e:
-            self._debug_log(f"数据库迁移过程异常: {e}", "error")
-        
-        # 执行嵌入向量缓存数据库迁移
-        try:
-            embedding_migration_success = await migration.run_embedding_cache_migration()
-            if embedding_migration_success:
-                self._debug_log("嵌入向量缓存数据库迁移成功", "info")
-            else:
-                self._debug_log("嵌入向量缓存数据库迁移失败", "warning")
-        except Exception as embedding_e:
-            self._debug_log(f"嵌入向量缓存数据库迁移异常: {embedding_e}", "warning")
+            except Exception as init_e:
+                self._debug_log(f"记忆系统初始化失败: {init_e}", "error")
+        else:
+            self._debug_log("由于数据库迁移失败，跳过记忆系统初始化", "warning")
         
     def load_memory_state(self, group_id: str = ""):
         """从数据库加载记忆状态"""
@@ -1091,7 +1148,8 @@ class MemorySystem:
                     created_at=memory_data[8],
                     last_accessed=memory_data[9],
                     access_count=memory_data[10],
-                    strength=memory_data[11]
+                    strength=memory_data[11],
+                    group_id=group_id
                 )
                 
             # 加载连接
@@ -1277,7 +1335,7 @@ class MemorySystem:
             self._debug_log(f"确保数据库结构异常: {e}", "error")
             raise
     
-    async def process_message(self, event: AstrMessageEvent):
+    async def process_message(self, event: AstrMessageEvent, group_id: str = ""):
         """处理消息，形成记忆（旧方法，保留兼容性）"""
         try:
             # 获取对话历史
@@ -1293,7 +1351,7 @@ class MemorySystem:
                 memory_content = await self.form_memory(theme, history, event)
                 if memory_content:
                     concept_id = self.memory_graph.add_concept(theme)
-                    memory_id = self.memory_graph.add_memory(memory_content, concept_id)
+                    memory_id = self.memory_graph.add_memory(memory_content, concept_id, group_id=group_id)
                     
                     # 建立连接
                     self.establish_connections(concept_id, themes)
@@ -2760,7 +2818,7 @@ class MemorySystem:
             score = max(float(self.impression_config["min_score"]),
                        min(float(self.impression_config["max_score"]), score))
             
-            # 创建印象记忆
+            # 创建印象记忆 - 确保设置正确的group_id
             memory_id = self.memory_graph.add_memory(
                 content=summary,
                 concept_id=concept_id,
@@ -2768,10 +2826,11 @@ class MemorySystem:
                 participants=person_name,
                 emotion="印象",
                 tags="人际",
-                strength=score
+                strength=score,
+                group_id=group_id
             )
             
-            self._debug_log(f"记录印象: {person_name} (分数: {score})", "debug")
+            self._debug_log(f"记录印象: {person_name} (分数: {score}, 群组: {group_id})", "debug")
             
             return memory_id
             
@@ -2802,11 +2861,14 @@ class MemorySystem:
             if not concept_id:
                 return self.impression_config["default_score"]
             
-            # 获取该概念下最新的记忆（即最新印象）
-            concept_memories = [
+            # 获取该概念下最新的记忆（即最新印象）- 使用群聊隔离过滤
+            all_concept_memories = [
                 m for m in self.memory_graph.memories.values()
                 if m.concept_id == concept_id
             ]
+            
+            # 应用群聊隔离过滤
+            concept_memories = self.filter_memories_by_group(all_concept_memories, group_id)
             
             if not concept_memories:
                 return self.impression_config["default_score"]
@@ -2848,11 +2910,14 @@ class MemorySystem:
                     break
             
             if concept_id:
-                # 查找现有的印象记忆
-                concept_memories = [
+                # 查找现有的印象记忆 - 使用群聊隔离过滤
+                all_concept_memories = [
                     m for m in self.memory_graph.memories.values()
                     if m.concept_id == concept_id
                 ]
+                
+                # 应用群聊隔离过滤
+                concept_memories = self.filter_memories_by_group(all_concept_memories, group_id)
                 
                 if concept_memories:
                     # 更新最新一条印象记忆的强度
@@ -2908,11 +2973,14 @@ class MemorySystem:
                     "last_updated": "无"
                 }
             
-            # 获取该概念下的所有印象记忆
-            impression_memories = [
+            # 获取该概念下的所有印象记忆 - 使用群聊隔离过滤
+            all_impression_memories = [
                 m for m in self.memory_graph.memories.values()
                 if m.concept_id == concept_id
             ]
+            
+            # 应用群聊隔离过滤
+            impression_memories = self.filter_memories_by_group(all_impression_memories, group_id)
             
             if not impression_memories:
                 return {
@@ -2988,11 +3056,14 @@ class MemorySystem:
             if not concept_id:
                 return []
             
-            # 获取该概念下的所有印象记忆
-            impression_memories = [
+            # 获取该概念下的所有印象记忆 - 使用群聊隔离过滤
+            all_impression_memories = [
                 m for m in self.memory_graph.memories.values()
                 if m.concept_id == concept_id
             ]
+            
+            # 应用群聊隔离过滤
+            impression_memories = self.filter_memories_by_group(all_impression_memories, group_id)
             
             # 按时间倒序排序
             impression_memories.sort(key=lambda m: m.last_accessed, reverse=True)
@@ -3016,6 +3087,8 @@ class MemorySystem:
             
         except Exception as e:
             self._debug_log(f"获取印象记忆失败: {e}", "error")
+            return []
+    
     def _safe_format_datetime(self, dt_obj) -> str:
         """安全地格式化datetime对象或时间戳"""
         try:
@@ -3029,7 +3102,6 @@ class MemorySystem:
         except Exception as e:
             self._debug_log(f"安全格式化时间失败: {e}", "warning")
             return "未知时间"
-            return []
 
 
 class BatchMemoryExtractor:
@@ -3476,7 +3548,7 @@ class MemoryGraph:
                    details: str = "", participants: str = "", location: str = "",
                    emotion: str = "", tags: str = "", created_at: float = None,
                    last_accessed: float = None, access_count: int = 0,
-                   strength: float = 1.0) -> str:
+                   strength: float = 1.0, group_id: str = "") -> str:
         """添加记忆"""
         if memory_id is None:
             memory_id = f"memory_{int(time.time() * 1000)}"
@@ -3493,7 +3565,8 @@ class MemoryGraph:
             created_at=created_at,
             last_accessed=last_accessed,
             access_count=access_count,
-            strength=strength
+            strength=strength,
+            group_id=group_id
         )
         self.memories[memory_id] = memory
         

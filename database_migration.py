@@ -84,9 +84,42 @@ class SmartDatabaseMigration:
         self.db_path = db_path
         self.context = context
         self.backup_dir = os.path.join(os.path.dirname(db_path), "backups")
+        self.max_retries = 3
+        self.retry_delay = 1.0
+        self.fallback_mode = False
+        self.last_error = None
         
     async def run_smart_migration(self) -> bool:
         """智能迁移主入口 - 无需版本号"""
+        return await self._run_migration_with_retry(self._run_smart_migration_internal)
+    
+    async def _run_migration_with_retry(self, migration_func) -> bool:
+        """带重试机制的迁移执行"""
+        for attempt in range(self.max_retries):
+            try:
+                logger.info(f"开始数据库迁移 (尝试 {attempt + 1}/{self.max_retries})")
+                result = await migration_func()
+                if result:
+                    logger.info("数据库迁移成功")
+                    return True
+                else:
+                    logger.warning(f"数据库迁移失败 (尝试 {attempt + 1}/{self.max_retries})")
+                    if attempt < self.max_retries - 1:
+                        await asyncio.sleep(self.retry_delay)
+                    continue
+            except Exception as e:
+                self.last_error = str(e)
+                logger.error(f"数据库迁移异常 (尝试 {attempt + 1}/{self.max_retries}): {e}", exc_info=True)
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(self.retry_delay)
+                continue
+        
+        # 所有重试都失败，进入回退模式
+        logger.error("所有迁移尝试都失败，进入回退模式")
+        return await self._enter_fallback_mode()
+    
+    async def _run_smart_migration_internal(self) -> bool:
+        """智能迁移内部实现"""
         try:
             if not os.path.exists(self.db_path):
                 logger.info("数据库不存在，将创建新数据库")
@@ -123,6 +156,7 @@ class SmartDatabaseMigration:
                 return False
                 
         except Exception as e:
+            self.last_error = str(e)
             logger.error(f"智能迁移失败: {e}", exc_info=True)
             # 如果发生异常，也尝试回滚
             if 'backup_path' in locals() and os.path.exists(backup_path):
@@ -131,6 +165,10 @@ class SmartDatabaseMigration:
     
     async def run_embedding_cache_migration(self) -> bool:
         """专门用于嵌入向量缓存数据库的迁移"""
+        return await self._run_migration_with_retry(self._run_embedding_cache_migration_internal)
+    
+    async def _run_embedding_cache_migration_internal(self) -> bool:
+        """嵌入向量缓存迁移内部实现"""
         try:
             if not os.path.exists(self.db_path):
                 logger.info("嵌入向量缓存数据库不存在，将创建新数据库")
@@ -169,11 +207,109 @@ class SmartDatabaseMigration:
                 return False
                 
         except Exception as e:
+            self.last_error = str(e)
             logger.error(f"嵌入向量缓存数据库迁移失败: {e}", exc_info=True)
             # 如果发生异常，也尝试回滚
             if 'backup_path' in locals() and os.path.exists(backup_path):
                 self._rollback(backup_path)
             return False
+    
+    async def _enter_fallback_mode(self) -> bool:
+        """进入回退模式"""
+        self.fallback_mode = True
+        logger.warning("进入回退模式：尝试创建最小可用数据库结构")
+        
+        try:
+            # 尝试创建最小可用结构
+            await self._create_minimal_structure()
+            logger.info("回退模式：成功创建最小可用数据库结构")
+            return True
+        except Exception as e:
+            logger.error(f"回退模式失败：无法创建最小数据库结构: {e}")
+            return False
+    
+    async def _create_minimal_structure(self) -> None:
+        """创建最小可用数据库结构"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # 判断是否为嵌入向量缓存数据库
+            if "_embeddings.db" in self.db_path:
+                # 创建最小嵌入向量缓存结构
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS memory_embeddings (
+                        memory_id TEXT PRIMARY KEY,
+                        content TEXT NOT NULL,
+                        concept_id TEXT NOT NULL,
+                        embedding BLOB NOT NULL,
+                        vector_dimension INTEGER NOT NULL,
+                        group_id TEXT DEFAULT "",
+                        created_at REAL NOT NULL,
+                        last_updated REAL NOT NULL
+                    )
+                ''')
+                
+                # 创建基本索引
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_embeddings ON memory_embeddings(group_id)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_concept_embeddings ON memory_embeddings(concept_id)")
+                
+            else:
+                # 创建最小主记忆数据库结构
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS concepts (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        created_at REAL NOT NULL,
+                        last_accessed REAL NOT NULL,
+                        access_count INTEGER DEFAULT 0
+                    )
+                ''')
+                
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS memories (
+                        id TEXT PRIMARY KEY,
+                        concept_id TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        group_id TEXT DEFAULT "",
+                        created_at REAL NOT NULL,
+                        last_accessed REAL NOT NULL,
+                        access_count INTEGER DEFAULT 0,
+                        strength REAL DEFAULT 1.0
+                    )
+                ''')
+                
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS connections (
+                        id TEXT PRIMARY KEY,
+                        from_concept TEXT NOT NULL,
+                        to_concept TEXT NOT NULL,
+                        strength REAL DEFAULT 1.0,
+                        last_strengthened REAL NOT NULL
+                    )
+                ''')
+                
+                # 创建基本索引
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_group_id ON memories(group_id)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_concept_group ON memories(concept_id, group_id)")
+            
+            conn.commit()
+    
+    def get_migration_status(self) -> Dict[str, Any]:
+        """获取迁移状态信息"""
+        return {
+            "fallback_mode": self.fallback_mode,
+            "last_error": self.last_error,
+            "max_retries": self.max_retries,
+            "retry_delay": self.retry_delay,
+            "database_exists": os.path.exists(self.db_path),
+            "backup_dir_exists": os.path.exists(self.backup_dir)
+        }
+    
+    def reset_migration_state(self) -> None:
+        """重置迁移状态"""
+        self.fallback_mode = False
+        self.last_error = None
+        logger.info("迁移状态已重置")
 
     def _analyze_current_schema(self) -> DatabaseSchema:
         """分析当前数据库结构"""
@@ -429,7 +565,11 @@ class SmartDatabaseMigration:
                         sql += " NOT NULL"
                     if field.default_value is not None:
                         if isinstance(field.default_value, str):
-                            sql += f" DEFAULT '{field.default_value}'"
+                            # 正确处理字符串默认值，避免重复引号
+                            if field.default_value.startswith("'") and field.default_value.endswith("'"):
+                                sql += f" DEFAULT {field.default_value}"
+                            else:
+                                sql += f" DEFAULT '{field.default_value}'"
                         else:
                             sql += f" DEFAULT {field.default_value}"
                     fields_sql.append(sql)
@@ -484,26 +624,36 @@ class SmartDatabaseMigration:
                                 table_name: str, table_diff: TableDiff) -> None:
         """迁移单个表的数据"""
         try:
+            logger.info(f"开始迁移表 {table_name} 的数据")
+            
             source_cursor.execute(f"SELECT * FROM {table_name}")
             rows = source_cursor.fetchall()
             
             if not rows:
+                logger.info(f"表 {table_name} 没有数据，跳过迁移")
                 return
             
+            logger.info(f"表 {table_name} 有 {len(rows)} 行数据需要迁移")
+            
             source_cursor.execute(f"PRAGMA table_info('{table_name}')")
-            source_columns = [str(col) for col in source_cursor.fetchall()]
+            source_columns = [col[1] for col in source_cursor.fetchall()]  # col[1] 是列名
+            logger.info(f"表 {table_name} 源列: {source_columns}")
             
             target_cursor.execute(f"PRAGMA table_info('{table_name}')")
-            target_columns_info = {str(col): col for col in target_cursor.fetchall()}
+            target_columns_info = {col[1]: col for col in target_cursor.fetchall()}
             target_columns = list(target_columns_info.keys())
+            logger.info(f"表 {table_name} 目标列: {target_columns}")
             
             # 构建字段映射
             field_mapping, final_target_columns = self._build_field_mapping(
                 source_columns, target_columns, table_diff
             )
+            logger.info(f"表 {table_name} 字段映射: {field_mapping}")
+            logger.info(f"表 {table_name} 最终目标列: {final_target_columns}")
             
             # 迁移数据
-            for row in rows:
+            migrated_count = 0
+            for i, row in enumerate(rows):
                 new_row_dict = self._transform_row(row, field_mapping, source_columns)
                 if new_row_dict:
                     # 确保插入顺序与目标列一致
@@ -516,8 +666,13 @@ class SmartDatabaseMigration:
                             f"INSERT INTO {table_name} ({column_names}) VALUES ({placeholders})",
                             tuple(ordered_row)
                         )
+                        migrated_count += 1
                     except sqlite3.IntegrityError as e:
-                        logger.warning(f"插入数据失败 (表: {table_name}): {e}")
+                        logger.warning(f"插入数据失败 (表: {table_name}, 行 {i}): {e}")
+                    except Exception as e:
+                        logger.error(f"插入数据异常 (表: {table_name}, 行 {i}): {e}")
+                        
+            logger.info(f"表 {table_name} 数据迁移完成，成功迁移 {migrated_count}/{len(rows)} 行")
             
         except Exception as e:
             logger.error(f"迁移表 {table_name} 数据失败: {e}", exc_info=True)

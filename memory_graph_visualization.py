@@ -167,8 +167,21 @@ class MemoryGraphVisualizer:
             filtered_memory_ids = set()
             for memory in memories:
                 # 检查记忆是否有group_id字段
-                if hasattr(memory, 'group_id') and memory.group_id == group_id:
-                    filtered_memory_ids.add(memory.id)
+                memory_group_id = getattr(memory, 'group_id', '')
+                if memory_group_id:
+                    if memory_group_id == group_id:
+                        filtered_memory_ids.add(memory.id)
+                else:
+                    # 如果记忆没有group_id字段，检查是否为印象记忆
+                    # 印象记忆通常以"Imprint:"开头，需要特殊处理
+                    if hasattr(memory, 'content') and memory.content and memory.content.startswith("Imprint:"):
+                        # 对于印象记忆，检查内容中是否包含群组ID
+                        if f"Imprint:{group_id}:" in memory.content:
+                            filtered_memory_ids.add(memory.id)
+                    else:
+                        # 对于非印象记忆且没有group_id字段的旧版本数据，默认包含
+                        # 这样可以确保旧版本数据在群聊隔离模式下仍然可见
+                        filtered_memory_ids.add(memory.id)
             
             # 根据过滤后的记忆获取相关的概念
             filtered_concept_ids = set()
@@ -177,7 +190,7 @@ class MemoryGraphVisualizer:
                 if memory:
                     filtered_concept_ids.add(memory.concept_id)
             
-            # 过滤概念
+            # 过滤概念：只包含与过滤后记忆相关的概念
             concepts = [c for c in concepts if c.id in filtered_concept_ids]
             
             # 过滤连接：只包含过滤后概念之间的连接
@@ -254,6 +267,7 @@ class MemoryGraphVisualizer:
         return {
             "nodes": nodes_data,
             "edges": edges_data,
+            "group_id": group_id,  # 传递group_id给同步函数
             "error": None
         }
 
@@ -269,6 +283,7 @@ class MemoryGraphVisualizer:
 
         nodes_data = graph_data.get("nodes", [])
         edges_data = graph_data.get("edges", [])
+        group_id = graph_data.get("group_id", "")  # 从graph_data中获取group_id
 
         if not nodes_data:
             logger.warning("筛选后无节点, 无法生成图谱")
@@ -321,11 +336,17 @@ class MemoryGraphVisualizer:
 
             # 颜色:
             #   印象概念: Imprint:<group_id>:<name>  -> 红色系
-            #   重要事件: max_strength 高或标签线索不可直接取, 以 max_strength>=0.8 作为“重要”近似 -> 绿色系
+            #   重要事件: max_strength 高或标签线索不可直接取, 以 max_strength>=0.8 作为"重要"近似 -> 绿色系
             #   其他: 蓝色系
             if name.startswith("Imprint:"):
                 node_colors.append("#e57373")  # red 300
-                display = name.split(":")[-1] if ":" in name else name
+                # 对于印象记忆，提取显示名称时考虑群聊隔离
+                if group_id and f"Imprint:{group_id}:" in name:
+                    # 如果是当前群聊的印象记忆，显示完整名称
+                    display = name
+                else:
+                    # 否则只显示最后一部分
+                    display = name.split(":")[-1] if ":" in name else name
             elif max_s >= 0.8:
                 node_colors.append("#66bb6a")  # green 400
                 display = (name.split(",")[0]).strip()

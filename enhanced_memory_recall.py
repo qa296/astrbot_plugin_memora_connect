@@ -104,11 +104,12 @@ class EnhancedMemoryRecall:
             memories_snapshot = []
             for memory in self.memory_system.memory_graph.memories.values():
                 # 如果启用了群聊隔离，检查群聊ID
-                if group_id and hasattr(memory, 'group_id'):
-                    if memory.group_id == group_id:
+                memory_group_id = getattr(memory, 'group_id', '')
+                if group_id:
+                    if memory_group_id == group_id:
                         memories_snapshot.append(memory)
                 elif not group_id:  # 如果没有群聊ID，只获取默认记忆
-                    if not hasattr(memory, 'group_id') or not memory.group_id:
+                    if not memory_group_id:
                         memories_snapshot.append(memory)
 
             logger.debug(f"开始语义召回，查询: {query}, 记忆总数: {len(memories_snapshot)}")
@@ -170,11 +171,12 @@ class EnhancedMemoryRecall:
             
             for memory in self.memory_system.memory_graph.memories.values():
                 # 群聊隔离检查
-                if group_id and hasattr(memory, 'group_id'):
-                    if memory.group_id != group_id:
+                memory_group_id = getattr(memory, 'group_id', '')
+                if group_id:
+                    if memory_group_id != group_id:
                         continue
                 elif not group_id:
-                    if hasattr(memory, 'group_id') and memory.group_id:
+                    if memory_group_id:
                         continue
                 
                 time_diff = current_time - memory.last_accessed
@@ -214,11 +216,12 @@ class EnhancedMemoryRecall:
             # 群聊隔离过滤
             filtered_memories = []
             for memory in all_memories:
-                if group_id and hasattr(memory, 'group_id'):
-                    if memory.group_id == group_id:
+                memory_group_id = getattr(memory, 'group_id', '')
+                if group_id:
+                    if memory_group_id == group_id:
                         filtered_memories.append(memory)
                 elif not group_id:
-                    if not hasattr(memory, 'group_id') or not memory.group_id:
+                    if not memory_group_id:
                         filtered_memories.append(memory)
             
             filtered_memories.sort(key=lambda m: m.strength, reverse=True)
@@ -412,11 +415,12 @@ class EnhancedMemoryRecall:
             
             for memory in self.memory_system.memory_graph.memories.values():
                 # 群聊隔离过滤
-                if group_id and hasattr(memory, 'group_id'):
-                    if memory.group_id != group_id:
+                memory_group_id = getattr(memory, 'group_id', '')
+                if group_id:
+                    if memory_group_id != group_id:
                         continue
                 elif not group_id:
-                    if hasattr(memory, 'group_id') and memory.group_id:
+                    if memory_group_id:
                         continue
                 
                 memory_lower = memory.content.lower()
@@ -487,11 +491,12 @@ class EnhancedMemoryRecall:
                         # 群聊隔离过滤
                         filtered_memories = []
                         for memory in neighbor_memories:
-                            if group_id and hasattr(memory, 'group_id'):
-                                if memory.group_id == group_id:
+                            memory_group_id = getattr(memory, 'group_id', '')
+                            if group_id:
+                                if memory_group_id == group_id:
                                     filtered_memories.append(memory)
                             elif not group_id:
-                                if not hasattr(memory, 'group_id') or not memory.group_id:
+                                if not memory_group_id:
                                     filtered_memories.append(memory)
                         
                         # 按强度排序，取前2条
@@ -646,8 +651,16 @@ class EnhancedMemoryRecall:
             uncached_memory_ids = []
             
             for memory_id in memory_ids:
-                if not await self.memory_system.embedding_cache._get_cached_embedding(memory_id):
-                    uncached_memory_ids.append(memory_id)
+                # 获取记忆对象以传递group_id
+                memory = self.memory_system.memory_graph.memories.get(memory_id)
+                if memory:
+                    memory_group_id = getattr(memory, 'group_id', '')
+                    if not await self.memory_system.embedding_cache._get_cached_embedding(memory_id, memory_group_id):
+                        uncached_memory_ids.append(memory_id)
+                else:
+                    # 如果找不到记忆对象，使用空group_id
+                    if not await self.memory_system.embedding_cache._get_cached_embedding(memory_id):
+                        uncached_memory_ids.append(memory_id)
             
             if not uncached_memory_ids:
                 logger.info(f"所有 {total_count} 条记忆的嵌入向量已经缓存")

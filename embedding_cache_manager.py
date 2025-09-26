@@ -28,6 +28,7 @@ except ImportError:
         logger.setLevel(logging.INFO)
 
 from .resource_management import resource_manager
+from .database_migration import SmartDatabaseMigration
 
 @dataclass
 class EmbeddedMemory:
@@ -83,6 +84,9 @@ class EmbeddingCacheManager:
     async def initialize(self):
         """初始化嵌入向量缓存系统"""
         try:
+            # 在初始化缓存数据库之前，先执行数据库迁移
+            await self._run_database_migration()
+            
             await self._ensure_cache_database()
             await self._load_precompute_stats()
             logger.info("嵌入向量缓存管理器初始化完成")
@@ -140,6 +144,27 @@ class EmbeddingCacheManager:
                 
         except Exception as e:
             logger.error(f"创建缓存数据库失败: {e}")
+            raise
+            
+    async def _run_database_migration(self):
+        """运行嵌入向量缓存数据库的迁移"""
+        try:
+            logger.info(f"开始嵌入向量缓存数据库迁移: {self.cache_db_path}")
+            
+            # 创建数据库迁移实例
+            migration = SmartDatabaseMigration(self.cache_db_path)
+            
+            # 执行嵌入向量缓存数据库迁移
+            success = await migration.run_embedding_cache_migration()
+            
+            if success:
+                logger.info("嵌入向量缓存数据库迁移成功完成")
+            else:
+                logger.error("嵌入向量缓存数据库迁移失败")
+                raise RuntimeError("嵌入向量缓存数据库迁移失败")
+                
+        except Exception as e:
+            logger.error(f"运行数据库迁移时发生错误: {e}")
             raise
             
     async def _load_precompute_stats(self):
@@ -593,7 +618,8 @@ class EmbeddingCacheManager:
                 memories_data.append({
                     "memory_id": memory_id,
                     "content": memory.content,
-                    "concept_id": memory.concept_id
+                    "concept_id": memory.concept_id,
+                    "group_id": getattr(memory, 'group_id', '')  # 确保传递group_id
                 })
                 
         return memories_data
@@ -804,26 +830,36 @@ class EmbeddingCacheManager:
         """调度初始预计算任务"""
         try:
             
-            # 获取所有记忆ID
-            all_memory_ids = list(cast(Dict[str, Any], self.memory_system.memory_graph.memories).keys())
+            # 获取所有记忆ID，按群聊分组处理以确保群聊隔离
+            all_memories = list(cast(Dict[str, Any], self.memory_system.memory_graph.memories).values())
             
-            if not all_memory_ids:
+            if not all_memories:
                 logger.info("没有记忆需要预计算")
                 return
                 
-            # 分批处理，每批100个记忆
-            batch_size = 100
-            for i in range(0, len(all_memory_ids), batch_size):
-                batch_memory_ids = all_memory_ids[i:i + batch_size]
-                
-                # 根据索引分配优先级
-                priority = 5 if i == 0 else 3  # 第一批高优先级
-                
-                await self.schedule_precompute_task(batch_memory_ids, priority)
-                
-                # 避免过于频繁的调度
-                if i + batch_size < len(all_memory_ids):
-                    await asyncio.sleep(0.1)
+            # 按群聊ID分组记忆
+            group_memories: Dict[str, List[str]] = {}
+            for memory in all_memories:
+                group_id = getattr(memory, 'group_id', '')
+                if group_id not in group_memories:
+                    group_memories[group_id] = []
+                group_memories[group_id].append(memory.id)
+            
+            # 分批处理，每批100个记忆，按群聊分组
+            for group_id, memory_ids in group_memories.items():
+                batch_size = 100
+                for i in range(0, len(memory_ids), batch_size):
+                    batch_memory_ids = memory_ids[i:i + batch_size]
+                    
+                    # 根据索引分配优先级
+                    priority = 5 if i == 0 else 3  # 第一批高优先级
+                    
+                    # 传递群聊ID以确保群聊隔离
+                    await self.schedule_precompute_task(batch_memory_ids, priority, group_id)
+                    
+                    # 避免过于频繁的调度
+                    if i + batch_size < len(memory_ids):
+                        await asyncio.sleep(0.1)
                     
  
         except Exception as e:
