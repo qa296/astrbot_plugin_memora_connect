@@ -1206,7 +1206,7 @@ class MemorySystem:
                         INSERT OR REPLACE INTO memories
                         (id, concept_id, content, details, participants,
                         location, emotion, tags, created_at, last_accessed, access_count, strength, group_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (memory.id, memory.concept_id, memory.content, memory.details,
                          memory.participants, memory.location, memory.emotion, memory.tags,
                          memory.created_at, memory.last_accessed, memory.access_count, memory.strength, group_id))
