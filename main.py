@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass
 
 from astrbot.api.provider import ProviderRequest
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult, MessageChain
 from .database_migration import SmartDatabaseMigration
 from .enhanced_memory_display import EnhancedMemoryDisplay
 from .embedding_cache_manager import EmbeddingCacheManager
@@ -22,7 +22,7 @@ from astrbot.api import AstrBotConfig
 from astrbot.api.star import StarTools
 from .resource_management import resource_manager
 
-@register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.5", "https://github.com/qa296/astrbot_plugin_memora_connect")
+@register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.6", "https://github.com/qa296/astrbot_plugin_memora_connect")
 class MemoraConnectPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -485,14 +485,14 @@ class MemoraConnectPlugin(Star):
             actual_theme = theme or topic
             if not actual_theme:
                 logger.warning("创建记忆失败：主题为空")
-                yield event.plain_result("")
-                return
+                
+                return "创建记忆失败：主题为空"
             
             # 参数验证和清理
             if not content:
                 logger.warning("创建记忆失败：内容为空")
-                yield event.plain_result("")
-                return
+                
+                return "创建记忆失败：内容为空"
             
             # 清理特殊字符
             import re
@@ -535,11 +535,12 @@ class MemoraConnectPlugin(Star):
             logger.info(f"LLM工具创建丰富记忆：{actual_theme} -> {content} (置信度: {confidence})")
             
             # 返回空字符串让LLM继续其自然回复流程
-            yield event.plain_result("")
+            return f"记忆创建成功,内容为:{content}"
             
         except Exception as e:
             logger.error(f"LLM工具创建记忆失败：{e}")
-            yield event.plain_result("")
+            await event.send(MessageChain().message("记忆创建失败"))
+            return "记忆创建失败"
 
     @filter.llm_tool(name="recall_memory")
     async def recall_memory_tool(self, event: AstrMessageEvent, keyword: str) -> MessageEventResult:
@@ -558,14 +559,15 @@ class MemoraConnectPlugin(Star):
             if results:
                 # 生成增强的上下文
                 formatted_memories = enhanced_recall.format_memories_for_llm(results)
-                yield event.plain_result(formatted_memories)
+                return f"记忆召回结果:{formatted_memories}"
             else:
                 # 返回空字符串让LLM继续其自然回复流程
-                yield event.plain_result("")
+                return "没有相关记忆"
                   
         except Exception as e:
             logger.error(f"增强记忆召回工具失败：{e}")
-            yield event.plain_result("")
+            await event.send(MessageChain().message("记忆召回失败"))
+            return "记忆召回失败"
 
     @filter.llm_tool(name="adjust_impression")
     async def adjust_impression_tool(
@@ -603,11 +605,12 @@ class MemoraConnectPlugin(Star):
             logger.info(f"LLM工具调整印象：{person_name} 调整量:{delta} 新分数:{new_score:.2f}")
             
             # 返回空字符串让LLM继续其自然回复流程
-            yield event.plain_result("")
+            return f"调整印象成功，{person_name} 的好感度为 {new_score:.2f}"
             
         except Exception as e:
             logger.error(f"LLM工具调整印象失败：{e}")
-            yield event.plain_result("")
+            await event.send(MessageChain().message("调整印象失败"))
+            return "调整印象失败"
 
     @filter.llm_tool(name="record_impression")
     async def record_impression_tool(
@@ -649,11 +652,12 @@ class MemoraConnectPlugin(Star):
                 logger.info(f"LLM工具记录印象：{person_name} 分数:{current_score:.2f} 摘要:{summary[:50]}...")
             
             # 返回空字符串让LLM继续其自然回复流程
-            yield event.plain_result("")
+            return f"记录印象成功，{person_name} 的好感度为 {current_score:.2f}"
             
         except Exception as e:
             logger.error(f"LLM工具记录印象失败：{e}")
-            yield event.plain_result("")
+            await event.send(MessageChain().message("记录印象失败"))
+            return "记录印象失败"
 
 
 class MemorySystemConfig:
@@ -1206,7 +1210,7 @@ class MemorySystem:
                         INSERT OR REPLACE INTO memories
                         (id, concept_id, content, details, participants,
                         location, emotion, tags, created_at, last_accessed, access_count, strength, group_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (memory.id, memory.concept_id, memory.content, memory.details,
                          memory.participants, memory.location, memory.emotion, memory.tags,
                          memory.created_at, memory.last_accessed, memory.access_count, memory.strength, group_id))
