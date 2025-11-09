@@ -371,24 +371,33 @@ class EnhancedMemoryRecall:
             context_parts = ["【相关记忆】"]
             
             for i, memory in enumerate(memories[:5], 1):  # 最多5条
-                # 获取完整的记忆对象以检查参与者信息
+                # 获取完整的记忆对象以检查参与者信息与时间
                 memory_obj = None
                 for mem in self.memory_system.memory_graph.memories.values():
                     if mem.content == memory.memory:
                         memory_obj = mem
                         break
                 
+                # 格式化创建时间
+                time_str = "未知时间"
+                try:
+                    if memory_obj and getattr(memory_obj, 'created_at', None):
+                        time_str = time.strftime('%Y-%m-%d %H:%M', time.localtime(float(memory_obj.created_at)))
+                except Exception:
+                    pass
+                prefix = f"{i}. [时间: {time_str}] "
+                
                 # 如果找到记忆对象，检查是否包含Bot的发言
                 if memory_obj and memory_obj.participants:
                     if "我" in memory_obj.participants:
                         # 如果参与者包含"我"，说明是Bot的发言，使用第一人称格式
-                        context_parts.append(f"{i}. 我记得: {memory.memory}")
+                        context_parts.append(f"{prefix}我记得: {memory.memory}")
                     else:
                         # 否则使用第三人称格式
-                        context_parts.append(f"{i}. {memory.memory}")
+                        context_parts.append(f"{prefix}{memory.memory}")
                 else:
                     # 如果没有参与者信息，使用默认格式
-                    context_parts.append(f"{i}. {memory.memory}")
+                    context_parts.append(f"{prefix}{memory.memory}")
             
             # 添加元信息
             if len(memories) > 5:
