@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+.env/
+venv/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Build / Dist
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log
+
+# AstrBot plugin data (generated outside repo usually)
+data/
