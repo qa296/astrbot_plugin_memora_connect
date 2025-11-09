@@ -33,6 +33,21 @@ class MemoraConnectPlugin(Star):
         self._initialized = False
         asyncio.create_task(self._async_init())
     
+    def _debug_log(self, message: str, level: str = "debug"):
+        try:
+            if level == "debug":
+                logger.debug(message)
+            elif level == "info":
+                logger.info(message)
+            elif level == "warning":
+                logger.warning(message)
+            elif level == "error":
+                logger.error(message)
+            else:
+                logger.info(message)
+        except Exception:
+            pass
+    
     async def _async_init(self):
         """异步初始化包装器"""
         try:
