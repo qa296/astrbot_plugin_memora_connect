@@ -21,6 +21,7 @@ from astrbot.api import logger
 from astrbot.api import AstrBotConfig
 from astrbot.api.star import StarTools
 from .resource_management import resource_manager
+from .web_ui import MemoryWebUI
 
 @register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.6", "https://github.com/qa296/astrbot_plugin_memora_connect")
 class MemoraConnectPlugin(Star):
@@ -30,6 +31,7 @@ class MemoraConnectPlugin(Star):
         self.memory_system = MemorySystem(context, config, data_dir)
         self.memory_display = EnhancedMemoryDisplay(self.memory_system)
         self.graph_visualizer = MemoryGraphVisualizer(self.memory_system)
+        self.web_ui: Optional[MemoryWebUI] = None
         self._initialized = False
         asyncio.create_task(self._async_init())
     
@@ -40,6 +42,20 @@ class MemoraConnectPlugin(Star):
             await self.memory_system.initialize()
             self._initialized = True
             logger.info("记忆系统异步初始化完成")
+
+            # Web UI startup (configurable)
+            try:
+                web_enabled = bool(self.memory_system.memory_config.get("enable_web_ui", False))
+                if web_enabled:
+                    host = str(self.memory_system.memory_config.get("web_ui_host", "127.0.0.1"))
+                    port = int(self.memory_system.memory_config.get("web_ui_port", 8765))
+                    self.web_ui = MemoryWebUI(self.memory_system, port=port, host=host, enabled=True)
+                    await self.web_ui.start()
+                    logger.info(f"MemoraConnect Web UI 已启动: http://{host}:{port}")
+                else:
+                    logger.info("MemoraConnect Web UI 未启用，可在插件配置中开启")
+            except Exception as web_e:
+                logger.error(f"启动 Web UI 失败: {web_e}", exc_info=True)
         except Exception as e:
             logger.error(f"记忆系统初始化失败: {e}", exc_info=True)
         
@@ -250,8 +266,15 @@ class MemoraConnectPlugin(Star):
     async def terminate(self):
         """插件卸载时保存记忆并清理资源"""
         self._debug_log("开始插件终止流程，清理所有资源", "info")
-        
+
         try:
+            # 0. 停止 Web UI（如果已启动）
+            if hasattr(self, 'web_ui') and self.web_ui is not None:
+                try:
+                    await self.web_ui.stop()
+                except Exception as _:
+                    pass
+
             # 1. 停止维护循环
             if hasattr(self.memory_system, '_should_stop_maintenance'):
                 self.memory_system._should_stop_maintenance.set()
@@ -266,11 +289,11 @@ class MemoraConnectPlugin(Star):
                         await self.memory_system._maintenance_task
                     except asyncio.CancelledError:
                         pass
-                        
+
             # 2. 取消所有托管的异步任务
             if hasattr(self.memory_system, '_managed_tasks'):
                 await self.memory_system._cancel_all_managed_tasks()
-            
+
             # 3. 等待待处理的保存任务完成
             if hasattr(self.memory_system, '_pending_save_task') and self.memory_system._pending_save_task and not self.memory_system._pending_save_task.done():
                 try:
@@ -281,17 +304,17 @@ class MemoraConnectPlugin(Star):
                         await self.memory_system._pending_save_task
                     except asyncio.CancelledError:
                         pass
-                    
+
             # 4. 清理嵌入向量缓存
             if hasattr(self.memory_system, 'embedding_cache') and self.memory_system.embedding_cache:
                 try:
                     await self.memory_system.embedding_cache.cleanup()
                 except Exception as e:
                     logger.warning(f"清理嵌入向量缓存时出错: {e}")
-        
+
             # 5. 保存记忆状态
             await self.memory_system.save_memory_state()
-            
+
             # 6. 如果启用了群聊隔离，保存所有群聊数据库
             if self.memory_system.memory_config.get("enable_group_isolation", True):
                 db_dir = os.path.dirname(self.memory_system.db_path)
@@ -300,20 +323,72 @@ class MemoraConnectPlugin(Star):
                         if filename.startswith("memory_group_") and filename.endswith(".db"):
                             group_id = filename[12:-3]
                             await self.memory_system.save_memory_state(group_id)
-            
+
             # 7. 使用资源管理器清理所有资源
             resource_manager.cleanup()
-            
+
             self._debug_log("记忆系统已保存并安全关闭", "info")
+            return
+
+            except Exception as e:
+
+
+        async def safe_cleanup(self):
+            """安全清理方法，用于在 terminate 之外调用的情况"""
+            await self.terminate()
+
+        # ---------- 插件API ----------
+
+        async def add_memory_api(self, content: str, theme: str, group_id: str = "", details: str = "", participants: str = "", location: str = "", emotion: str = "", tags: str = "") -> Optional[str]:
+            """
+            【API】添加一条记忆。
+        :param content: 记忆的核心内容。
+        :param theme: 记忆的主题或关键词，用逗号分隔。
+        :param group_id: 群组ID，如果需要在特定群聊中操作。
+        :param details: 记忆的详细信息。
+        :param participants: 参与者，用逗号分隔。
+        :param location: 相关地点。
+        :param emotion: 情感色彩。
+        :param tags: 标签，用逗号分隔。
+        :return: 成功则返回记忆ID，否则返回None。
+        """
+        if not self._initialized or not self.memory_system.memory_system_enabled:
+            logger.warning("API调用失败：记忆系统未启用或未初始化。")
+            return None
+        
+        try:
+            # 切换到正确的群聊上下文
+            if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
+                self.memory_system.memory_graph = MemoryGraph()
+                self.memory_system.load_memory_state(group_id)
+
+            concept_id = self.memory_system.memory_graph.add_concept(theme)
+            memory_id = self.memory_system.memory_graph.add_memory(
+                content=content,
+                concept_id=concept_id,
+                details=details,
+                participants=participants,
+                location=location,
+                emotion=emotion,
+                tags=tags,
+                group_id=group_id
+            )
             
+            # 异步保存
+            await self.memory_system._queue_save_memory_state(group_id)
+            
+            logger.info(f"通过API添加记忆成功: {memory_id}")
+            return memory_id
         except Exception as e:
-            logger.error(f"插件终止过程中发生错误: {e}", exc_info=True)
-            
+            logger.error(f"API add_memory_api 失败: {e}", exc_info=True)
+            return None
+
     async def safe_cleanup(self):
         """安全清理方法，用于在 terminate 之外调用的情况"""
         await self.terminate()
 
     # ---------- 插件API ----------
+
     async def add_memory_api(self, content: str, theme: str, group_id: str = "", details: str = "", participants: str = "", location: str = "", emotion: str = "", tags: str = "") -> Optional[str]:
         """
         【API】添加一条记忆。

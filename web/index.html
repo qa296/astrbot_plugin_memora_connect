@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Memora Connect Web UI</title>
+  <style>
+    html, body { height: 100%; margin: 0; font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,PingFang SC,Microsoft YaHei,sans-serif; }
+    header { display:flex; gap:12px; align-items:center; padding:10px 14px; border-bottom:1px solid #eee; }
+    header h1 { font-size:18px; margin:0 10px 0 0; }
+    input, select, button { padding:6px 10px; border-radius:6px; border:1px solid #ccc; }
+    button { cursor:pointer; }
+    #page { display:grid; grid-template-columns: 3fr 2fr; grid-template-rows: auto 1fr; height: calc(100% - 56px); }
+    #graphPanel { grid-row: 1 / span 2; border-right:1px solid #eee; display:flex; flex-direction:column; }
+    #cy { flex: 1; }
+    #side { padding:10px; display:flex; flex-direction:column; gap:10px; overflow:auto; }
+    .card { border:1px solid #eee; border-radius:10px; padding:10px; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
+    .row { display:flex; gap:8px; margin-bottom:10px; }
+    .row label { min-width: 86px; color:#666; font-size:13px; }
+    .list { display:flex; flex-direction:column; gap:6px; max-height: 280px; overflow:auto; }
+    .mem { border:1px dashed #ddd; border-radius:8px; padding:8px; }
+    .muted { color:#777; font-size:12px; }
+    .edgePanel { display:none; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Memora Connect</h1>
+    <label>群组ID</label>
+    <input id="groupId" placeholder="为空表示私聊" />
+    <button onclick="refreshAll()">刷新</button>
+    <span id="stat" class="muted"></span>
+  </header>
+  <div id="page">
+    <section id="graphPanel">
+      <div id="cy"></div>
+    </section>
+    <aside id="side">
+      <div class="card">
+        <h3>人物印象</h3>
+        <div class="row">
+          <button onclick="loadPersons()">刷新人物</button>
+        </div>
+        <div id="persons" class="list"></div>
+      </div>
+
+      <div class="card">
+        <h3>概念与连接</h3>
+        <div class="row">
+          <input id="newConcept" placeholder="新概念名" />
+          <button onclick="createConcept()">添加概念</button>
+        </div>
+        <div class="row">
+          <input id="connFrom" placeholder="起点概念ID" style="width:48%"/>
+          <input id="connTo" placeholder="终点概念ID" style="width:48%"/>
+        </div>
+        <div class="row">
+          <input id="connStrength" type="number" min="0" max="1" step="0.05" value="1" style="width:48%"/>
+          <button onclick="createConn()" style="width:48%">添加连接</button>
+        </div>
+        <div id="edgePanel" class="edgePanel">
+          <div class="row"><label>选中边</label><span id="edgeId" class="muted"></span></div>
+          <div class="row"><label>强度</label><input id="edgeStrength" type="number" min="0" max="1" step="0.05" /></div>
+          <div class="row">
+            <button onclick="updateEdge()">保存</button>
+            <button onclick="deleteEdge()">删除连接</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>记忆</h3>
+        <div class="row"><label>概念ID</label><input id="memConcept" placeholder="概念ID" /></div>
+        <div class="row"><label>内容</label><input id="memContent" placeholder="记忆内容" style="width:100%"/></div>
+        <div class="row"><label>详情</label><input id="memDetails" placeholder="详情" style="width:100%"/></div>
+        <div class="row"><label>参与者</label><input id="memParticipants" placeholder="参与者"/></div>
+        <div class="row"><label>地点</label><input id="memLocation" placeholder="地点"/></div>
+        <div class="row"><label>情感</label><input id="memEmotion" placeholder="情感"/></div>
+        <div class="row"><label>标签</label><input id="memTags" placeholder="标签"/></div>
+        <div class="row"><label>强度</label><input id="memStrength" type="number" min="0" max="1" step="0.05" value="1" /></div>
+        <div class="row"><button onclick="createMemory()">添加记忆</button></div>
+        <div id="memList" class="list"></div>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+    let cy;
+    let currentEdge = null;
+
+    async function api(path, opts={}){
+      const res = await fetch(path, {
+        ...opts,
+        headers: { 'Content-Type': 'application/json', ...(opts.headers||{}) }
+      });
+      return await res.json();
+    }
+
+    function gid(){
+      return document.getElementById('groupId').value.trim();
+    }
+
+    async function refreshAll(){
+      await loadStatus();
+      await loadGraph();
+      await loadPersons();
+    }
+
+    async function loadStatus(){
+      const s = await api('/api/status');
+      if(s && s.stats){
+        document.getElementById('stat').innerText = `概念 ${s.stats.concepts} | 记忆 ${s.stats.memories} | 连接 ${s.stats.connections}`;
+      }
+    }
+
+    function renderGraph(graph){
+      const elements = [];
+      for(const n of graph.nodes){
+        elements.push({ data: { id: n.id, label: `${n.name} (${n.count})` } });
+      }
+      for(const e of graph.edges){
+        elements.push({ data: { id: e.id, source: e.from_concept, target: e.to_concept, strength: e.strength } });
+      }
+      if(!cy){
+        cy = cytoscape({ container: document.getElementById('cy'), elements, style: [
+          { selector: 'node', style: { 'label': 'data(label)', 'text-valign': 'center', 'color': '#222', 'background-color': '#7aaef7', 'font-size': 10 } },
+          { selector: 'edge', style: { 'curve-style': 'bezier', 'width': 'mapData(strength, 0, 1, 1, 6)', 'line-color': '#bbb', 'target-arrow-color': '#bbb' } },
+          { selector: ':selected', style: { 'border-width': 3, 'border-color': '#f39c12' } }
+        ], layout: { name: 'cose', animate: true } });
+        cy.on('tap', 'node', onNodeClick);
+        cy.on('tap', 'edge', onEdgeClick);
+        cy.on('tap', (evt)=>{ if(evt.target === cy){ hideEdgePanel(); } });
+      }else{
+        cy.elements().remove();
+        cy.add(elements);
+        cy.layout({ name: 'cose', animate: true }).run();
+      }
+    }
+
+    async function loadGraph(){
+      const q = new URLSearchParams();
+      if(gid()) q.set('group_id', gid());
+      const g = await api('/api/graph?'+q.toString());
+      renderGraph(g);
+    }
+
+    async function loadPersons(){
+      const q = new URLSearchParams();
+      if(gid()) q.set('group_id', gid());
+      const r = await api('/api/persons?'+q.toString());
+      const box = document.getElementById('persons');
+      box.innerHTML = '';
+      for(const p of (r.persons||[])){
+        const div = document.createElement('div');
+        div.className = 'mem';
+        div.innerHTML = `<b>${p.name}</b> <span class="muted">好感度 ${p.score.toFixed(2)}</span> <button data-name="${p.name}">查看</button>`;
+        div.querySelector('button').onclick = ()=> loadPerson(p.name);
+        box.appendChild(div);
+      }
+    }
+
+    async function loadPerson(name){
+      const q = new URLSearchParams();
+      if(gid()) q.set('group_id', gid());
+      q.set('name', name);
+      const r = await api('/api/person/summary?'+q.toString());
+      const list = document.getElementById('memList');
+      list.innerHTML = '';
+      const title = document.createElement('div');
+      title.className = 'muted';
+      const sum = r.summary || {}; 
+      title.innerText = `${sum.name||name} | ${sum.summary||''} | 好感 ${typeof sum.score==='number'? sum.score.toFixed(2):''}`;
+      list.appendChild(title);
+      for(const m of (r.memories||[])){
+        list.appendChild(renderMemoryItem(m));
+      }
+    }
+
+    function renderMemoryItem(m){
+      const div = document.createElement('div');
+      div.className = 'mem';
+      const info = `${m.id}`;
+      div.innerHTML = `
+        <div><b>${m.content||''}</b></div>
+        <div class="muted">${m.details||''}</div>
+        <div class="muted">强度 ${('strength' in m? m.strength: 0).toFixed? m.strength.toFixed(2): m.strength}</div>
+        <div class="muted">${m.created||m.created_at||''} | ${m.last_accessed||''}</div>
+        <div class="row">
+          <button data-id="${m.id}">删除</button>
+        </div>
+      `;
+      div.querySelector('button').onclick = ()=> deleteMemory(m.id);
+      return div;
+    }
+
+    async function createConcept(){
+      const name = document.getElementById('newConcept').value.trim();
+      if(!name) return;
+      await api('/api/concepts', { method:'POST', body: JSON.stringify({ name }) });
+      document.getElementById('newConcept').value='';
+      await refreshAll();
+    }
+
+    async function createConn(){
+      const fromC = document.getElementById('connFrom').value.trim();
+      const toC = document.getElementById('connTo').value.trim();
+      const strength = parseFloat(document.getElementById('connStrength').value || '1');
+      if(!fromC || !toC) return;
+      await api('/api/connections', { method:'POST', body: JSON.stringify({ from_concept: fromC, to_concept: toC, strength }) });
+      document.getElementById('connFrom').value='';
+      document.getElementById('connTo').value='';
+      await loadGraph();
+    }
+
+    function showEdgePanel(edge){
+      currentEdge = edge;
+      document.getElementById('edgePanel').style.display = 'block';
+      document.getElementById('edgeId').innerText = edge.id();
+      document.getElementById('edgeStrength').value = edge.data('strength');
+    }
+    function hideEdgePanel(){
+      currentEdge = null;
+      document.getElementById('edgePanel').style.display = 'none';
+    }
+    async function updateEdge(){
+      if(!currentEdge) return;
+      const id = currentEdge.id();
+      const strength = parseFloat(document.getElementById('edgeStrength').value || '1');
+      await api('/api/connections/'+encodeURIComponent(id), { method:'PUT', body: JSON.stringify({ strength }) });
+      await loadGraph();
+      hideEdgePanel();
+    }
+    async function deleteEdge(){
+      if(!currentEdge) return;
+      const id = currentEdge.id();
+      await api('/api/connections/'+encodeURIComponent(id), { method:'DELETE' });
+      await loadGraph();
+      hideEdgePanel();
+    }
+
+    async function createMemory(){
+      const concept_id = document.getElementById('memConcept').value.trim();
+      const content = document.getElementById('memContent').value.trim();
+      const details = document.getElementById('memDetails').value.trim();
+      const participants = document.getElementById('memParticipants').value.trim();
+      const location = document.getElementById('memLocation').value.trim();
+      const emotion = document.getElementById('memEmotion').value.trim();
+      const tags = document.getElementById('memTags').value.trim();
+      const strength = parseFloat(document.getElementById('memStrength').value||'1');
+      const group_id = gid();
+      if(!concept_id || !content) return;
+      await api('/api/memories', { method:'POST', body: JSON.stringify({ concept_id, content, details, participants, location, emotion, tags, strength, group_id }) });
+      document.getElementById('memContent').value='';
+      await loadGraph();
+    }
+
+    async function deleteMemory(id){
+      await api('/api/memories/'+encodeURIComponent(id), { method:'DELETE' });
+      await refreshAll();
+    }
+
+    async function onNodeClick(evt){
+      const n = evt.target;
+      // focus memory list by this concept
+      const q = new URLSearchParams();
+      if(gid()) q.set('group_id', gid());
+      q.set('concept_id', n.id());
+      const r = await api('/api/memories?'+q.toString());
+      const list = document.getElementById('memList');
+      list.innerHTML = '';
+      for(const m of (r.memories||[])){
+        list.appendChild(renderMemoryItem(m));
+      }
+      // also prefill concept input
+      document.getElementById('memConcept').value = n.id();
+      hideEdgePanel();
+    }
+
+    function onEdgeClick(evt){
+      showEdgePanel(evt.target);
+    }
+
+    // init
+    refreshAll();
+  </script>
+</body>
+</html>

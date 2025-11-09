@@ -126,5 +126,24 @@
     "type": "int",
     "hint": "每隔多少轮对话形成一次记忆。",
     "default": 15
+  },
+  "enable_web_ui": {
+    "description": "启用 Web 管理界面",
+    "type": "bool",
+    "hint": "提供一个可视化的记忆管理界面（实验特性）",
+    "default": false,
+    "obvious_hint": true
+  },
+  "web_ui_port": {
+    "description": "Web 端口",
+    "type": "int",
+    "hint": "Web UI 监听端口",
+    "default": 8765
+  },
+  "web_ui_host": {
+    "description": "Web 绑定地址",
+    "type": "string",
+    "hint": "默认仅本机可访问，如需远程访问可改为 0.0.0.0",
+    "default": "127.0.0.1"
   }
 }
