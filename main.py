@@ -500,7 +500,10 @@ class MemoraConnectPlugin(Star):
         location: str = "",
         emotion: str = "",
         tags: str = "",
-        confidence: str = "0.7"
+        confidence: str = "0.7",
+        emotion_intensity: str = "0.0",
+        emotion_duration: str = "0.0",
+        emotion_source: str = ""
     ) -> MessageEventResult:
         """通过LLM调用获取个记忆点和主题
 
@@ -514,6 +517,9 @@ class MemoraConnectPlugin(Star):
             emotion(string): 情感色彩，如"开心,兴奋"
             tags(string): 分类标签，如"工作,重要"
             confidence(number): 置信度，0-1之间的数值
+            emotion_intensity(number): 情感强度，0-1之间的数值
+            emotion_duration(number): 情感持续时间（秒）
+            emotion_source(string): 情感来源（文本/事件/人物等）
         """
         try:
             # 向后兼容性处理：如果提供了topic但没有theme，使用topic作为theme
@@ -545,6 +551,17 @@ class MemoraConnectPlugin(Star):
                 logger.warning(f"无法将confidence '{confidence}' 转换为浮点数，使用默认值0.7")
                 confidence_float = 0.7
             
+            # 解析情感强度和持续时间
+            try:
+                emotion_intensity_f = max(0.0, min(1.0, float(emotion_intensity)))
+            except (ValueError, TypeError):
+                emotion_intensity_f = 0.0
+            try:
+                emotion_duration_f = max(0.0, float(emotion_duration))
+            except (ValueError, TypeError):
+                emotion_duration_f = 0.0
+            emotion_source_s = str(emotion_source or "")
+            
             # 创建概念
             concept_id = self.memory_system.memory_graph.add_concept(actual_theme)
             
@@ -563,9 +580,30 @@ class MemoraConnectPlugin(Star):
                 participants=participants,
                 location=location,
                 emotion=emotion,
+                emotion_intensity=emotion_intensity_f,
+                emotion_duration=emotion_duration_f,
+                emotion_source=emotion_source_s,
                 tags=tags,
                 strength=adjusted_strength
             )
+            
+            # 情感节点与关系
+            if emotion:
+                try:
+                    em_list = [e.strip() for e in re.split(r",|，", emotion) if e.strip()]
+                    for em in em_list:
+                        emo_cid = self.memory_system.memory_graph.add_concept(f"Emotion:{em}")
+                        rel_strength = max(0.1, min(1.0, emotion_intensity_f))
+                        self.memory_system.memory_graph.add_connection(
+                            concept_id,
+                            emo_cid,
+                            strength=rel_strength,
+                            relation_type="emotion",
+                            is_directed=1,
+                            strength_level=("strong" if rel_strength >= 0.75 else ("medium" if rel_strength >= 0.4 else "weak"))
+                        )
+                except Exception:
+                    pass
             
             logger.info(f"LLM工具创建丰富记忆：{actual_theme} -> {content} (置信度: {confidence})")
             
@@ -1157,7 +1195,7 @@ class MemorySystem:
                 return
             
             # 加载概念
-            cursor.execute("SELECT id, name, created_at, last_accessed, access_count FROM concepts")
+            cursor.execute("SELECT id, name, created_at, last_accessed, access_count, importance, abstraction, usage_frequency FROM concepts")
             concepts = cursor.fetchall()
             for concept_data in concepts:
                 self.memory_graph.add_concept(
@@ -1165,14 +1203,17 @@ class MemorySystem:
                     name=concept_data[1],
                     created_at=concept_data[2],
                     last_accessed=concept_data[3],
-                    access_count=concept_data[4]
+                    access_count=concept_data[4],
+                    importance=concept_data[5] if len(concept_data) > 5 else 0.5,
+                    abstraction=concept_data[6] if len(concept_data) > 6 else 0.5,
+                    usage_frequency=concept_data[7] if len(concept_data) > 7 else 0
                 )
                 
             # 加载记忆 - 支持群聊隔离
             if group_id:
-                cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories WHERE group_id = ?", (group_id,))
+                cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, emotion_intensity, emotion_duration, emotion_source, tags, created_at, last_accessed, access_count, strength FROM memories WHERE group_id = ?", (group_id,))
             else:
-                cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories WHERE group_id = '' OR group_id IS NULL")
+                cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, emotion_intensity, emotion_duration, emotion_source, tags, created_at, last_accessed, access_count, strength FROM memories WHERE group_id = '' OR group_id IS NULL")
             memories = cursor.fetchall()
             for memory_data in memories:
                 self.memory_graph.add_memory(
@@ -1183,16 +1224,19 @@ class MemorySystem:
                     participants=memory_data[4] or "",
                     location=memory_data[5] or "",
                     emotion=memory_data[6] or "",
-                    tags=memory_data[7] or "",
-                    created_at=memory_data[8],
-                    last_accessed=memory_data[9],
-                    access_count=memory_data[10],
-                    strength=memory_data[11],
+                    emotion_intensity=memory_data[7] if len(memory_data) > 7 else 0.0,
+                    emotion_duration=memory_data[8] if len(memory_data) > 8 else 0.0,
+                    emotion_source=memory_data[9] if len(memory_data) > 9 else "",
+                    tags=memory_data[10] or "",
+                    created_at=memory_data[11],
+                    last_accessed=memory_data[12],
+                    access_count=memory_data[13],
+                    strength=memory_data[14],
                     group_id=group_id
                 )
                 
             # 加载连接
-            cursor.execute("SELECT id, from_concept, to_concept, strength, last_strengthened FROM connections")
+            cursor.execute("SELECT id, from_concept, to_concept, strength, last_strengthened, relation_type, is_directed, strength_level FROM connections")
             connections = cursor.fetchall()
             for conn_data in connections:
                 self.memory_graph.add_connection(
@@ -1200,7 +1244,10 @@ class MemorySystem:
                     to_concept=conn_data[2],
                     strength=conn_data[3],
                     connection_id=conn_data[0],
-                    last_strengthened=conn_data[4]
+                    last_strengthened=conn_data[4],
+                    relation_type=conn_data[5] if len(conn_data) > 5 else "association",
+                    is_directed=conn_data[6] if len(conn_data) > 6 else 0,
+                    strength_level=conn_data[7] if len(conn_data) > 7 else "medium"
                 )
                 
             # 释放连接回连接池
@@ -1235,20 +1282,44 @@ class MemorySystem:
                 for concept in self.memory_graph.concepts.values():
                     cursor.execute('''
                         INSERT OR REPLACE INTO concepts
-                        (id, name, created_at, last_accessed, access_count)
-                        VALUES (?, ?, ?, ?, ?)
-                    ''', (concept.id, concept.name, concept.created_at, concept.last_accessed, concept.access_count))
+                        (id, name, created_at, last_accessed, access_count, importance, abstraction, usage_frequency)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        concept.id,
+                        concept.name,
+                        concept.created_at,
+                        concept.last_accessed,
+                        getattr(concept, 'access_count', 0),
+                        getattr(concept, 'importance', 0.5),
+                        getattr(concept, 'abstraction', 0.5),
+                        getattr(concept, 'usage_frequency', 0)
+                    ))
                 
                 # 增量更新记忆
                 for memory in self.memory_graph.memories.values():
                     cursor.execute('''
                         INSERT OR REPLACE INTO memories
                         (id, concept_id, content, details, participants,
-                        location, emotion, tags, created_at, last_accessed, access_count, strength, group_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (memory.id, memory.concept_id, memory.content, memory.details,
-                         memory.participants, memory.location, memory.emotion, memory.tags,
-                         memory.created_at, memory.last_accessed, memory.access_count, memory.strength, group_id))
+                        location, emotion, emotion_intensity, emotion_duration, emotion_source, tags, created_at, last_accessed, access_count, strength, group_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        memory.id,
+                        memory.concept_id,
+                        memory.content,
+                        getattr(memory, 'details', ""),
+                        getattr(memory, 'participants', ""),
+                        getattr(memory, 'location', ""),
+                        getattr(memory, 'emotion', ""),
+                        getattr(memory, 'emotion_intensity', 0.0),
+                        getattr(memory, 'emotion_duration', 0.0),
+                        getattr(memory, 'emotion_source', ""),
+                        getattr(memory, 'tags', ""),
+                        memory.created_at,
+                        memory.last_accessed,
+                        getattr(memory, 'access_count', 0),
+                        getattr(memory, 'strength', 1.0),
+                        group_id
+                    ))
                 
                 # 增量更新连接
                 existing_connections = set()
@@ -1261,14 +1332,32 @@ class MemorySystem:
                     if conn_obj.id in existing_connections:
                         cursor.execute('''
                             UPDATE connections
-                            SET from_concept=?, to_concept=?, strength=?, last_strengthened=?
+                            SET from_concept=?, to_concept=?, strength=?, last_strengthened=?, relation_type=?, is_directed=?, strength_level=?
                             WHERE id=?
-                        ''', (conn_obj.from_concept, conn_obj.to_concept, conn_obj.strength, conn_obj.last_strengthened, conn_obj.id))
+                        ''', (
+                            conn_obj.from_concept,
+                            conn_obj.to_concept,
+                            float(getattr(conn_obj, 'strength', 1.0)),
+                            getattr(conn_obj, 'last_strengthened', time.time()),
+                            getattr(conn_obj, 'relation_type', 'association'),
+                            int(getattr(conn_obj, 'is_directed', 0)),
+                            getattr(conn_obj, 'strength_level', 'medium'),
+                            conn_obj.id
+                        ))
                     else:
                         cursor.execute('''
-                            INSERT INTO connections (id, from_concept, to_concept, strength, last_strengthened)
-                            VALUES (?, ?, ?, ?, ?)
-                        ''', (conn_obj.id, conn_obj.from_concept, conn_obj.to_concept, conn_obj.strength, conn_obj.last_strengthened))
+                            INSERT INTO connections (id, from_concept, to_concept, strength, last_strengthened, relation_type, is_directed, strength_level)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            conn_obj.id,
+                            conn_obj.from_concept,
+                            conn_obj.to_concept,
+                            float(getattr(conn_obj, 'strength', 1.0)),
+                            getattr(conn_obj, 'last_strengthened', time.time()),
+                            getattr(conn_obj, 'relation_type', 'association'),
+                            int(getattr(conn_obj, 'is_directed', 0)),
+                            getattr(conn_obj, 'strength_level', 'medium')
+                        ))
                 
                 # 提交事务
                 conn.commit()
@@ -1313,7 +1402,10 @@ class MemorySystem:
                         name TEXT NOT NULL,
                         created_at REAL,
                         last_accessed REAL,
-                        access_count INTEGER DEFAULT 0
+                        access_count INTEGER DEFAULT 0,
+                        importance REAL DEFAULT 0.5,
+                        abstraction REAL DEFAULT 0.5,
+                        usage_frequency INTEGER DEFAULT 0
                     )
                 ''')
                 self._debug_log(f"创建表: concepts", "debug")
@@ -1328,6 +1420,9 @@ class MemorySystem:
                         participants TEXT,
                         location TEXT,
                         emotion TEXT,
+                        emotion_intensity REAL DEFAULT 0.0,
+                        emotion_duration REAL DEFAULT 0.0,
+                        emotion_source TEXT DEFAULT "",
                         tags TEXT,
                         created_at REAL,
                         last_accessed REAL,
@@ -1359,6 +1454,9 @@ class MemorySystem:
                         to_concept TEXT NOT NULL,
                         strength REAL DEFAULT 1.0,
                         last_strengthened REAL,
+                        relation_type TEXT DEFAULT 'association',
+                        is_directed INTEGER DEFAULT 0,
+                        strength_level TEXT DEFAULT 'medium',
                         FOREIGN KEY (from_concept) REFERENCES concepts (id),
                         FOREIGN KEY (to_concept) REFERENCES concepts (id)
                     )
@@ -1458,6 +1556,10 @@ class MemorySystem:
                     participants = str(memory_data.get("participants", "")).strip()
                     location = str(memory_data.get("location", "")).strip()
                     emotion = str(memory_data.get("emotion", "")).strip()
+                    # 新增情感细粒度字段
+                    emotion_intensity = float(memory_data.get("emotion_intensity", 0.0) or 0.0)
+                    emotion_duration = float(memory_data.get("emotion_duration", 0.0) or 0.0)
+                    emotion_source = str(memory_data.get("emotion_source", "") or "")
                     tags = str(memory_data.get("tags", "")).strip()
                     confidence = float(memory_data.get("confidence", 0.7))
                     memory_type = str(memory_data.get("memory_type", "normal")).strip().lower()
@@ -1494,9 +1596,33 @@ class MemorySystem:
                             participants=participants,
                             location=location,
                             emotion=emotion,
+                            emotion_intensity=emotion_intensity,
+                            emotion_duration=emotion_duration,
+                            emotion_source=emotion_source,
                             tags=tags,
                             strength=adjusted_strength
                         )
+                        
+                        # 情感节点与关系：为每个情感词建立 Emotion 概念并建立有向关系
+                        if emotion:
+                            try:
+                                import re as _re
+                                em_list = [e.strip() for e in _re.split(r",|，", emotion) if e.strip()]
+                                if em_list:
+                                    for em in em_list:
+                                        emotion_concept_id = self.memory_graph.add_concept(f"Emotion:{em}")
+                                        # 将强度映射到连接强度，默认至少0.1
+                                        rel_strength = max(0.1, min(1.0, float(emotion_intensity or 0.0)))
+                                        self.memory_graph.add_connection(
+                                            concept_id,
+                                            emotion_concept_id,
+                                            strength=rel_strength,
+                                            relation_type="emotion",
+                                            is_directed=1,
+                                            strength_level=("strong" if rel_strength >= 0.75 else ("medium" if rel_strength >= 0.4 else "weak"))
+                                        )
+                            except Exception:
+                                pass
                         
                         themes.append(theme)
                         concept_ids.append(concept_id)
@@ -3262,6 +3388,9 @@ class BatchMemoryExtractor:
    - 参与者（participants）：涉及的人物，特别注意：如果发言者是[Bot]，则使用"我"或Bot的身份作为参与者；如果是用户，则使用用户名称
    - 地点（location）：相关场景
    - 情感（emotion）：情感色彩
+   - 情感强度（emotion_intensity）：0-1之间的数值
+   - 情感持续时间（emotion_duration）：单位秒
+   - 情感来源（emotion_source）：如"用户文本"/"Bot回复"/"事件"
    - 标签（tags）：分类标签
    - 置信度（confidence）：0-1之间的数值
    - 记忆类型（memory_type）："normal"（普通记忆）或"impression"（人物印象）
@@ -3286,6 +3415,9 @@ class BatchMemoryExtractor:
       "participants": "我,客户,项目经理",
       "location": "会议室",
       "emotion": "兴奋,满意",
+      "emotion_intensity": 0.8,
+      "emotion_duration": 120,
+      "emotion_source": "对话文本",
       "tags": "重要,成功",
       "confidence": 0.9,
       "memory_type": "normal"
@@ -3297,6 +3429,9 @@ class BatchMemoryExtractor:
       "participants": "我,张三",
       "location": "会议室",
       "emotion": "赞赏",
+      "emotion_intensity": 0.6,
+      "emotion_duration": 30,
+      "emotion_source": "用户文本",
       "tags": "印象,人际",
       "confidence": 0.8,
       "memory_type": "impression"
@@ -3308,6 +3443,9 @@ class BatchMemoryExtractor:
       "participants": "我,小王",
       "location": "公司食堂",
       "emotion": "轻松,愉快",
+      "emotion_intensity": 0.4,
+      "emotion_duration": 60,
+      "emotion_source": "对话文本",
       "tags": "日常,社交",
       "confidence": 0.5,
       "memory_type": "normal"
@@ -3481,6 +3619,30 @@ class BatchMemoryExtractor:
                     except (ValueError, TypeError):
                         emotion = ""
                     
+                    # 新增情感细粒度字段解析
+                    emotion_intensity = 0.0
+                    try:
+                        ei_val = mem.get("emotion_intensity", 0.0)
+                        if isinstance(ei_val, (int, float)):
+                            emotion_intensity = float(ei_val)
+                        elif isinstance(ei_val, str):
+                            emotion_intensity = float(ei_val)
+                    except (ValueError, TypeError):
+                        emotion_intensity = 0.0
+                    emotion_duration = 0.0
+                    try:
+                        ed_val = mem.get("emotion_duration", 0.0)
+                        if isinstance(ed_val, (int, float)):
+                            emotion_duration = float(ed_val)
+                        elif isinstance(ed_val, str):
+                            emotion_duration = float(ed_val)
+                    except (ValueError, TypeError):
+                        emotion_duration = 0.0
+                    try:
+                        emotion_source = str(mem.get("emotion_source", "") or "").strip()
+                    except (ValueError, TypeError):
+                        emotion_source = ""
+                    
                     tags = ""
                     try:
                         tags_val = mem.get("tags", "")
@@ -3506,6 +3668,9 @@ class BatchMemoryExtractor:
                             "participants": participants,
                             "location": location,
                             "emotion": emotion,
+                            "emotion_intensity": max(0.0, min(1.0, float(emotion_intensity))),
+                            "emotion_duration": max(0.0, float(emotion_duration)),
+                            "emotion_source": emotion_source,
                             "tags": tags,
                             "confidence": max(0.0, min(1.0, confidence)),
                             "memory_type": memory_type if memory_type in ["normal", "impression"] else "normal"
@@ -3564,7 +3729,8 @@ class MemoryGraph:
         self.adjacency_list: Dict[str, List[Tuple[str, float]]] = {}  # 邻接表优化
         
     def add_concept(self, name: str, concept_id: str = None, created_at: float = None,
-                   last_accessed: float = None, access_count: int = 0) -> str:
+                   last_accessed: float = None, access_count: int = 0,
+                   importance: float = 0.5, abstraction: float = 0.5, usage_frequency: int = 0) -> str:
         """添加概念节点"""
         if concept_id is None:
             concept_id = f"concept_{int(time.time() * 1000)}"
@@ -3575,7 +3741,10 @@ class MemoryGraph:
                 name=name,
                 created_at=created_at,
                 last_accessed=last_accessed,
-                access_count=access_count
+                access_count=access_count,
+                importance=float(importance),
+                abstraction=float(abstraction),
+                usage_frequency=int(usage_frequency)
             )
             self.concepts[concept_id] = concept
             if concept_id not in self.adjacency_list:
@@ -3585,7 +3754,8 @@ class MemoryGraph:
     
     def add_memory(self, content: str, concept_id: str, memory_id: str = None,
                    details: str = "", participants: str = "", location: str = "",
-                   emotion: str = "", tags: str = "", created_at: float = None,
+                   emotion: str = "", emotion_intensity: float = 0.0, emotion_duration: float = 0.0,
+                   emotion_source: str = "", tags: str = "", created_at: float = None,
                    last_accessed: float = None, access_count: int = 0,
                    strength: float = 1.0, group_id: str = "") -> str:
         """添加记忆"""
@@ -3600,6 +3770,9 @@ class MemoryGraph:
             participants=participants,
             location=location,
             emotion=emotion,
+            emotion_intensity=float(emotion_intensity or 0.0),
+            emotion_duration=float(emotion_duration or 0.0),
+            emotion_source=str(emotion_source or ""),
             tags=tags,
             created_at=created_at,
             last_accessed=last_accessed,
@@ -3616,25 +3789,39 @@ class MemoryGraph:
         return memory_id
     def add_connection(self, from_concept: str, to_concept: str,
                       strength: float = 1.0, connection_id: str = None,
-                      last_strengthened: float = None) -> str:
+                      last_strengthened: float = None,
+                      relation_type: str = "association",
+                      is_directed: int = 0,
+                      strength_level: str = "medium") -> str:
         """添加连接"""
         if connection_id is None:
             connection_id = f"conn_{from_concept}_{to_concept}"
         
         # 检查是否已存在
         for conn in self.connections:
-            if (conn.from_concept == from_concept and conn.to_concept == to_concept) or \
-               (conn.from_concept == to_concept and conn.to_concept == from_concept):
-                conn.strength += 0.1
-                conn.last_strengthened = time.time()
-                return conn.id
+            if int(is_directed) == 1 or getattr(conn, 'is_directed', 0) == 1:
+                # 有向关系，仅在相同方向上合并
+                if conn.from_concept == from_concept and conn.to_concept == to_concept:
+                    conn.strength += 0.1
+                    conn.last_strengthened = time.time()
+                    return conn.id
+            else:
+                # 无向关系，双向视为同一条
+                if (conn.from_concept == from_concept and conn.to_concept == to_concept) or \
+                   (conn.from_concept == to_concept and conn.to_concept == from_concept):
+                    conn.strength += 0.1
+                    conn.last_strengthened = time.time()
+                    return conn.id
         
         connection = Connection(
             id=connection_id,
             from_concept=from_concept,
             to_concept=to_concept,
             strength=strength,
-            last_strengthened=last_strengthened or time.time()
+            last_strengthened=last_strengthened or time.time(),
+            relation_type=relation_type,
+            is_directed=int(is_directed or 0),
+            strength_level=strength_level
         )
         self.connections.append(connection)
         
@@ -3644,9 +3831,10 @@ class MemoryGraph:
         if to_concept not in self.adjacency_list:
             self.adjacency_list[to_concept] = []
         
-        # 添加双向连接
+        # 根据方向添加连接
         self.adjacency_list[from_concept].append((to_concept, strength))
-        self.adjacency_list[to_concept].append((from_concept, strength))
+        if int(is_directed) == 0:
+            self.adjacency_list[to_concept].append((from_concept, strength))
         
         return connection_id
     
@@ -3693,6 +3881,9 @@ class MemoryGraph:
             "participants",
             "location",
             "emotion",
+            "emotion_intensity",
+            "emotion_duration",
+            "emotion_source",
             "tags",
             "strength",
             "concept_id",
@@ -3759,6 +3950,9 @@ class Concept:
     created_at: float = None
     last_accessed: float = None
     access_count: int = 0
+    importance: float = 0.5  # 概念重要性
+    abstraction: float = 0.5  # 概念抽象度
+    usage_frequency: int = 0  # 使用频率
     
     def __post_init__(self):
         if self.created_at is None:
@@ -3777,6 +3971,9 @@ class Memory:
     participants: str = ""  # 参与者
     location: str = ""  # 地点
     emotion: str = ""  # 情感
+    emotion_intensity: float = 0.0  # 情感强度
+    emotion_duration: float = 0.0  # 情感持续时间（秒）
+    emotion_source: str = ""  # 情感来源（文本/事件/人物等）
     tags: str = ""  # 标签
     created_at: float = None
     last_accessed: float = None
@@ -3799,6 +3996,9 @@ class Connection:
     to_concept: str
     strength: float = 1.0
     last_strengthened: float = None
+    relation_type: str = "association"  # 关系类型：association/causal/temporal/hierarchical/similar/opposite/emotion
+    is_directed: int = 0  # 0=无向,1=有向
+    strength_level: str = "medium"  # 强/中/弱: strong/medium/weak
     
     def __post_init__(self):
         if self.last_strengthened is None:

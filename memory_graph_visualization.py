@@ -347,6 +347,10 @@ class MemoryGraphVisualizer:
                 else:
                     # 否则只显示最后一部分
                     display = name.split(":")[-1] if ":" in name else name
+            elif name.startswith("Emotion:"):
+                # 情感概念: 使用紫色系
+                node_colors.append("#ab47bc")  # purple 400
+                display = name.split(":", 1)[-1] if ":" in name else name
             elif max_s >= 0.8:
                 node_colors.append("#66bb6a")  # green 400
                 display = (name.split(",")[0]).strip()
