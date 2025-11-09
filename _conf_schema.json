@@ -126,5 +126,34 @@
     "type": "int",
     "hint": "每隔多少轮对话形成一次记忆。",
     "default": 15
+  },
+  "web_ui": {
+    "description": "Web 界面",
+    "type": "object",
+    "hint": "配置内置 Web 管理界面 (实验性)",
+    "items": {
+      "enabled": {
+        "description": "启用Web界面",
+        "type": "bool",
+        "default": false,
+        "obvious_hint": true
+      },
+      "host": {
+        "description": "监听地址",
+        "type": "string",
+        "default": "127.0.0.1"
+      },
+      "port": {
+        "description": "端口",
+        "type": "int",
+        "default": 8350
+      },
+      "access_token": {
+        "description": "访问令牌(可选)",
+        "type": "string",
+        "hint": "如设置，访问 /api/* 需在 Header 中携带 x-access-token",
+        "default": ""
+      }
+    }
   }
 }
