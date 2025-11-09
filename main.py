@@ -22,6 +22,7 @@ from astrbot.api import AstrBotConfig
 from astrbot.api.star import StarTools
 from .resource_management import resource_manager
 from .web_server import MemoryWebServer
+from .enhanced_kg_integration import EnhancedKGIntegration
 
 @register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.6", "https://github.com/qa296/astrbot_plugin_memora_connect")
 class MemoraConnectPlugin(Star):
@@ -31,6 +32,7 @@ class MemoraConnectPlugin(Star):
         self.memory_system = MemorySystem(context, config, data_dir)
         self.memory_display = EnhancedMemoryDisplay(self.memory_system)
         self.graph_visualizer = MemoryGraphVisualizer(self.memory_system)
+        self.kg_integration = EnhancedKGIntegration(self.memory_system)
         self._initialized = False
         self.web_server = None
         asyncio.create_task(self._async_init())
@@ -198,6 +200,162 @@ class MemoraConnectPlugin(Star):
         except Exception as e:
             logger.error(f"生成记忆图谱失败: {e}", exc_info=True)
             yield event.plain_result(f"❌ 生成记忆图谱时出现错误: {str(e)}")
+    
+    @memory.command("情感")
+    async def memory_emotion(self, event: AstrMessageEvent, user_name: str = ""):
+        """查询用户或自己的情感趋势
+        
+        Args:
+            user_name: 用户名称（可选，默认查询自己）
+        """
+        if not self.memory_system.config_manager.is_memory_system_enabled():
+            yield event.plain_result("记忆系统已禁用，无法查询情感。")
+            return
+        
+        try:
+            # 获取群组ID
+            group_id = self.memory_system._extract_group_id_from_event(event)
+            
+            # 确定查询的用户ID
+            if not user_name:
+                # 查询发送者自己
+                user_id = event.get_sender_id()
+                user_name = event.get_sender_name() or "你"
+            else:
+                # 查询指定用户（简化处理，使用名称作为ID）
+                user_id = user_name
+            
+            # 获取情感摘要
+            emotion_summary = self.kg_integration.get_user_emotion_summary(user_id, group_id)
+            
+            if not emotion_summary or not emotion_summary.get("recent_emotions"):
+                yield event.plain_result(f"📊 尚未记录 {user_name} 的情感信息")
+                return
+            
+            # 格式化响应
+            response_parts = []
+            response_parts.append(f"📊 {user_name} 的情感分析:")
+            
+            # 情感趋势
+            trend = emotion_summary.get("emotion_trend", {})
+            if trend:
+                trend_desc = trend.get("trend", "中性")
+                avg_intensity = trend.get("average_intensity", 0.5)
+                dominant = trend.get("dominant_emotion", "无")
+                variability = trend.get("emotion_variability", 0.0)
+                
+                response_parts.append(f"\n🔄 情感趋势: {trend_desc}")
+                response_parts.append(f"   平均强度: {avg_intensity:.2f}")
+                response_parts.append(f"   主导情感: {dominant}")
+                response_parts.append(f"   情感变化: {'稳定' if variability < 0.2 else '波动' if variability < 0.4 else '剧烈'}")
+            
+            # 主导情感分布
+            dominant_emotions = emotion_summary.get("dominant_emotions", [])
+            if dominant_emotions:
+                response_parts.append(f"\n💫 情感分布:")
+                for i, (emotion, score) in enumerate(dominant_emotions[:5], 1):
+                    response_parts.append(f"   {i}. {emotion}: {score:.2f}")
+            
+            # 情感触发器
+            top_triggers = emotion_summary.get("top_triggers", [])
+            if top_triggers:
+                response_parts.append(f"\n🎯 情感触发器:")
+                for i, (trigger, count) in enumerate(top_triggers, 1):
+                    response_parts.append(f"   {i}. {trigger} (触发{count}次)")
+            
+            # 最近情感
+            recent = emotion_summary.get("recent_emotions", [])
+            if recent:
+                response_parts.append(f"\n📝 最近情感 (最近{len(recent)}条):")
+                for i, em in enumerate(recent[-3:], 1):  # 只显示最近3条
+                    primary = em.get("primary_emotion", "未知")
+                    intensity = em.get("emotion_intensity", 0.5)
+                    source = em.get("emotion_source", "")
+                    source_str = f" - {source}" if source else ""
+                    response_parts.append(f"   {i}. {primary} (强度: {intensity:.2f}){source_str}")
+            
+            response = "\n".join(response_parts)
+            yield event.plain_result(response)
+            
+        except Exception as e:
+            logger.error(f"查询情感失败: {e}", exc_info=True)
+            yield event.plain_result(f"查询情感时出现错误: {str(e)}")
+    
+    @memory.command("关系")
+    async def memory_relationship(self, event: AstrMessageEvent, concept_name: str):
+        """探索概念的关系网络
+        
+        Args:
+            concept_name: 概念名称
+        """
+        if not self.memory_system.config_manager.is_memory_system_enabled():
+            yield event.plain_result("记忆系统已禁用，无法探索关系。")
+            return
+        
+        try:
+            # 查找概念
+            target_concept = None
+            for concept in self.memory_system.memory_graph.concepts.values():
+                if concept_name.lower() in concept.name.lower():
+                    target_concept = concept
+                    break
+            
+            if not target_concept:
+                yield event.plain_result(f"❌ 未找到概念: {concept_name}")
+                return
+            
+            # 获取相关连接
+            related_connections = [
+                conn for conn in self.memory_system.memory_graph.connections
+                if conn.from_concept == target_concept.id or conn.to_concept == target_concept.id
+            ]
+            
+            if not related_connections:
+                yield event.plain_result(f"📊 概念 '{target_concept.name}' 暂无关联")
+                return
+            
+            # 格式化响应
+            response_parts = []
+            response_parts.append(f"🔗 概念 '{target_concept.name}' 的关系网络:")
+            
+            # 获取概念属性
+            concept_attr = self.kg_integration.get_concept_attributes(target_concept.id)
+            if concept_attr:
+                response_parts.append(f"\n📌 概念属性:")
+                response_parts.append(f"   重要性: {concept_attr.importance:.2f}")
+                response_parts.append(f"   抽象度: {concept_attr.abstraction_level:.2f}")
+                response_parts.append(f"   类型: {concept_attr.concept_type}")
+            
+            # 分析关系
+            response_parts.append(f"\n🌐 关联概念 (共{len(related_connections)}个):")
+            
+            for i, conn in enumerate(related_connections[:10], 1):  # 最多显示10个
+                # 确定另一端的概念
+                other_id = conn.to_concept if conn.from_concept == target_concept.id else conn.from_concept
+                other_concept = self.memory_system.memory_graph.concepts.get(other_id)
+                
+                if not other_concept:
+                    continue
+                
+                # 获取连接元数据
+                conn_meta = self.kg_integration.get_connection_metadata(conn.id)
+                
+                # 格式化关系信息
+                strength_desc = "强" if conn.strength >= 0.7 else "中" if conn.strength >= 0.4 else "弱"
+                rel_type = conn_meta.relationship_type if conn_meta else "关联"
+                
+                response_parts.append(f"   {i}. {other_concept.name}")
+                response_parts.append(f"      关系: {rel_type} | 强度: {strength_desc} ({conn.strength:.2f})")
+                
+                if conn_meta and conn_meta.description:
+                    response_parts.append(f"      说明: {conn_meta.description}")
+            
+            response = "\n".join(response_parts)
+            yield event.plain_result(response)
+            
+        except Exception as e:
+            logger.error(f"探索关系失败: {e}", exc_info=True)
+            yield event.plain_result(f"探索关系时出现错误: {str(e)}")
     
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
@@ -883,18 +1041,22 @@ class MemorySystem:
         # 使用AstrBot标准数据目录
         if data_dir:
             self.db_path = str(data_dir / "memory.db")
+            self.enhanced_data_path = str(data_dir / "enhanced_kg_data.json")
         else:
             data_dir = StarTools.get_data_dir() / "memora_connect"
             self.db_path = str(data_dir / "memory.db")
+            self.enhanced_data_path = str(data_dir / "enhanced_kg_data.json")
         
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         logger.info(f"记忆数据库路径: {self.db_path}")
+        logger.info(f"增强数据路径: {self.enhanced_data_path}")
         
         self.memory_graph = MemoryGraph()
         self.llm_provider = None
         self.embedding_provider = None
         self.batch_extractor = BatchMemoryExtractor(self)
         self.embedding_cache = None  # 嵌入向量缓存管理器
+        self.kg_integration = None  # 知识图谱增强集成（延迟初始化）
         
         # 印象系统配置
         self.impression_config = {
@@ -1210,6 +1372,17 @@ class MemorySystem:
             group_info = f" (群: {group_id})" if group_id else ""
             self._debug_log(f"记忆系统加载{group_info}，包含 {len(concepts)} 个概念，{len(memories)} 条记忆", "debug")
             
+            # 加载增强数据（仅主数据库）
+            if not group_id and hasattr(self, 'kg_integration') and self.kg_integration:
+                try:
+                    if os.path.exists(self.enhanced_data_path):
+                        with open(self.enhanced_data_path, 'r', encoding='utf-8') as f:
+                            enhanced_data = json.load(f)
+                        self.kg_integration.load_enhanced_data(enhanced_data)
+                        self._debug_log("增强数据加载完成", "debug")
+                except Exception as load_e:
+                    self._debug_log(f"加载增强数据失败: {load_e}", "warning")
+            
         except Exception as e:
             self._debug_log(f"状态加载异常: {e}", "error")
 
@@ -1279,6 +1452,16 @@ class MemorySystem:
                 # 简化的保存完成日志
                 group_info = f" (群: {group_id})" if group_id else ""
                 self._debug_log(f"记忆保存完成{group_info}: {len(self.memory_graph.concepts)}个概念, {len(self.memory_graph.memories)}条记忆", "debug")
+                
+                # 保存增强数据（仅主数据库）
+                if not group_id and hasattr(self, 'kg_integration') and self.kg_integration:
+                    try:
+                        enhanced_data = self.kg_integration.save_enhanced_data()
+                        with open(self.enhanced_data_path, 'w', encoding='utf-8') as f:
+                            json.dump(enhanced_data, f, ensure_ascii=False, indent=2)
+                        self._debug_log("增强数据保存完成", "debug")
+                    except Exception as save_e:
+                        self._debug_log(f"保存增强数据失败: {save_e}", "warning")
                 
             except Exception as e:
                 try:
@@ -1462,6 +1645,22 @@ class MemorySystem:
                     confidence = float(memory_data.get("confidence", 0.7))
                     memory_type = str(memory_data.get("memory_type", "normal")).strip().lower()
                     
+                    # 增强情感分析
+                    if emotion:
+                        emotion_enhanced = self.kg_integration.enhance_memory_with_emotion(
+                            content=content,
+                            emotion_str=emotion,
+                            context=details
+                        )
+                        # 记录用户情感
+                        if emotion_enhanced.get("emotion_analysis"):
+                            sender_id = event.get_sender_id()
+                            self.kg_integration.record_user_emotion(
+                                sender_id,
+                                emotion_enhanced["emotion_analysis"],
+                                group_id
+                            )
+                    
                     # 验证数据完整性
                     if not theme or not content:
                         continue
@@ -1515,6 +1714,18 @@ class MemorySystem:
                 for concept_id in concept_ids:
                     try:
                         self.establish_connections(concept_id, themes)
+                        # 增强概念属性
+                        concept = self.memory_graph.concepts.get(concept_id)
+                        if concept:
+                            concept_memories = [m for m in self.memory_graph.memories.values() if m.concept_id == concept_id]
+                            concept_connections = [c for c in self.memory_graph.connections if c.from_concept == concept_id or c.to_concept == concept_id]
+                            self.kg_integration.enhance_concept_with_attributes(
+                                concept_id=concept_id,
+                                concept_name=concept.name,
+                                access_count=concept.access_count,
+                                connection_count=len(concept_connections),
+                                memory_count=len(concept_memories)
+                            )
                     except Exception:
                         continue
             
@@ -1750,7 +1961,26 @@ class MemorySystem:
                             break
                     
                     if other_concept and other_concept.id != concept_id:
-                        self.memory_graph.add_connection(concept_id, other_concept.id)
+                        conn_id = self.memory_graph.add_connection(concept_id, other_concept.id)
+                        
+                        # 增强关系类型
+                        if hasattr(self, 'kg_integration'):
+                            # 获取连接对象
+                            conn_obj = None
+                            for conn in self.memory_graph.connections:
+                                if conn.id == conn_id:
+                                    conn_obj = conn
+                                    break
+                            
+                            if conn_obj:
+                                rel_metadata = self.kg_integration.enhance_connection_with_relationship(
+                                    from_concept_name=current_concept.name,
+                                    to_concept_name=other_concept.name,
+                                    strength=conn_obj.strength,
+                                    context=""
+                                )
+                                # 缓存关系元数据
+                                self.kg_integration.connection_metadata_cache[conn_id] = rel_metadata
                         
         except Exception as e:
             logger.error(f"建立概念连接时出错: {e}, 概念ID: {concept_id}, 主题: {themes}")
