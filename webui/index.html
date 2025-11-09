@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Memora Connect Web</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://unpkg.com/cytoscape@3.26.0/dist/cytoscape.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Memora Connect Web</h1>
+    <div class="toolbar">
+      <label>访问令牌: <input type="password" id="tokenInput" placeholder="如果配置了 access_token 则需填写"></label>
+      <label>群组: <select id="groupSelect"></select></label>
+      <button id="refreshBtn">刷新</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>记忆图谱</h2>
+      <div id="graph"></div>
+    </section>
+    <section class="panel">
+      <h2>概念与记忆</h2>
+      <div class="two-col">
+        <div>
+          <h3>概念</h3>
+          <div class="list" id="conceptList"></div>
+          <div class="form">
+            <input type="text" id="newConceptName" placeholder="新概念名称">
+            <button id="addConceptBtn">添加概念</button>
+          </div>
+        </div>
+        <div>
+          <h3>记忆</h3>
+          <div class="form">
+            <input type="text" id="memContent" placeholder="内容">
+            <input type="text" id="memDetails" placeholder="细节">
+            <input type="text" id="memParticipants" placeholder="参与者">
+            <input type="text" id="memTags" placeholder="标签">
+            <input type="text" id="memEmotion" placeholder="情感">
+            <input type="text" id="memLocation" placeholder="地点">
+            <input type="number" id="memStrength" placeholder="强度(0-1)" step="0.1" min="0" max="1">
+            <button id="addMemoryBtn">添加记忆(使用选中概念)</button>
+          </div>
+          <div class="list" id="memoryList"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>连接</h2>
+      <div class="form">
+        <input type="text" id="connFrom" placeholder="from 概念ID">
+        <input type="text" id="connTo" placeholder="to 概念ID">
+        <input type="number" id="connStrength" placeholder="强度(0-1)" value="1" step="0.1" min="0" max="1">
+        <button id="addConnBtn">添加连接</button>
+      </div>
+      <div class="list" id="connList"></div>
+    </section>
+
+    <section class="panel">
+      <h2>人物印象</h2>
+      <div class="form">
+        <input type="text" id="impPerson" placeholder="人物">
+        <input type="text" id="impSummary" placeholder="摘要">
+        <input type="number" id="impScore" placeholder="分数(0-1)" step="0.1" min="0" max="1">
+        <input type="text" id="impDetails" placeholder="详细">
+        <button id="addImpBtn">记录/更新印象</button>
+      </div>
+      <div class="list" id="impList"></div>
+    </section>
+  </main>
+
+  <footer>
+    <small>Memora Connect Web UI</small>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

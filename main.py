@@ -21,6 +21,7 @@ from astrbot.api import logger
 from astrbot.api import AstrBotConfig
 from astrbot.api.star import StarTools
 from .resource_management import resource_manager
+from .web_server import MemoryWebServer
 
 @register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.6", "https://github.com/qa296/astrbot_plugin_memora_connect")
 class MemoraConnectPlugin(Star):
@@ -31,6 +32,7 @@ class MemoraConnectPlugin(Star):
         self.memory_display = EnhancedMemoryDisplay(self.memory_system)
         self.graph_visualizer = MemoryGraphVisualizer(self.memory_system)
         self._initialized = False
+        self.web_server = None
         asyncio.create_task(self._async_init())
     
     def _debug_log(self, message: str, level: str = "debug"):
@@ -54,6 +56,18 @@ class MemoraConnectPlugin(Star):
             logger.info("开始异步初始化记忆系统...")
             await self.memory_system.initialize()
             self._initialized = True
+            # 根据配置启动 Web 界面
+            try:
+                web_cfg = (self.memory_system.memory_config or {}).get("web_ui", {}) or {}
+                if web_cfg.get("enabled", False):
+                    host = str(web_cfg.get("host", "127.0.0.1"))
+                    port = int(web_cfg.get("port", 8350))
+                    token = str(web_cfg.get("access_token", "") or "")
+                    self.web_server = MemoryWebServer(self.memory_system, host=host, port=port, access_token=token)
+                    await self.web_server.start()
+                    logger.info(f"Web 界面已启动: http://{host}:{port}")
+            except Exception as _we:
+                logger.error(f"启动Web界面失败: {_we}", exc_info=True)
             logger.info("记忆系统异步初始化完成")
         except Exception as e:
             logger.error(f"记忆系统初始化失败: {e}", exc_info=True)
@@ -267,6 +281,12 @@ class MemoraConnectPlugin(Star):
         self._debug_log("开始插件终止流程，清理所有资源", "info")
         
         try:
+            # 停止 Web 服务
+            if hasattr(self, 'web_server') and self.web_server:
+                try:
+                    await self.web_server.stop()
+                except Exception as _we:
+                    logger.warning(f"停止Web服务失败: {_we}")
             # 1. 停止维护循环
             if hasattr(self.memory_system, '_should_stop_maintenance'):
                 self.memory_system._should_stop_maintenance.set()
@@ -3660,6 +3680,71 @@ class MemoryGraph:
         """移除记忆"""
         if memory_id in self.memories:
             del self.memories[memory_id]
+
+    def update_memory(self, memory_id: str, **fields) -> bool:
+        """更新记忆字段。支持: content, details, participants, location, emotion, tags, strength, concept_id, last_accessed, created_at
+        返回是否更新成功"""
+        mem = self.memories.get(memory_id)
+        if not mem:
+            return False
+        allowed = {
+            "content",
+            "details",
+            "participants",
+            "location",
+            "emotion",
+            "tags",
+            "strength",
+            "concept_id",
+            "last_accessed",
+            "created_at",
+        }
+        for k, v in fields.items():
+            if k in allowed and v is not None:
+                setattr(mem, k, v)
+        return True
+
+    def set_connection_strength(self, connection_id: str, strength: float) -> bool:
+        """设置连接强度并同步更新邻接表"""
+        target = None
+        for conn in self.connections:
+            if conn.id == connection_id:
+                target = conn
+                break
+        if not target:
+            return False
+        # 更新连接对象
+        target.strength = float(strength)
+        # 更新邻接表中两端的权重
+        if target.from_concept in self.adjacency_list:
+            self.adjacency_list[target.from_concept] = [
+                (n, float(strength) if n == target.to_concept else s)
+                for (n, s) in self.adjacency_list[target.from_concept]
+            ]
+        if target.to_concept in self.adjacency_list:
+            self.adjacency_list[target.to_concept] = [
+                (n, float(strength) if n == target.from_concept else s)
+                for (n, s) in self.adjacency_list[target.to_concept]
+            ]
+        return True
+
+    def remove_concept(self, concept_id: str) -> bool:
+        """删除概念及其相关记忆与连接，并更新邻接表"""
+        if concept_id not in self.concepts:
+            return False
+        # 移除相关连接
+        to_remove = [c.id for c in self.connections if c.from_concept == concept_id or c.to_concept == concept_id]
+        for cid in to_remove:
+            self.remove_connection(cid)
+        # 移除相关记忆
+        mem_ids = [m.id for m in self.memories.values() if m.concept_id == concept_id]
+        for mid in mem_ids:
+            self.remove_memory(mid)
+        # 移除概念和邻接表
+        if concept_id in self.adjacency_list:
+            del self.adjacency_list[concept_id]
+        del self.concepts[concept_id]
+        return True
     
     def get_neighbors(self, concept_id: str) -> List[Tuple[str, float]]:
         """获取概念节点的邻居及其连接强度"""
