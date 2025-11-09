@@ -1205,15 +1205,38 @@ class MemorySystem:
                     ''', (concept.id, concept.name, concept.created_at, concept.last_accessed, concept.access_count))
                 
                 # 增量更新记忆
+                # 动态适配列，避免列数不匹配导致的插入失败
+                cursor.execute("PRAGMA table_info('memories')")
+                memories_columns = [row[1] for row in cursor.fetchall()]
+                desired_order = [
+                    "id", "concept_id", "content", "details", "participants",
+                    "location", "emotion", "tags", "created_at", "last_accessed",
+                    "access_count", "strength", "group_id"
+                ]
+                available_columns = [c for c in desired_order if c in memories_columns]
                 for memory in self.memory_graph.memories.values():
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO memories
-                        (id, concept_id, content, details, participants,
-                        location, emotion, tags, created_at, last_accessed, access_count, strength, group_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (memory.id, memory.concept_id, memory.content, memory.details,
-                         memory.participants, memory.location, memory.emotion, memory.tags,
-                         memory.created_at, memory.last_accessed, memory.access_count, memory.strength, group_id))
+                    value_map = {
+                        "id": memory.id,
+                        "concept_id": memory.concept_id,
+                        "content": memory.content,
+                        "details": memory.details,
+                        "participants": memory.participants,
+                        "location": memory.location,
+                        "emotion": memory.emotion,
+                        "tags": memory.tags,
+                        "created_at": memory.created_at,
+                        "last_accessed": memory.last_accessed,
+                        "access_count": memory.access_count,
+                        "strength": memory.strength,
+                        "group_id": group_id
+                    }
+                    cols_str = ", ".join(available_columns)
+                    placeholders = ", ".join(["?"] * len(available_columns))
+                    values = tuple(value_map.get(col) for col in available_columns)
+                    cursor.execute(f'''
+                        INSERT OR REPLACE INTO memories ({cols_str})
+                        VALUES ({placeholders})
+                    ''', values)
                 
                 # 增量更新连接
                 existing_connections = set()
@@ -3172,20 +3195,64 @@ class BatchMemoryExtractor:
                 system_prompt="你是一个人物印象提取助手"
             )
             
-            data = json.loads(response.completion_text)
-            impressions = data.get("impressions", [])
+            resp_text = getattr(response, "completion_text", "") if response else ""
+            if not resp_text or not str(resp_text).strip():
+                return []
+            
+            data = None
+            try:
+                data = json.loads(resp_text)
+            except Exception:
+                cleaned_text = str(resp_text)
+                for old, new in [("“", '"'), ("”", '"'), ("‘", "'"), ("’", "'"), ("，", ","), ("：", ":")]:
+                    cleaned_text = cleaned_text.replace(old, new)
+                json_patterns = [
+                    r'\{[^{}]*"impressions"[^{}]*\}',
+                    r'\{.*"impressions"\s*:\s*\[.*\].*\}',
+                    r'\{.*\}',
+                ]
+                json_str = None
+                for pattern in json_patterns:
+                    matches = re.findall(pattern, cleaned_text, re.DOTALL)
+                    if matches:
+                        json_str = matches[-1]
+                        break
+                if json_str:
+                    json_str = re.sub(r',\s*}', '}', json_str)
+                    json_str = re.sub(r',\s*]', ']', json_str)
+                    json_str = re.sub(r'([{,]\s*)(\w+):', r'\1"\2":', json_str)
+                    try:
+                        data = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        json_str = re.sub(r'([{,]\s*)"([^"]*)"\s*:\s*([^",}\]]+)([,\}])', r'\1"\2": "\3"\4', json_str)
+                        data = json.loads(json_str)
+                else:
+                    return []
+            
+            impressions = data.get("impressions", []) if isinstance(data, dict) else []
             
             # 过滤有效印象
             valid_impressions = []
             for impression in impressions:
-                if impression.get("person_name") and impression.get("summary"):
-                    valid_impressions.append({
-                        "person_name": str(impression["person_name"]),
-                        "summary": str(impression["summary"]),
-                        "score": float(impression.get("score", 0.5)),
-                        "details": str(impression.get("details", "")),
-                        "confidence": float(impression.get("confidence", 0.7))
-                    })
+                try:
+                    if impression.get("person_name") and impression.get("summary"):
+                        person_name = str(impression.get("person_name", "")).strip()
+                        summary = str(impression.get("summary", "")).strip()
+                        if not person_name or not summary:
+                            continue
+                        score_val = impression.get("score", 0.5)
+                        conf_val = impression.get("confidence", 0.7)
+                        score = float(score_val) if isinstance(score_val, (int, float, str)) and str(score_val).strip() != '' else 0.5
+                        confidence = float(conf_val) if isinstance(conf_val, (int, float, str)) and str(conf_val).strip() != '' else 0.7
+                        valid_impressions.append({
+                            "person_name": person_name,
+                            "summary": summary,
+                            "score": score,
+                            "details": str(impression.get("details", "")),
+                            "confidence": confidence
+                        })
+                except Exception:
+                    continue
             
             return valid_impressions
             
