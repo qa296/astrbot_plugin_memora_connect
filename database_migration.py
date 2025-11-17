@@ -90,11 +90,17 @@ class SmartDatabaseMigration:
         self.last_error = None
         
     async def run_smart_migration(self) -> bool:
-        """智能迁移主入口 - 无需版本号"""
-        return await self._run_migration_with_retry(self._run_smart_migration_internal)
+        """智能迁移主入口 - 无需版本号
+        将重迁移的重型同步逻辑放到后台线程，避免阻塞事件循环。
+        """
+        return await asyncio.to_thread(self.run_smart_migration_sync)
+    
+    def run_smart_migration_sync(self) -> bool:
+        """同步版本的智能迁移主入口（用于在线程中执行）"""
+        return self._run_migration_with_retry_sync(self._run_smart_migration_internal_sync)
     
     async def _run_migration_with_retry(self, migration_func) -> bool:
-        """带重试机制的迁移执行"""
+        """带重试机制的迁移执行（保留异步接口以兼容旧代码）"""
         for attempt in range(self.max_retries):
             try:
                 logger.info(f"开始数据库迁移 (尝试 {attempt + 1}/{self.max_retries})")
@@ -118,8 +124,33 @@ class SmartDatabaseMigration:
         logger.error("所有迁移尝试都失败，进入回退模式")
         return await self._enter_fallback_mode()
     
+    def _run_migration_with_retry_sync(self, migration_func: Callable[[], bool]) -> bool:
+        """带重试机制的迁移执行（同步版，用于线程中）"""
+        for attempt in range(self.max_retries):
+            try:
+                logger.info(f"开始数据库迁移 (尝试 {attempt + 1}/{self.max_retries})")
+                result = migration_func()
+                if result:
+                    logger.info("数据库迁移成功")
+                    return True
+                else:
+                    logger.warning(f"数据库迁移失败 (尝试 {attempt + 1}/{self.max_retries})")
+                    if attempt < self.max_retries - 1:
+                        time.sleep(self.retry_delay)
+                    continue
+            except Exception as e:
+                self.last_error = str(e)
+                logger.error(f"数据库迁移异常 (尝试 {attempt + 1}/{self.max_retries}): {e}", exc_info=True)
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay)
+                continue
+        
+        # 所有重试都失败，进入回退模式
+        logger.error("所有迁移尝试都失败，进入回退模式")
+        return self._enter_fallback_mode_sync()
+    
     async def _run_smart_migration_internal(self) -> bool:
-        """智能迁移内部实现"""
+        """智能迁移内部实现（异步版，保留兼容）"""
         try:
             if not os.path.exists(self.db_path):
                 logger.info("数据库不存在，将创建新数据库")
@@ -163,12 +194,61 @@ class SmartDatabaseMigration:
                 self._rollback(backup_path)
             return False
     
+    def _run_smart_migration_internal_sync(self) -> bool:
+        """智能迁移内部实现（同步版）"""
+        try:
+            if not os.path.exists(self.db_path):
+                logger.info("数据库不存在，将创建新数据库")
+                # 创建新数据库时，直接使用新结构，无需迁移
+                self._create_new_structure(self.db_path)
+                return True
+                
+            # 1. 分析现有数据库结构
+            current_schema = self._analyze_current_schema()
+            
+            # 2. 生成目标数据库结构
+            target_schema = self._generate_target_schema()
+            
+            # 3. 智能差异检测
+            schema_diff = self._calculate_schema_diff(current_schema, target_schema)
+            
+            if not schema_diff.has_changes():
+                logger.info("数据库结构已是最新，无需迁移")
+                return True
+                
+            # 4. 创建备份
+            backup_path = self._create_smart_backup()
+            logger.info(f"已创建备份: {backup_path}")
+            
+            # 5. 执行智能迁移
+            success = self._execute_smart_migration_sync(schema_diff)
+            
+            if success:
+                logger.info("智能迁移成功完成")
+                return True
+            else:
+                logger.error("迁移失败，正在回滚...")
+                self._rollback(backup_path)
+                return False
+                
+        except Exception as e:
+            self.last_error = str(e)
+            logger.error(f"智能迁移失败: {e}", exc_info=True)
+            # 如果发生异常，也尝试回滚
+            if 'backup_path' in locals() and os.path.exists(backup_path):
+                self._rollback(backup_path)
+            return False
+    
     async def run_embedding_cache_migration(self) -> bool:
-        """专门用于嵌入向量缓存数据库的迁移"""
-        return await self._run_migration_with_retry(self._run_embedding_cache_migration_internal)
+        """专门用于嵌入向量缓存数据库的迁移（异步接口，内部在线程中执行）"""
+        return await asyncio.to_thread(self.run_embedding_cache_migration_sync)
+    
+    def run_embedding_cache_migration_sync(self) -> bool:
+        """嵌入向量缓存数据库迁移（同步版）"""
+        return self._run_migration_with_retry_sync(self._run_embedding_cache_migration_internal_sync)
     
     async def _run_embedding_cache_migration_internal(self) -> bool:
-        """嵌入向量缓存迁移内部实现"""
+        """嵌入向量缓存迁移内部实现（异步版，保留兼容）"""
         try:
             if not os.path.exists(self.db_path):
                 logger.info("嵌入向量缓存数据库不存在，将创建新数据库")
@@ -214,6 +294,53 @@ class SmartDatabaseMigration:
                 self._rollback(backup_path)
             return False
     
+    def _run_embedding_cache_migration_internal_sync(self) -> bool:
+        """嵌入向量缓存迁移内部实现（同步版）"""
+        try:
+            if not os.path.exists(self.db_path):
+                logger.info("嵌入向量缓存数据库不存在，将创建新数据库")
+                # 创建新数据库时，直接使用新结构，无需迁移
+                self._create_new_structure(self.db_path)
+                return True
+            
+            logger.info(f"开始嵌入向量缓存数据库迁移: {self.db_path}")
+            
+            # 1. 分析现有数据库结构
+            current_schema = self._analyze_current_schema()
+            
+            # 2. 生成目标数据库结构
+            target_schema = self._generate_embedding_cache_schema()
+            
+            # 3. 智能差异检测
+            schema_diff = self._calculate_schema_diff(current_schema, target_schema)
+            
+            if not schema_diff.has_changes():
+                logger.info("嵌入向量缓存数据库结构已是最新，无需迁移")
+                return True
+            
+            # 4. 创建备份
+            backup_path = self._create_smart_backup()
+            logger.info(f"已创建备份: {backup_path}")
+            
+            # 5. 执行智能迁移
+            success = self._execute_smart_migration_sync(schema_diff)
+            
+            if success:
+                logger.info("嵌入向量缓存数据库迁移成功完成")
+                return True
+            else:
+                logger.error("嵌入向量缓存数据库迁移失败，正在回滚...")
+                self._rollback(backup_path)
+                return False
+                
+        except Exception as e:
+            self.last_error = str(e)
+            logger.error(f"嵌入向量缓存数据库迁移失败: {e}", exc_info=True)
+            # 如果发生异常，也尝试回滚
+            if 'backup_path' in locals() and os.path.exists(backup_path):
+                self._rollback(backup_path)
+            return False
+    
     async def _enter_fallback_mode(self) -> bool:
         """进入回退模式"""
         self.fallback_mode = True
@@ -228,8 +355,86 @@ class SmartDatabaseMigration:
             logger.error(f"回退模式失败：无法创建最小数据库结构: {e}")
             return False
     
+    def _enter_fallback_mode_sync(self) -> bool:
+        """进入回退模式（同步版）"""
+        self.fallback_mode = True
+        logger.warning("进入回退模式：尝试创建最小可用数据库结构")
+        try:
+            self._create_minimal_structure_sync()
+            logger.info("回退模式：成功创建最小可用数据库结构")
+            return True
+        except Exception as e:
+            logger.error(f"回退模式失败：无法创建最小数据库结构: {e}")
+            return False
+    
     async def _create_minimal_structure(self) -> None:
-        """创建最小可用数据库结构"""
+        """创建最小可用数据库结构（异步接口，内部为同步实现）"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # 判断是否为嵌入向量缓存数据库
+            if "_embeddings.db" in self.db_path:
+                # 创建最小嵌入向量缓存结构
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS memory_embeddings (
+                        memory_id TEXT PRIMARY KEY,
+                        content TEXT NOT NULL,
+                        concept_id TEXT NOT NULL,
+                        embedding BLOB NOT NULL,
+                        vector_dimension INTEGER NOT NULL,
+                        group_id TEXT DEFAULT "",
+                        created_at REAL NOT NULL,
+                        last_updated REAL NOT NULL
+                    )
+                ''')
+                
+                # 创建基本索引
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_embeddings ON memory_embeddings(group_id)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_concept_embeddings ON memory_embeddings(concept_id)")
+                
+            else:
+                # 创建最小主记忆数据库结构
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS concepts (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        created_at REAL NOT NULL,
+                        last_accessed REAL NOT NULL,
+                        access_count INTEGER DEFAULT 0
+                    )
+                ''')
+                
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS memories (
+                        id TEXT PRIMARY KEY,
+                        concept_id TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        group_id TEXT DEFAULT "",
+                        created_at REAL NOT NULL,
+                        last_accessed REAL NOT NULL,
+                        access_count INTEGER DEFAULT 0,
+                        strength REAL DEFAULT 1.0
+                    )
+                ''')
+                
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS connections (
+                        id TEXT PRIMARY KEY,
+                        from_concept TEXT NOT NULL,
+                        to_concept TEXT NOT NULL,
+                        strength REAL DEFAULT 1.0,
+                        last_strengthened REAL NOT NULL
+                    )
+                ''')
+                
+                # 创建基本索引
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_group_id ON memories(group_id)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_concept_group ON memories(concept_id, group_id)")
+            
+            conn.commit()
+    
+    def _create_minimal_structure_sync(self) -> None:
+        """创建最小可用数据库结构（同步版）"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
@@ -548,6 +753,28 @@ class SmartDatabaseMigration:
             if os.path.exists(temp_db_path):
                 os.remove(temp_db_path)
             return False
+
+    def _execute_smart_migration_sync(self, diff: SchemaDiff) -> bool:
+        """执行智能迁移（同步版）"""
+        temp_db_path = self.db_path + ".smart_migration"
+        try:
+            if os.path.exists(temp_db_path):
+                os.remove(temp_db_path)
+            
+            self._create_new_structure(temp_db_path)
+            self._smart_data_migration_sync(self.db_path, temp_db_path, diff)
+            
+            # 替换数据库
+            os.remove(self.db_path)
+            os.rename(temp_db_path, self.db_path)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"智能迁移执行失败: {e}", exc_info=True)
+            if os.path.exists(temp_db_path):
+                os.remove(temp_db_path)
+            return False
     
     def _create_new_structure(self, db_path: str):
         """创建新数据库结构"""
@@ -620,9 +847,88 @@ class SmartDatabaseMigration:
             
             target_conn.commit()
     
+    def _smart_data_migration_sync(self, source_db: str, target_db: str, 
+                                  diff: SchemaDiff) -> None:
+        """智能数据迁移（同步版）"""
+        with sqlite3.connect(source_db) as source_conn, \
+             sqlite3.connect(target_db) as target_conn:
+            
+            source_cursor = source_conn.cursor()
+            target_cursor = target_conn.cursor()
+            
+            # 迁移未改变和已修改的表
+            current_schema = self._analyze_current_schema()
+            target_schema = self._generate_target_schema()
+            
+            for table_name in current_schema.tables:
+                if table_name in target_schema.tables:
+                    table_diff = diff.modified_tables.get(table_name, TableDiff())
+                    self._migrate_table_data_sync(
+                        source_cursor, target_cursor, table_name, table_diff
+                    )
+            
+            target_conn.commit()
+    
     async def _migrate_table_data(self, source_cursor, target_cursor,
                                 table_name: str, table_diff: TableDiff) -> None:
         """迁移单个表的数据"""
+        try:
+            logger.info(f"开始迁移表 {table_name} 的数据")
+            
+            source_cursor.execute(f"SELECT * FROM {table_name}")
+            rows = source_cursor.fetchall()
+            
+            if not rows:
+                logger.info(f"表 {table_name} 没有数据，跳过迁移")
+                return
+            
+            logger.info(f"表 {table_name} 有 {len(rows)} 行数据需要迁移")
+            
+            source_cursor.execute(f"PRAGMA table_info('{table_name}')")
+            source_columns = [col[1] for col in source_cursor.fetchall()]  # col[1] 是列名
+            logger.info(f"表 {table_name} 源列: {source_columns}")
+            
+            target_cursor.execute(f"PRAGMA table_info('{table_name}')")
+            target_columns_info = {col[1]: col for col in target_cursor.fetchall()}
+            target_columns = list(target_columns_info.keys())
+            logger.info(f"表 {table_name} 目标列: {target_columns}")
+            
+            # 构建字段映射
+            field_mapping, final_target_columns = self._build_field_mapping(
+                source_columns, target_columns, table_diff
+            )
+            logger.info(f"表 {table_name} 字段映射: {field_mapping}")
+            logger.info(f"表 {table_name} 最终目标列: {final_target_columns}")
+            
+            # 迁移数据
+            migrated_count = 0
+            for i, row in enumerate(rows):
+                new_row_dict = self._transform_row(row, field_mapping, source_columns)
+                if new_row_dict:
+                    # 确保插入顺序与目标列一致
+                    ordered_row = [new_row_dict.get(col) for col in final_target_columns]
+                    placeholders = ",".join(["?" for _ in final_target_columns])
+                    column_names = ",".join(f'"{col}"' for col in final_target_columns)
+                    
+                    try:
+                        target_cursor.execute(
+                            f"INSERT INTO {table_name} ({column_names}) VALUES ({placeholders})",
+                            tuple(ordered_row)
+                        )
+                        migrated_count += 1
+                    except sqlite3.IntegrityError as e:
+                        logger.warning(f"插入数据失败 (表: {table_name}, 行 {i}): {e}")
+                    except Exception as e:
+                        logger.error(f"插入数据异常 (表: {table_name}, 行 {i}): {e}")
+                        
+            logger.info(f"表 {table_name} 数据迁移完成，成功迁移 {migrated_count}/{len(rows)} 行")
+            
+        except Exception as e:
+            logger.error(f"迁移表 {table_name} 数据失败: {e}", exc_info=True)
+
+    def _migrate_table_data_sync(self, source_cursor, target_cursor,
+                                table_name: str, table_diff: TableDiff) -> None:
+        """迁移单个表的数据（同步版）"""
         try:
             logger.info(f"开始迁移表 {table_name} 的数据")
             
