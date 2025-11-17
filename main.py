@@ -22,6 +22,11 @@ from astrbot.api import AstrBotConfig
 from astrbot.api.star import StarTools
 from .resource_management import resource_manager
 from .web_server import MemoryWebServer
+from .memory_events import MemoryEventBus, MemoryEvent, MemoryEventType, initialize_event_bus, shutdown_event_bus
+from .topic_engine import TopicEngine
+from .user_profiling import UserProfilingSystem
+from .temporal_memory import TemporalMemorySystem
+from .memory_api_gateway import MemoryAPIGateway
 
 @register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.6", "https://github.com/qa296/astrbot_plugin_memora_connect")
 class MemoraConnectPlugin(Star):
@@ -33,6 +38,14 @@ class MemoraConnectPlugin(Star):
         self.graph_visualizer = MemoryGraphVisualizer(self.memory_system)
         self._initialized = False
         self.web_server = None
+        
+        # 新增：主动能力升级模块
+        self.event_bus = None
+        self.topic_engine = None
+        self.user_profiling = None
+        self.temporal_memory = None
+        self.api_gateway = None
+        
         asyncio.create_task(self._async_init())
     
     def _debug_log(self, message: str, level: str = "debug"):
@@ -55,7 +68,42 @@ class MemoraConnectPlugin(Star):
         try:
             logger.info("开始异步初始化记忆系统...")
             await self.memory_system.initialize()
+            
+            # 初始化新增模块
+            try:
+                logger.info("初始化主动能力升级模块...")
+                
+                # 1. 初始化事件总线
+                self.event_bus = await initialize_event_bus()
+                logger.info("✓ 事件总线已启动")
+                
+                # 2. 初始化话题引擎
+                self.topic_engine = TopicEngine(self.memory_system)
+                logger.info("✓ 话题引擎已初始化")
+                
+                # 3. 初始化用户画像系统
+                self.user_profiling = UserProfilingSystem(self.memory_system)
+                logger.info("✓ 用户画像系统已初始化")
+                
+                # 4. 初始化时间维度记忆系统
+                self.temporal_memory = TemporalMemorySystem(self.memory_system)
+                logger.info("✓ 时间维度记忆系统已初始化")
+                
+                # 5. 初始化API网关
+                self.api_gateway = MemoryAPIGateway(
+                    self.memory_system,
+                    self.topic_engine,
+                    self.user_profiling,
+                    self.temporal_memory
+                )
+                logger.info("✓ API网关已初始化")
+                
+                logger.info("主动能力升级模块初始化完成！")
+            except Exception as upgrade_e:
+                logger.error(f"主动能力升级模块初始化失败: {upgrade_e}", exc_info=True)
+            
             self._initialized = True
+            
             # 根据配置启动 Web 界面
             try:
                 web_cfg = (self.memory_system.memory_config or {}).get("web_ui", {}) or {}
@@ -231,8 +279,31 @@ class MemoraConnectPlugin(Star):
     async def _process_message_async(self, event: AstrMessageEvent, group_id: str):
         """异步消息处理，避免阻塞主流程"""
         try:
+            message = event.message_str
+            sender_id = event.get_sender_id()
+            
             # 使用优化后的单次LLM调用处理消息
             await self.memory_system.process_message_optimized(event, group_id)
+            
+            # === 新增：主动能力升级相关处理 ===
+            if self.topic_engine and self.user_profiling and self.temporal_memory:
+                try:
+                    # 1. 话题追踪
+                    await self.topic_engine.add_message_to_topic(message, sender_id, group_id)
+                    
+                    # 2. 未闭合话题检测
+                    await self.temporal_memory.auto_detect_and_track_questions(message, sender_id, group_id)
+                    
+                    # 3. 禁忌词自动学习
+                    await self.user_profiling.learn_taboo_from_message(sender_id, message, group_id)
+                    
+                    # 4. 查找复活的话题
+                    resurrected = await self.topic_engine.find_resurrected_topics(message, group_id, silence_days=7)
+                    if resurrected:
+                        logger.info(f"检测到复活话题: {resurrected}")
+                    
+                except Exception as upgrade_e:
+                    logger.debug(f"主动能力升级处理失败: {upgrade_e}")
             
             # 使用队列化保存，减少I/O操作
             if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
@@ -281,6 +352,15 @@ class MemoraConnectPlugin(Star):
         self._debug_log("开始插件终止流程，清理所有资源", "info")
         
         try:
+            # === 新增：清理主动能力升级模块 ===
+            try:
+                if self.event_bus:
+                    logger.info("关闭事件总线...")
+                    await shutdown_event_bus()
+                    logger.info("✓ 事件总线已关闭")
+            except Exception as bus_e:
+                logger.warning(f"关闭事件总线失败: {bus_e}")
+            
             # 停止 Web 服务
             if hasattr(self, 'web_server') and self.web_server:
                 try:
@@ -486,6 +566,214 @@ class MemoraConnectPlugin(Star):
         except Exception as e:
             logger.error(f"API adjust_impression_score_api 失败: {e}", exc_info=True)
             return None
+
+    # ---------- 主动能力升级 API ----------
+    async def get_topic_relevance_api(self, message: str, group_id: str = "", max_results: int = 5) -> List[Dict]:
+        """
+        【API】获取消息与现有话题的相关性
+        :param message: 当前消息
+        :param group_id: 群组ID
+        :param max_results: 最多返回结果数
+        :return: [{topic_id, relevance_score, topic_info}, ...]
+        """
+        if not self._initialized or not self.api_gateway:
+            logger.warning("API调用失败：系统未初始化")
+            return []
+        
+        try:
+            response = await self.api_gateway.get_topic_relevance(message, group_id, max_results)
+            return response.data if response.success else []
+        except Exception as e:
+            logger.error(f"API get_topic_relevance_api 失败: {e}", exc_info=True)
+            return []
+    
+    async def get_intimacy_api(self, user_id: str, group_id: str = "") -> Optional[Dict]:
+        """
+        【API】获取用户亲密度
+        :param user_id: 用户ID
+        :param group_id: 群组ID
+        :return: {score: 0-100, sub_scores: {frequency, depth, emotional}}
+        """
+        if not self._initialized or not self.api_gateway:
+            logger.warning("API调用失败：系统未初始化")
+            return None
+        
+        try:
+            response = await self.api_gateway.get_intimacy(user_id, group_id)
+            return response.data if response.success else None
+        except Exception as e:
+            logger.error(f"API get_intimacy_api 失败: {e}", exc_info=True)
+            return None
+    
+    async def batch_get_intimacy_api(self, user_ids: List[str], group_id: str = "") -> List[Dict]:
+        """
+        【API】批量获取用户亲密度
+        :param user_ids: 用户ID列表
+        :param group_id: 群组ID
+        :return: [{user_id, score, sub_scores}, ...]
+        """
+        if not self._initialized or not self.api_gateway:
+            logger.warning("API调用失败：系统未初始化")
+            return []
+        
+        try:
+            response = await self.api_gateway.batch_get_intimacy(user_ids, group_id)
+            return response.data if response.success else []
+        except Exception as e:
+            logger.error(f"API batch_get_intimacy_api 失败: {e}", exc_info=True)
+            return []
+    
+    async def get_user_interests_api(self, user_id: str, group_id: str = "") -> List[Dict]:
+        """
+        【API】获取用户兴趣偏好（TOP 5）
+        :param user_id: 用户ID
+        :param group_id: 群组ID
+        :return: [{concept, weight}, ...]
+        """
+        if not self._initialized or not self.api_gateway:
+            logger.warning("API调用失败：系统未初始化")
+            return []
+        
+        try:
+            response = await self.api_gateway.get_user_interests(user_id, group_id)
+            return response.data if response.success else []
+        except Exception as e:
+            logger.error(f"API get_user_interests_api 失败: {e}", exc_info=True)
+            return []
+    
+    async def check_taboo_api(self, user_id: str, content: str, group_id: str = "") -> Dict:
+        """
+        【API】检查内容是否包含用户禁忌词
+        :param user_id: 用户ID
+        :param content: 要检查的内容
+        :param group_id: 群组ID
+        :return: {has_taboo: bool, taboo_words: [...]}
+        """
+        if not self._initialized or not self.api_gateway:
+            logger.warning("API调用失败：系统未初始化")
+            return {"has_taboo": False, "taboo_words": []}
+        
+        try:
+            response = await self.api_gateway.check_taboo(user_id, content, group_id)
+            return response.data if response.success else {"has_taboo": False, "taboo_words": []}
+        except Exception as e:
+            logger.error(f"API check_taboo_api 失败: {e}", exc_info=True)
+            return {"has_taboo": False, "taboo_words": []}
+    
+    async def get_open_topics_api(self, group_id: str = "", days: int = 7) -> List[Dict]:
+        """
+        【API】获取未闭合话题列表
+        :param group_id: 群组ID
+        :param days: 查询最近N天的话题
+        :return: [{topic_id, question, asker_id, days_ago, ...}, ...]
+        """
+        if not self._initialized or not self.api_gateway:
+            logger.warning("API调用失败：系统未初始化")
+            return []
+        
+        try:
+            response = await self.api_gateway.get_open_topics(group_id, days)
+            return response.data if response.success else []
+        except Exception as e:
+            logger.error(f"API get_open_topics_api 失败: {e}", exc_info=True)
+            return []
+    
+    async def get_today_anniversaries_api(self, group_id: str = "") -> List[Dict]:
+        """
+        【API】获取历史今日记忆
+        :param group_id: 群组ID
+        :return: [{memory_id, event_description, days_ago, ...}, ...]
+        """
+        if not self._initialized or not self.api_gateway:
+            logger.warning("API调用失败：系统未初始化")
+            return []
+        
+        try:
+            response = await self.api_gateway.get_today_anniversaries(group_id)
+            return response.data if response.success else []
+        except Exception as e:
+            logger.error(f"API get_today_anniversaries_api 失败: {e}", exc_info=True)
+            return []
+    
+    async def find_connection_api(self, user_a: str, user_b: str, group_id: str = "") -> Optional[Dict]:
+        """
+        【API】查找两个用户的关系路径（共同兴趣话题）
+        :param user_a: 用户A的ID
+        :param user_b: 用户B的ID
+        :param group_id: 群组ID
+        :return: {common_topics: [...], connection_strength: float, ...}
+        """
+        if not self._initialized or not self.api_gateway:
+            logger.warning("API调用失败：系统未初始化")
+            return None
+        
+        try:
+            response = await self.api_gateway.find_connection(user_a, user_b, group_id)
+            return response.data if response.success else None
+        except Exception as e:
+            logger.error(f"API find_connection_api 失败: {e}", exc_info=True)
+            return None
+    
+    async def get_memory_importance_ranking_api(self, group_id: str = "", top_k: int = 10) -> List[Dict]:
+        """
+        【API】获取记忆重要性排序（基于度中心性和激活频率）
+        :param group_id: 群组ID
+        :param top_k: 返回TOP K个记忆
+        :return: [{memory_id, content, importance_score, ...}, ...]
+        """
+        if not self._initialized or not self.api_gateway:
+            logger.warning("API调用失败：系统未初始化")
+            return []
+        
+        try:
+            response = await self.api_gateway.get_memory_importance_ranking(group_id, top_k)
+            return response.data if response.success else []
+        except Exception as e:
+            logger.error(f"API get_memory_importance_ranking_api 失败: {e}", exc_info=True)
+            return []
+    
+    async def subscribe_event_api(self, event_type_str: str, callback) -> bool:
+        """
+        【API】订阅记忆事件
+        :param event_type_str: 事件类型字符串，如 "memory.triggered", "topic.resurrected"
+        :param callback: 回调函数，签名应为 async def callback(event: MemoryEvent)
+        :return: 是否订阅成功
+        """
+        if not self._initialized or not self.event_bus:
+            logger.warning("API调用失败：事件总线未初始化")
+            return False
+        
+        try:
+            # 字符串转事件类型
+            for event_type in MemoryEventType:
+                if event_type.value == event_type_str:
+                    return self.event_bus.subscribe(event_type, callback)
+            
+            logger.warning(f"未知的事件类型: {event_type_str}")
+            return False
+        except Exception as e:
+            logger.error(f"API subscribe_event_api 失败: {e}", exc_info=True)
+            return False
+    
+    async def health_check_api(self) -> Dict:
+        """
+        【API】记忆系统健康检查
+        :return: {healthy: bool, components: {...}, performance: {...}}
+        """
+        if not self._initialized or not self.api_gateway:
+            return {
+                "healthy": False,
+                "error": "系统未初始化"
+            }
+        
+        try:
+            return await self.api_gateway.health_check()
+        except Exception as e:
+            logger.error(f"API health_check_api 失败: {e}", exc_info=True)
+            return {
+                "healthy": False,
+                "error": str(e)
+            }
 
     # ---------- LLM 函数工具 ----------
     @filter.llm_tool(name="create_memory")
