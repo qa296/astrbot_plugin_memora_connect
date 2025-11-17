@@ -3,7 +3,7 @@
 <div align="center">
 
 ![AstrBot Memora Connect](https://img.shields.io/badge/AstrBot-Memora%20Connect-blue?style=for-the-badge&logo=robot&logoColor=white)
-![Version](https://img.shields.io/badge/version-v0.2.3-green?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-v0.2.6-green?style=for-the-badge)
 
 **模仿人类记忆方式的智能记忆插件**
 
@@ -22,8 +22,10 @@ AstrBot Memora Connect 是一个为 AstrBot 设计的高级记忆插件，通过
 - **🧠 智能记忆形成**：自动从对话中提取关键信息，形成丰富的记忆内容
 - **🔍 多模式回忆**：支持简单关键词、LLM 智能和嵌入向量三种回忆模式
 - **🌐 知识图谱**：构建概念间的关联网络，支持联想记忆
-- **👥 群聊隔离**：不同群聊的记忆可以隔离.
+- **🛰️ 图谱可视化**：一键生成记忆图谱，支持多种布局
+- **👥 群聊隔离**：不同群聊的记忆可以隔离
 - **👤 印象系统**：记录和管理对人物的好感度和印象
+- **🖥️ Web 管理界面**：内置可选 Web UI，浏览/搜索/编辑记忆与图谱
 - **⚡ 性能优化**：嵌入向量缓存、批量处理、异步优化
 - **🔄 记忆维护**：自动遗忘、记忆整理和合并机制
 
@@ -51,9 +53,9 @@ AstrBot Memora Connect 是一个为 AstrBot 设计的高级记忆插件，通过
 - **图优化**：邻接表结构，高效的图遍历算法
 
 ### 👥 群聊隔离
-- **独立存储**：每个群聊使用独立的数据库文件
+- **逻辑隔离**：通过数据库中的 group_id 字段隔离不同群组
 - **记忆隔离**：群聊间记忆完全隔离，防止信息泄露
-- **自动管理**：自动识别群聊 ID，动态切换数据库
+- **自动管理**：自动识别群聊 ID，按组过滤与存取
 - **统一接口**：对上层提供统一的记忆访问接口
 
 ### 👤 印象系统
@@ -137,6 +139,18 @@ cp -r astrbot_plugin_memora_connect /path/to/astrbot/plugins/
   /记忆 印象 张三
   ```
 
+#### 🗺️ 记忆图谱
+```bash
+/记忆 图谱 [布局]
+```
+- **功能**：生成记忆图谱可视化图片
+- **参数**：布局（可选），可选值：auto, force_directed, circular, kamada_kawai, spectral, community, hierarchical
+- **示例**：
+  ```
+  /记忆 图谱
+  /记忆 图谱 force_directed
+  ```
+
 ### 🤖 LLM 工具
 
 插件为 LLM 提供了以下工具函数：
@@ -206,6 +220,18 @@ record_impression({
 
 插件通过 `_conf_schema.json` 定义配置参数，支持以下配置项：
 
+#### 🧰 启用记忆系统
+```json
+{
+  "enable_memory_system": {
+    "description": "启用印象系统",
+    "type": "bool",
+    "default": true,
+    "hint": "是否启用印象记忆系统，关闭后将停止所有记忆相关的功能"
+  }
+}
+```
+
 #### 🌐 群聊隔离
 ```json
 {
@@ -267,7 +293,7 @@ record_impression({
   "recall_trigger_probability": {
     "description": "回忆触发概率",
     "type": "float",
-    "default": 0.6,
+    "default": 0,
     "hint": "对话中触发回忆的概率(0-1)（此选项使用llm）"
   }
 }
@@ -333,6 +359,22 @@ record_impression({
 }
 ```
 
+#### 🖥️ Web 界面
+```json
+{
+  "web_ui": {
+    "description": "Web 界面",
+    "type": "object",
+    "items": {
+      "enabled": {"description": "启用Web界面", "type": "bool", "default": false},
+      "host": {"description": "监听地址", "type": "string", "default": "127.0.0.1"},
+      "port": {"description": "端口", "type": "int", "default": 8350},
+      "access_token": {"description": "访问令牌(可选)", "type": "string", "default": ""}
+    }
+  }
+}
+```
+
 ### 📋 配置示例
 
 #### 🔧 简单配置
@@ -390,6 +432,13 @@ astrbot_plugin_memora_connect/
 ├── enhanced_memory_display.py # 增强记忆显示
 ├── enhanced_memory_recall.py  # 增强记忆召回
 ├── embedding_cache_manager.py # 嵌入向量缓存管理
+├── memory_graph_visualization.py # 记忆图谱可视化
+├── resource_management.py     # 资源与连接池管理
+├── web_server.py              # 轻量级 Web 管理界面
+├── webui/                     # Web 静态资源
+├── verify_database_structure.py # 结构校验脚本
+├── verify_group_isolation.py  # 群聊隔离验证脚本
+├── simple_migration_test.py   # 迁移测试脚本
 └── README.md                  # 项目文档
 ```
 
@@ -421,6 +470,21 @@ astrbot_plugin_memora_connect/
    - LLM 批量提取
    - 多类型记忆识别
    - 置信度评估
+
+6. **MemoryGraphVisualizer**：记忆图谱可视化
+   - 多种布局算法（力导向、圆形、谱、Kamada-Kawai、社区、多层次）
+   - 碰撞检测与布局优化
+   - 支持群聊隔离过滤
+
+7. **ResourceManager**：资源与连接池管理
+   - SQLite 数据库连接池
+   - 事件循环统一管理与任务托管
+   - 资源清理回调
+
+8. **MemoryWebServer**：轻量级 Web 管理界面
+   - REST API + 简单静态页面
+   - 分组切换与搜索
+   - 概念/记忆/连接的增删改查
 
 #### 🔄 数据流程
 
@@ -479,9 +543,9 @@ A: 根据您的需求选择：
 **Q: 群聊隔离功能如何工作？**
 A: 群聊隔离功能会：
 1. 自动识别消息来源的群聊 ID
-2. 为每个群聊创建独立的数据库文件
+2. 通过 group_id 字段在同一数据库中隔离不同群组的数据
 3. 确保不同群聊间的记忆完全隔离
-4. 在群聊间切换时自动加载对应的记忆状态
+4. 在群聊间切换时自动按组加载/过滤对应的记忆状态
 
 ### 🚀 性能问题
 
@@ -511,10 +575,15 @@ A: 人物印象功能的使用方法：
 
 ## 📈 版本历史
 
-### v0.2.6
-- fix 修复写法问题，优化传递llm参数
+### v0.2.6 (当前版本)
+- 🗺️ 新增记忆图谱可视化命令：/记忆 图谱，支持多种布局
+- 🖥️ 新增内置 Web 管理界面，可通过 web_ui 配置启用
+- 🧩 新增资源管理器与数据库连接池，提升并发与稳定性
+- 🔧 数据库迁移与嵌入缓存迁移增强，带回退策略
+- 🤖 LLM 请求的记忆注入和召回进一步优化
+- 🐛 修复若干问题，优化传递 LLM 参数等细节
 
-### v0.2.3 (当前版本)
+### v0.2.3
 - ✨ 新增嵌入向量缓存管理
 - 🚀 性能优化和异步处理改进
 - 🐛 修复群聊隔离的若干问题
