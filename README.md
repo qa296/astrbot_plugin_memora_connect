@@ -3,7 +3,7 @@
 <div align="center">
 
 ![AstrBot Memora Connect](https://img.shields.io/badge/AstrBot-Memora%20Connect-blue?style=for-the-badge&logo=robot&logoColor=white)
-![Version](https://img.shields.io/badge/version-v0.2.3-green?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-v0.2.6-green?style=for-the-badge)
 
 **模仿人类记忆方式的智能记忆插件**
 
@@ -511,10 +511,10 @@ A: 人物印象功能的使用方法：
 
 ## 📈 版本历史
 
-### v0.2.6
+### v0.2.6 (当前版本)
 - fix 修复写法问题，优化传递llm参数
 
-### v0.2.3 (当前版本)
+### v0.2.3
 - ✨ 新增嵌入向量缓存管理
 - 🚀 性能优化和异步处理改进
 - 🐛 修复群聊隔离的若干问题
