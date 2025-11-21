@@ -100,3 +100,8 @@ Thumbs.db
 *.db
 *.sqlite
 *.sqlite3
+
+# Test and verification files
+*_test.py
+test_*.py
+verify_*.py
