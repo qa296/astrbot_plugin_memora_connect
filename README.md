@@ -476,6 +476,8 @@ astrbot_plugin_memora_connect/
 ├── enhanced_memory_recall.py  # 增强记忆召回
 ├── embedding_cache_manager.py # 嵌入向量缓存管理
 ├── memory_graph_visualization.py # 记忆图谱可视化
+├── sentiment_analysis.py      # 情感分析与情感档案管理
+├── relation_classifier.py     # 关系类型分类与概念属性管理
 ├── resource_management.py     # 资源与连接池管理
 ├── web_server.py              # 轻量级 Web 管理界面
 ├── webui/                     # Web 静态资源
@@ -529,11 +531,32 @@ astrbot_plugin_memora_connect/
    - 分组切换与搜索
    - 概念/记忆/连接的增删改查
 
+9. **EmotionProfileManager**：情感分析与档案管理
+   - 多维度情感类型识别（喜悦、悲伤、愤怒等）
+   - 情感强度计算与趋势分析
+   - 用户情感档案建立与管理
+   - 情感触发器识别
+
+10. **RelationClassifier**：关系类型分类器
+    - 因果、时间、层级等关系类型识别
+    - 基于关键词和模式的智能分类
+    - 上下文感知的关系推断
+
+11. **ConceptAttributeManager**：概念属性管理器
+    - 概念重要性评估（基于访问频率、连接数、记忆数）
+    - 概念抽象度计算
+    - 动态属性更新
+
+12. **RelationExplorer**：关系网络探索器
+    - 深度概念网络探索
+    - 多维关系结构展示
+    - 图谱路径分析
+
 #### 🔄 数据流程
 
 1. **消息处理流程**
    ```
-   消息监听 → 群聊识别 → 记忆提取 → 记忆存储 → 关联建立
+   消息监听 → 群聊识别 → 记忆提取 → 情感分析 → 关系分类 → 记忆存储 → 关联建立
    ```
 
 2. **记忆召回流程**
@@ -544,6 +567,16 @@ astrbot_plugin_memora_connect/
 3. **记忆维护流程**
    ```
    定时触发 → 遗忘检查 → 记忆合并 → 连接优化 → 数据保存
+   ```
+
+4. **情感分析流程**
+   ```
+   消息接收 → 情感识别 → 强度计算 → 趋势分析 → 档案更新 → 触发器记录
+   ```
+
+5. **关系探索流程**
+   ```
+   概念查询 → 属性计算 → 关系分类 → 网络遍历 → 结果格式化 → 可视化展示
    ```
 
 #### 🐛 问题反馈
