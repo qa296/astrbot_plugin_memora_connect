@@ -27,10 +27,8 @@ from .topic_engine import TopicEngine
 from .user_profiling import UserProfilingSystem
 from .temporal_memory import TemporalMemorySystem
 from .memory_api_gateway import MemoryAPIGateway
-from .sentiment_analysis import EmotionProfileManager, EmotionType
-from .relation_classifier import RelationClassifier, RelationExplorer, ConceptAttributeManager
 
-@register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.7", "https://github.com/qa296/astrbot_plugin_memora_connect")
+@register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.6", "https://github.com/qa296/astrbot_plugin_memora_connect")
 class MemoraConnectPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -47,10 +45,6 @@ class MemoraConnectPlugin(Star):
         self.user_profiling = None
         self.temporal_memory = None
         self.api_gateway = None
-        
-        # 新增：情感分析与关系分类模块
-        self.emotion_manager = None
-        self.relation_explorer = None
         
         asyncio.create_task(self._async_init())
     
@@ -103,14 +97,6 @@ class MemoraConnectPlugin(Star):
                     self.temporal_memory
                 )
                 logger.info("✓ API网关已初始化")
-                
-                # 6. 初始化情感分析模块
-                self.emotion_manager = EmotionProfileManager(self.memory_system)
-                logger.info("✓ 情感分析模块已初始化")
-                
-                # 7. 初始化关系探索器
-                self.relation_explorer = RelationExplorer(self.memory_system)
-                logger.info("✓ 关系探索器已初始化")
                 
                 logger.info("主动能力升级模块初始化完成！")
             except Exception as upgrade_e:
@@ -261,83 +247,6 @@ class MemoraConnectPlugin(Star):
             logger.error(f"生成记忆图谱失败: {e}", exc_info=True)
             yield event.plain_result(f"❌ 生成记忆图谱时出现错误: {str(e)}")
     
-    @memory.command("情感")
-    async def memory_emotion(self, event: AstrMessageEvent, user_name: str = ""):
-        """查询用户情感档案
-        
-        Args:
-            user_name: 用户名称（可选，不提供则查询自己）
-        """
-        # 检查记忆系统是否启用
-        if not self.memory_system.config_manager.is_memory_system_enabled():
-            yield event.plain_result("记忆系统已禁用，无法查询情感档案。")
-            return
-        
-        # 检查情感管理器是否初始化
-        if not self.emotion_manager:
-            yield event.plain_result("情感分析模块未初始化。")
-            return
-        
-        try:
-            # 获取群组ID和用户ID
-            group_id = event.get_group_id() if event.get_group_id() else ""
-            
-            # 如果没有指定用户，使用发送者ID
-            if not user_name:
-                user_id = event.get_sender_id()
-            else:
-                user_id = user_name
-            
-            # 获取情感档案
-            profile = await self.emotion_manager.get_emotion_profile(user_id, group_id)
-            
-            if not profile:
-                yield event.plain_result(f"😊 尚未建立{'用户 ' + user_name if user_name else '你'}的情感档案\n当有更多对话后，系统会自动分析和建立情感档案。")
-                return
-            
-            # 获取最近的情感记录
-            recent_records = await self.emotion_manager.get_recent_emotion_records(user_id, group_id, limit=10)
-            
-            # 格式化并输出
-            response = self.emotion_manager.format_emotion_profile(profile, recent_records)
-            yield event.plain_result(response)
-            
-        except Exception as e:
-            logger.error(f"查询情感档案失败: {e}", exc_info=True)
-            yield event.plain_result(f"❌ 查询情感档案时出现错误: {str(e)}")
-    
-    @memory.command("关系")
-    async def memory_relation(self, event: AstrMessageEvent, concept: str):
-        """探索概念网络关系
-        
-        Args:
-            concept: 概念名称
-        """
-        # 检查记忆系统是否启用
-        if not self.memory_system.config_manager.is_memory_system_enabled():
-            yield event.plain_result("记忆系统已禁用，无法探索关系。")
-            return
-        
-        # 检查关系探索器是否初始化
-        if not self.relation_explorer:
-            yield event.plain_result("关系探索器未初始化。")
-            return
-        
-        try:
-            # 发送正在探索的提示
-            yield event.plain_result(f"🔍 正在探索概念 '{concept}' 的网络关系...")
-            
-            # 探索概念网络
-            result = await self.relation_explorer.explore_concept_network(concept, max_depth=2)
-            
-            # 格式化并输出
-            response = self.relation_explorer.format_network_exploration(result)
-            yield event.plain_result(response)
-            
-        except Exception as e:
-            logger.error(f"探索概念关系失败: {e}", exc_info=True)
-            yield event.plain_result(f"❌ 探索概念关系时出现错误: {str(e)}")
-    
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         """监听所有消息，形成记忆并注入相关记忆"""
@@ -395,14 +304,6 @@ class MemoraConnectPlugin(Star):
                     
                 except Exception as upgrade_e:
                     logger.debug(f"主动能力升级处理失败: {upgrade_e}")
-            
-            # === 新增：情感分析处理 ===
-            if self.emotion_manager:
-                try:
-                    # 记录用户情感
-                    await self.emotion_manager.record_emotion(message, sender_id, group_id, context="")
-                except Exception as emotion_e:
-                    logger.debug(f"情感分析处理失败: {emotion_e}")
             
             # 使用队列化保存，减少I/O操作
             if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
@@ -1544,21 +1445,16 @@ class MemorySystem:
                 return
             
             # 加载概念
-            cursor.execute("SELECT id, name, created_at, last_accessed, access_count, importance, abstractness FROM concepts")
+            cursor.execute("SELECT id, name, created_at, last_accessed, access_count FROM concepts")
             concepts = cursor.fetchall()
             for concept_data in concepts:
-                concept_id = self.memory_graph.add_concept(
+                self.memory_graph.add_concept(
                     concept_id=concept_data[0],
                     name=concept_data[1],
                     created_at=concept_data[2],
                     last_accessed=concept_data[3],
                     access_count=concept_data[4]
                 )
-                # 设置新字段（如果存在）
-                if len(concept_data) > 5:
-                    concept = self.memory_graph.concepts[concept_id]
-                    concept.importance = concept_data[5] if concept_data[5] is not None else 0.0
-                    concept.abstractness = concept_data[6] if concept_data[6] is not None else 0.0
                 
             # 加载记忆 - 支持群聊隔离
             if group_id:
@@ -1584,17 +1480,15 @@ class MemorySystem:
                 )
                 
             # 加载连接
-            cursor.execute("SELECT id, from_concept, to_concept, strength, last_strengthened, relation_type FROM connections")
+            cursor.execute("SELECT id, from_concept, to_concept, strength, last_strengthened FROM connections")
             connections = cursor.fetchall()
             for conn_data in connections:
-                relation_type = conn_data[5] if len(conn_data) > 5 and conn_data[5] else "associated"
                 self.memory_graph.add_connection(
                     from_concept=conn_data[1],
                     to_concept=conn_data[2],
                     strength=conn_data[3],
                     connection_id=conn_data[0],
-                    last_strengthened=conn_data[4],
-                    relation_type=relation_type
+                    last_strengthened=conn_data[4]
                 )
                 
             # 释放连接回连接池
@@ -1627,13 +1521,11 @@ class MemorySystem:
                 
                 # 增量更新概念
                 for concept in self.memory_graph.concepts.values():
-                    importance = getattr(concept, 'importance', 0.0)
-                    abstractness = getattr(concept, 'abstractness', 0.0)
                     cursor.execute('''
                         INSERT OR REPLACE INTO concepts
-                        (id, name, created_at, last_accessed, access_count, importance, abstractness)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ''', (concept.id, concept.name, concept.created_at, concept.last_accessed, concept.access_count, importance, abstractness))
+                        (id, name, created_at, last_accessed, access_count)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (concept.id, concept.name, concept.created_at, concept.last_accessed, concept.access_count))
                 
                 # 增量更新记忆
                 for memory in self.memory_graph.memories.values():
@@ -1654,18 +1546,17 @@ class MemorySystem:
                 
                 # 更新现有连接
                 for conn_obj in self.memory_graph.connections:
-                    relation_type = getattr(conn_obj, 'relation_type', 'associated')
                     if conn_obj.id in existing_connections:
                         cursor.execute('''
                             UPDATE connections
-                            SET from_concept=?, to_concept=?, strength=?, last_strengthened=?, relation_type=?
+                            SET from_concept=?, to_concept=?, strength=?, last_strengthened=?
                             WHERE id=?
-                        ''', (conn_obj.from_concept, conn_obj.to_concept, conn_obj.strength, conn_obj.last_strengthened, relation_type, conn_obj.id))
+                        ''', (conn_obj.from_concept, conn_obj.to_concept, conn_obj.strength, conn_obj.last_strengthened, conn_obj.id))
                     else:
                         cursor.execute('''
-                            INSERT INTO connections (id, from_concept, to_concept, strength, last_strengthened, relation_type)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        ''', (conn_obj.id, conn_obj.from_concept, conn_obj.to_concept, conn_obj.strength, conn_obj.last_strengthened, relation_type))
+                            INSERT INTO connections (id, from_concept, to_concept, strength, last_strengthened)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', (conn_obj.id, conn_obj.from_concept, conn_obj.to_concept, conn_obj.strength, conn_obj.last_strengthened))
                 
                 # 提交事务
                 conn.commit()
@@ -1710,22 +1601,10 @@ class MemorySystem:
                         name TEXT NOT NULL,
                         created_at REAL,
                         last_accessed REAL,
-                        access_count INTEGER DEFAULT 0,
-                        importance REAL DEFAULT 0.0,
-                        abstractness REAL DEFAULT 0.0
+                        access_count INTEGER DEFAULT 0
                     )
                 ''')
                 self._debug_log(f"创建表: concepts", "debug")
-            else:
-                # 如果表已存在，检查并添加新字段
-                cursor.execute("PRAGMA table_info(concepts)")
-                columns = [col[1] for col in cursor.fetchall()]
-                if "importance" not in columns:
-                    cursor.execute("ALTER TABLE concepts ADD COLUMN importance REAL DEFAULT 0.0")
-                    self._debug_log("添加 concepts.importance 字段", "debug")
-                if "abstractness" not in columns:
-                    cursor.execute("ALTER TABLE concepts ADD COLUMN abstractness REAL DEFAULT 0.0")
-                    self._debug_log("添加 concepts.abstractness 字段", "debug")
             
             if 'memories' not in existing_tables:
                 cursor.execute('''
@@ -1768,19 +1647,11 @@ class MemorySystem:
                         to_concept TEXT NOT NULL,
                         strength REAL DEFAULT 1.0,
                         last_strengthened REAL,
-                        relation_type TEXT DEFAULT 'associated',
                         FOREIGN KEY (from_concept) REFERENCES concepts (id),
                         FOREIGN KEY (to_concept) REFERENCES concepts (id)
                     )
                 ''')
                 self._debug_log(f"创建表: connections", "debug")
-            else:
-                # 如果表已存在，检查并添加新字段
-                cursor.execute("PRAGMA table_info(connections)")
-                columns = [col[1] for col in cursor.fetchall()]
-                if "relation_type" not in columns:
-                    cursor.execute("ALTER TABLE connections ADD COLUMN relation_type TEXT DEFAULT 'associated'")
-                    self._debug_log("添加 connections.relation_type 字段", "debug")
             
             conn.commit()
             
@@ -4033,7 +3904,7 @@ class MemoryGraph:
         return memory_id
     def add_connection(self, from_concept: str, to_concept: str,
                       strength: float = 1.0, connection_id: str = None,
-                      last_strengthened: float = None, relation_type: str = "associated") -> str:
+                      last_strengthened: float = None) -> str:
         """添加连接"""
         if connection_id is None:
             connection_id = f"conn_{from_concept}_{to_concept}"
@@ -4051,8 +3922,7 @@ class MemoryGraph:
             from_concept=from_concept,
             to_concept=to_concept,
             strength=strength,
-            last_strengthened=last_strengthened or time.time(),
-            relation_type=relation_type
+            last_strengthened=last_strengthened or time.time()
         )
         self.connections.append(connection)
         
@@ -4177,8 +4047,6 @@ class Concept:
     created_at: float = None
     last_accessed: float = None
     access_count: int = 0
-    importance: float = 0.0        # 重要性 (0-1)
-    abstractness: float = 0.0      # 抽象度 (0-1)
     
     def __post_init__(self):
         if self.created_at is None:
@@ -4219,7 +4087,6 @@ class Connection:
     to_concept: str
     strength: float = 1.0
     last_strengthened: float = None
-    relation_type: str = "associated"  # 关系类型
     
     def __post_init__(self):
         if self.last_strengthened is None:
