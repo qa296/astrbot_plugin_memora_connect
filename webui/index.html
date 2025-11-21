@@ -56,6 +56,7 @@
         <input type="text" id="connFrom" placeholder="from 概念ID">
         <input type="text" id="connTo" placeholder="to 概念ID">
         <input type="number" id="connStrength" placeholder="强度(0-1)" value="1" step="0.1" min="0" max="1">
+        <input type="text" id="connRelationType" placeholder="关系类型">
         <button id="addConnBtn">添加连接</button>
       </div>
       <div class="list" id="connList"></div>
@@ -71,6 +72,24 @@
         <button id="addImpBtn">记录/更新印象</button>
       </div>
       <div class="list" id="impList"></div>
+    </section>
+
+    <section class="panel">
+      <h2>情感档案</h2>
+      <div class="form">
+        <input type="text" id="emotionUser" placeholder="用户ID">
+        <button id="getEmotionBtn">查询情感档案</button>
+      </div>
+      <div class="list" id="emotionList"></div>
+    </section>
+
+    <section class="panel">
+      <h2>概念关系</h2>
+      <div class="form">
+        <input type="text" id="relationConcept" placeholder="概念ID">
+        <button id="getRelationBtn">查询概念关系</button>
+      </div>
+      <div class="list" id="relationList"></div>
     </section>
   </main>
 
