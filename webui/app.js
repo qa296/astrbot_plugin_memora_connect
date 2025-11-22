@@ -118,8 +118,7 @@ async function loadConnections() {
     const el = document.createElement('div');
     el.className = 'item';
     const left = document.createElement('div');
-    const relType = c.relation_type ? ` | 类型:${c.relation_type}` : '';
-    left.innerHTML = `<div>${c.from_concept} -> ${c.to_concept}</div><small>强度:${c.strength.toFixed?.(2) ?? c.strength}${relType}</small>`;
+    left.innerHTML = `<div>${c.from_concept} -> ${c.to_concept}</div><small>强度:${c.strength.toFixed?.(2) ?? c.strength}</small>`;
     const act = document.createElement('div');
     act.className = 'actions';
     const sBtn = document.createElement('button'); sBtn.className='small'; sBtn.textContent='强度';
@@ -129,20 +128,13 @@ async function loadConnections() {
       await fetchJson(`/api/connections/${c.id}`, {method:'PUT', body: JSON.stringify({group_id: state.group, strength: parseFloat(s)})});
       loadConnections();
     };
-    const rtBtn = document.createElement('button'); rtBtn.className='small'; rtBtn.textContent='关系';
-    rtBtn.onclick = async () => {
-      const rt = prompt('关系类型', c.relation_type || '');
-      if (rt == null) return;
-      await fetchJson(`/api/connections/${c.id}`, {method:'PUT', body: JSON.stringify({group_id: state.group, relation_type: rt})});
-      loadConnections();
-    };
     const dBtn = document.createElement('button'); dBtn.className='small danger'; dBtn.textContent='删除';
     dBtn.onclick = async () => {
       if (!confirm('确认删除?')) return;
       await fetchJson(`/api/connections/${c.id}?group_id=${encodeURIComponent(state.group)}`, {method:'DELETE'});
       loadConnections();
     };
-    act.appendChild(sBtn); act.appendChild(rtBtn); act.appendChild(dBtn);
+    act.appendChild(sBtn); act.appendChild(dBtn);
     el.appendChild(left); el.appendChild(act);
     list.appendChild(el);
   }
@@ -167,11 +159,7 @@ function renderConcepts() {
     const el = document.createElement('div');
     el.className = 'item';
     const left = document.createElement('div');
-    const attrs = [];
-    if (c.importance !== undefined) attrs.push(`重要性:${c.importance.toFixed?.(2) ?? c.importance}`);
-    if (c.abstractness !== undefined) attrs.push(`抽象性:${c.abstractness.toFixed?.(2) ?? c.abstractness}`);
-    const attrStr = attrs.length > 0 ? ` | ${attrs.join(' ')}` : '';
-    left.innerHTML = `<div>${c.name}</div><small>${c.id}${attrStr}</small>`;
+    left.innerHTML = `<div>${c.name}</div><small>${c.id}</small>`;
     const act = document.createElement('div');
     act.className = 'actions';
     const useBtn = document.createElement('button'); useBtn.className='small'; useBtn.textContent='选中';
@@ -197,63 +185,6 @@ function renderConcepts() {
 
 function render() {
   renderConcepts();
-}
-
-async function loadEmotions() {
-  const userId = qs('#emotionUser').value.trim();
-  if (!userId) return;
-  
-  try {
-    const data = await fetchJson(`/api/emotions?group_id=${encodeURIComponent(state.group)}&user_id=${encodeURIComponent(userId)}`);
-    const list = qs('#emotionList');
-    list.innerHTML = '';
-    
-    if (data.profile) {
-      const el = document.createElement('div');
-      el.className = 'item';
-      const emotions = data.profile.emotions || {};
-      const emotionItems = Object.entries(emotions).map(([k, v]) => `${k}:${v.toFixed?.(2) ?? v}`).join(' | ');
-      el.innerHTML = `<div>${userId} 的情感档案</div><small>${emotionItems}</small>`;
-      list.appendChild(el);
-    } else {
-      const el = document.createElement('div');
-      el.className = 'item';
-      el.innerHTML = `<div>未找到 ${userId} 的情感档案</div>`;
-      list.appendChild(el);
-    }
-  } catch (e) {
-    const list = qs('#emotionList');
-    list.innerHTML = '<div class="item"><div>查询失败</div></div>';
-  }
-}
-
-async function loadRelations() {
-  const conceptId = qs('#relationConcept').value.trim();
-  if (!conceptId) return;
-  
-  try {
-    const data = await fetchJson(`/api/relations?group_id=${encodeURIComponent(state.group)}&concept_id=${encodeURIComponent(conceptId)}`);
-    const list = qs('#relationList');
-    list.innerHTML = '';
-    
-    if (data.relations && data.relations.length > 0) {
-      for (const rel of data.relations) {
-        const el = document.createElement('div');
-        el.className = 'item';
-        const relType = rel.relation_type || '未分类';
-        el.innerHTML = `<div>${rel.from_concept} → ${rel.to_concept}</div><small>类型:${relType} | 强度:${rel.strength.toFixed?.(2) ?? rel.strength}</small>`;
-        list.appendChild(el);
-      }
-    } else {
-      const el = document.createElement('div');
-      el.className = 'item';
-      el.innerHTML = `<div>未找到与 ${conceptId} 相关的连接</div>`;
-      list.appendChild(el);
-    }
-  } catch (e) {
-    const list = qs('#relationList');
-    list.innerHTML = '<div class="item"><div>查询失败</div></div>';
-  }
 }
 
 async function main() {
@@ -303,12 +234,11 @@ window.addEventListener('DOMContentLoaded', () => {
       group_id: state.group,
       from_concept: qs('#connFrom').value.trim(),
       to_concept: qs('#connTo').value.trim(),
-      strength: parseFloat(qs('#connStrength').value || '1'),
-      relation_type: qs('#connRelationType').value.trim()
+      strength: parseFloat(qs('#connStrength').value || '1')
     };
     if (!body.from_concept || !body.to_concept) return;
     await fetchJson('/api/connections', {method:'POST', body: JSON.stringify(body)});
-    ['#connFrom','#connTo','#connStrength','#connRelationType'].forEach(id=>qs(id).value='');
+    ['#connFrom','#connTo','#connStrength'].forEach(id=>qs(id).value='');
     await loadConnections(); await loadGraph();
   });
 
@@ -324,14 +254,6 @@ window.addEventListener('DOMContentLoaded', () => {
     await fetchJson('/api/impressions', {method:'POST', body: JSON.stringify(body)});
     ['#impPerson','#impSummary','#impScore','#impDetails'].forEach(id=>qs(id).value='');
     await loadImpressions(); await loadGraph();
-  });
-
-  qs('#getEmotionBtn').addEventListener('click', async () => {
-    await loadEmotions();
-  });
-
-  qs('#getRelationBtn').addEventListener('click', async () => {
-    await loadRelations();
   });
 
   main();
