@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover
     logger = logging.getLogger(__name__)
 
 from .resource_management import resource_manager
+from .web_assets import DEFAULT_INDEX_HTML, DEFAULT_STYLE_CSS, DEFAULT_APP_JS
 
 
 class MemoryWebServer:
@@ -110,10 +111,32 @@ class MemoryWebServer:
         self._static_dir = static_dir
         if not os.path.exists(static_dir):
             os.makedirs(static_dir, exist_ok=True)
+        # 确保在缺失前端文件时自动写入一份默认的 Web 资源
+        self._ensure_default_static_files()
         self._app.router.add_get("/", self.handle_index)
         self._app.router.add_static("/static/", static_dir, show_index=True)
 
     # ---------------------- helpers ----------------------
+    def _ensure_default_static_files(self) -> None:
+        """在 webui 目录缺失前端文件时，自动写入一份内置的默认页面与脚本。"""
+        try:
+            index_path = os.path.join(self._static_dir, "index.html")
+            if not os.path.exists(index_path):
+                with open(index_path, "w", encoding="utf-8") as f:
+                    f.write(DEFAULT_INDEX_HTML)
+
+            style_path = os.path.join(self._static_dir, "style.css")
+            if not os.path.exists(style_path):
+                with open(style_path, "w", encoding="utf-8") as f:
+                    f.write(DEFAULT_STYLE_CSS)
+
+            app_path = os.path.join(self._static_dir, "app.js")
+            if not os.path.exists(app_path):
+                with open(app_path, "w", encoding="utf-8") as f:
+                    f.write(DEFAULT_APP_JS)
+        except Exception as e:
+            logger.warning(f"初始化 Memora Web 静态文件失败: {e}")
+
     async def _load_group(self, group_id: str) -> None:
         # 在当前对象上加载/切换内存图数据
         # 注意：此操作会替换内存中的图，和并发消息处理存在竞争，简单版本忽略。
