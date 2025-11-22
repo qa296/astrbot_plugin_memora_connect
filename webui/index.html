@@ -62,6 +62,16 @@
     </section>
 
     <section class="panel">
+      <h2>记忆搜索</h2>
+      <div class="form">
+        <input type="text" id="memSearchQuery" placeholder="输入关键词搜索记忆">
+        <button id="memSearchBtn">搜索</button>
+        <button id="memSearchClearBtn">清除</button>
+      </div>
+      <div class="list" id="memSearchList"></div>
+    </section>
+
+    <section class="panel">
       <h2>人物印象</h2>
       <div class="form">
         <input type="text" id="impPerson" placeholder="人物">
@@ -71,6 +81,11 @@
         <button id="addImpBtn">记录/更新印象</button>
       </div>
       <div class="list" id="impList"></div>
+      <div class="impression-detail" id="impDetail"></div>
+      <div class="form">
+        <input type="number" id="impDelta" placeholder="好感度调整量(-1~1)" step="0.1" min="-1" max="1">
+        <button id="impAdjustBtn">调整选中人物好感度</button>
+      </div>
     </section>
   </main>
 

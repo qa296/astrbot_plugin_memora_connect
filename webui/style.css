@@ -18,4 +18,8 @@ main { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 16px; }
 .item .actions { display: flex; gap: 6px; }
 button.small { background: #4b83f5; padding: 4px 8px; font-size: 12px; }
 button.danger { background: #da4b4b; }
+.impression-detail { margin-top: 8px; padding: 8px; border-radius: 6px; background: #f5f7ff; border: 1px solid #e1e3ea; font-size: 13px; line-height: 1.5; }
+.impression-detail h4 { margin: 0 0 4px; }
+.impression-detail ul { margin: 4px 0 0; padding-left: 20px; }
+.impression-detail li { margin-bottom: 2px; }
 footer { text-align: center; padding: 12px; color: #666; }

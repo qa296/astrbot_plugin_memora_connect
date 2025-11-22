@@ -3,6 +3,7 @@ const state = {
   token: "",
   concepts: [],
   selectedConceptId: null,
+  selectedPerson: null,
 };
 
 function headers() {
@@ -144,10 +145,91 @@ async function loadImpressions() {
   const data = await fetchJson(`/api/impressions?group_id=${encodeURIComponent(state.group)}`);
   const list = qs('#impList');
   list.innerHTML = '';
-  for (const p of (data.people||[])) {
+  const people = data.people || [];
+  for (const p of people) {
     const el = document.createElement('div');
     el.className = 'item';
     el.innerHTML = `<div>${p.name}</div>`;
+    el.onclick = () => loadImpressionDetail(p.name);
+    list.appendChild(el);
+  }
+  // 如果当前选中人物已不在列表中，则清空详情
+  if (state.selectedPerson && !people.some(x => x.name === state.selectedPerson)) {
+    state.selectedPerson = null;
+    const detailEl = qs('#impDetail');
+    if (detailEl) detailEl.innerHTML = '';
+  }
+}
+
+async function loadImpressionDetail(person) {
+  state.selectedPerson = person;
+  const params = new URLSearchParams();
+  params.set('group_id', state.group);
+  params.set('person', person);
+  const data = await fetchJson(`/api/impressions?${params}`);
+  const detail = qs('#impDetail');
+  if (!detail) return;
+
+  const summary = data.summary || {};
+  const memories = data.memories || [];
+
+  if (!summary.name && !summary.summary && !memories.length) {
+    detail.innerHTML = '<div>暂无印象数据</div>';
+    return;
+  }
+
+  const scoreVal = typeof summary.score === 'number' ? summary.score.toFixed(2) : (summary.score ?? '');
+  const headerHtml = `<h4>${summary.name || person}（好感度: ${scoreVal || '未知'}）</h4>`;
+  const infoHtml = `<div>${summary.summary || ''}</div><small>记录数: ${summary.memory_count ?? memories.length}，最后更新: ${summary.last_updated || ''}</small>`;
+
+  let memHtml = '';
+  if (memories.length) {
+    memHtml = '<ul>' + memories.map(m => {
+      const s = m.score?.toFixed?.(2) ?? m.score;
+      const t = m.last_accessed || '';
+      const d = m.details ? ` — ${m.details}` : '';
+      return `<li>${m.content}${d}<small> 分数:${s ?? ''} 时间:${t}</small></li>`;
+    }).join('') + '</ul>';
+  }
+
+  detail.innerHTML = headerHtml + infoHtml + memHtml;
+}
+
+async function searchMemories() {
+  const list = qs('#memSearchList');
+  if (!list) return;
+  const q = qs('#memSearchQuery').value.trim();
+  list.innerHTML = '';
+  if (!q) return;
+
+  const params = new URLSearchParams();
+  params.set('group_id', state.group);
+  params.set('q', q);
+  const data = await fetchJson(`/api/memories?${params}`);
+  const memories = data.memories || [];
+
+  for (const m of memories) {
+    const el = document.createElement('div');
+    el.className = 'item';
+    const left = document.createElement('div');
+    const concept = state.concepts.find(c => c.id === m.concept_id);
+    const conceptName = concept ? concept.name : m.concept_id;
+    left.innerHTML = `<div>${m.content}</div><small>概念:${conceptName} 强度:${m.strength?.toFixed?.(2) ?? m.strength}</small>`;
+    const act = document.createElement('div');
+    act.className = 'actions';
+
+    const gotoBtn = document.createElement('button');
+    gotoBtn.className = 'small';
+    gotoBtn.textContent = '查看';
+    gotoBtn.onclick = () => {
+      state.selectedConceptId = m.concept_id;
+      render();
+      loadMemories();
+    };
+
+    act.appendChild(gotoBtn);
+    el.appendChild(left);
+    el.appendChild(act);
     list.appendChild(el);
   }
 }
@@ -254,6 +336,44 @@ window.addEventListener('DOMContentLoaded', () => {
     await fetchJson('/api/impressions', {method:'POST', body: JSON.stringify(body)});
     ['#impPerson','#impSummary','#impScore','#impDetails'].forEach(id=>qs(id).value='');
     await loadImpressions(); await loadGraph();
+  });
+
+  const searchBtn = qs('#memSearchBtn');
+  if (searchBtn) searchBtn.addEventListener('click', () => { searchMemories(); });
+  const searchInput = qs('#memSearchQuery');
+  if (searchInput) {
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') searchMemories();
+    });
+  }
+  const clearBtn = qs('#memSearchClearBtn');
+  if (clearBtn) clearBtn.addEventListener('click', () => {
+    const input = qs('#memSearchQuery');
+    if (input) input.value = '';
+    const list = qs('#memSearchList');
+    if (list) list.innerHTML = '';
+  });
+
+  const adjustBtn = qs('#impAdjustBtn');
+  if (adjustBtn) adjustBtn.addEventListener('click', async () => {
+    const deltaInput = qs('#impDelta');
+    if (!deltaInput) return;
+    const deltaStr = deltaInput.value.trim();
+    if (!deltaStr) return;
+    if (!state.selectedPerson) {
+      alert('请先在下方列表中选择一个人物');
+      return;
+    }
+    const delta = parseFloat(deltaStr);
+    if (Number.isNaN(delta)) return;
+    await fetchJson(`/api/impressions/${encodeURIComponent(state.selectedPerson)}/score`, {
+      method: 'PUT',
+      body: JSON.stringify({ group_id: state.group, delta }),
+    });
+    deltaInput.value = '';
+    await loadImpressionDetail(state.selectedPerson);
+    await loadImpressions();
+    await loadGraph();
   });
 
   main();
