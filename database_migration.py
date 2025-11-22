@@ -466,7 +466,10 @@ class SmartDatabaseMigration:
                         name TEXT NOT NULL,
                         created_at REAL NOT NULL,
                         last_accessed REAL NOT NULL,
-                        access_count INTEGER DEFAULT 0
+                        access_count INTEGER DEFAULT 0,
+                        importance REAL DEFAULT 0.5,
+                        abstraction REAL DEFAULT 0.5,
+                        usage_frequency INTEGER DEFAULT 0
                     )
                 ''')
                 
@@ -475,6 +478,14 @@ class SmartDatabaseMigration:
                         id TEXT PRIMARY KEY,
                         concept_id TEXT NOT NULL,
                         content TEXT NOT NULL,
+                        details TEXT DEFAULT "",
+                        participants TEXT DEFAULT "",
+                        location TEXT DEFAULT "",
+                        emotion TEXT DEFAULT "",
+                        emotion_intensity REAL DEFAULT 0.0,
+                        emotion_duration REAL DEFAULT 0.0,
+                        emotion_source TEXT DEFAULT "",
+                        tags TEXT DEFAULT "",
                         group_id TEXT DEFAULT "",
                         created_at REAL NOT NULL,
                         last_accessed REAL NOT NULL,
@@ -489,7 +500,10 @@ class SmartDatabaseMigration:
                         from_concept TEXT NOT NULL,
                         to_concept TEXT NOT NULL,
                         strength REAL DEFAULT 1.0,
-                        last_strengthened REAL NOT NULL
+                        last_strengthened REAL NOT NULL,
+                        relation_type TEXT DEFAULT 'association',
+                        is_directed INTEGER DEFAULT 0,
+                        strength_level TEXT DEFAULT 'medium'
                     )
                 ''')
                 
@@ -576,7 +590,11 @@ class SmartDatabaseMigration:
             FieldSchema(name="name", type="TEXT", not_null=True),
             FieldSchema(name="created_at", type="REAL", not_null=True),
             FieldSchema(name="last_accessed", type="REAL", not_null=True),
-            FieldSchema(name="access_count", type="INTEGER", default_value=0)
+            FieldSchema(name="access_count", type="INTEGER", default_value=0),
+            # 新增概念属性字段
+            FieldSchema(name="importance", type="REAL", default_value=0.5),
+            FieldSchema(name="abstraction", type="REAL", default_value=0.5),
+            FieldSchema(name="usage_frequency", type="INTEGER", default_value=0)
         ]
         schema.tables["concepts"] = concepts_table
         
@@ -590,6 +608,10 @@ class SmartDatabaseMigration:
             FieldSchema(name="participants", type="TEXT", default_value=""),
             FieldSchema(name="location", type="TEXT", default_value=""),
             FieldSchema(name="emotion", type="TEXT", default_value=""),
+            # 新增情感细粒度字段
+            FieldSchema(name="emotion_intensity", type="REAL", default_value=0.0),
+            FieldSchema(name="emotion_duration", type="REAL", default_value=0.0),
+            FieldSchema(name="emotion_source", type="TEXT", default_value=""),
             FieldSchema(name="tags", type="TEXT", default_value=""),
             FieldSchema(name="group_id", type="TEXT", default_value=""),
             FieldSchema(name="created_at", type="REAL", not_null=True),
@@ -612,7 +634,11 @@ class SmartDatabaseMigration:
             FieldSchema(name="from_concept", type="TEXT", not_null=True),
             FieldSchema(name="to_concept", type="TEXT", not_null=True),
             FieldSchema(name="strength", type="REAL", default_value=1.0),
-            FieldSchema(name="last_strengthened", type="REAL", not_null=True)
+            FieldSchema(name="last_strengthened", type="REAL", not_null=True),
+            # 新增关系属性
+            FieldSchema(name="relation_type", type="TEXT", default_value="association"),
+            FieldSchema(name="is_directed", type="INTEGER", default_value=0),
+            FieldSchema(name="strength_level", type="TEXT", default_value="medium")
         ]
         schema.tables["connections"] = connections_table
         
