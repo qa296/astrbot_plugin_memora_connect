@@ -1,0 +1,48 @@
+[run]
+source = 
+    models.py
+    config.py
+    memory_graph.py
+    batch_extractor.py
+omit =
+    .venv/*
+    */site-packages/*
+    tests/*
+    */__pycache__/*
+    */test_*.py
+    setup.py
+    webui/*
+    simple_migration_test.py
+    verify_group_isolation.py
+    database_migration.py
+    embedding_cache_manager.py
+    enhanced_memory_display.py
+    enhanced_memory_recall.py
+    main.py
+    memory_api_gateway.py
+    memory_events.py
+    memory_graph_visualization.py
+    memory_system_core.py
+    resource_management.py
+    temporal_memory.py
+    topic_engine.py
+    user_profiling.py
+    web_assets.py
+    web_server.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
+    @abc.abstractmethod
+    except \(ValueError, TypeError\):
+    except Exception as e:
+precision = 2
+
+[html]
+directory = htmlcov

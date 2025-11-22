@@ -19,12 +19,15 @@ class MemoryGraph:
         self.memories: Dict[str, Memory] = {}
         self.connections: List[Connection] = []
         self.adjacency_list: Dict[str, List[Tuple[str, float]]] = {}  # 邻接表优化
+        self._concept_counter = 0
+        self._memory_counter = 0
         
     def add_concept(self, name: str, concept_id: str = None, created_at: float = None,
                    last_accessed: float = None, access_count: int = 0) -> str:
         """添加概念节点"""
         if concept_id is None:
-            concept_id = f"concept_{int(time.time() * 1000)}"
+            self._concept_counter += 1
+            concept_id = f"concept_{int(time.time() * 1000)}_{self._concept_counter}"
         
         if concept_id not in self.concepts:
             concept = Concept(
@@ -47,7 +50,8 @@ class MemoryGraph:
                    strength: float = 1.0, group_id: str = "") -> str:
         """添加记忆"""
         if memory_id is None:
-            memory_id = f"memory_{int(time.time() * 1000)}"
+            self._memory_counter += 1
+            memory_id = f"memory_{int(time.time() * 1000)}_{self._memory_counter}"
         
         memory = Memory(
             id=memory_id,
