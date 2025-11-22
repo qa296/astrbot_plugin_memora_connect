@@ -103,6 +103,9 @@ class MemoryWebServer:
             web.get("/api/impressions", self.api_impressions),
             web.post("/api/impressions", self.api_create_impression),
             web.put("/api/impressions/{person}/score", self.api_update_impression_score),
+
+            web.get("/api/emotions", self.api_emotions),
+            web.get("/api/relations", self.api_relations),
         ])
 
         # 静态文件
@@ -197,7 +200,26 @@ class MemoryWebServer:
             rows = self._query_all(
                 "SELECT DISTINCT c.id, c.name FROM concepts c JOIN memories m ON m.concept_id=c.id WHERE (m.group_id='' OR m.group_id IS NULL)"
             )
-        concepts = [{"id": r[0], "name": r[1]} for r in rows]
+        concepts = []
+        for r in rows:
+            concept_data = {"id": r[0], "name": r[1]}
+            # 尝试获取重要性和抽象性（如果数据库中有）
+            try:
+                # 检查表中是否有这些列
+                conn = resource_manager.get_db_connection(self.ms.db_path)
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(concepts)")
+                columns = {col[1] for col in cursor.fetchall()}
+                resource_manager.release_db_connection(self.ms.db_path, conn)
+                
+                if "importance" in columns and "abstractness" in columns:
+                    attr_rows = self._query_all("SELECT importance, abstractness FROM concepts WHERE id=?", (r[0],))
+                    if attr_rows and attr_rows[0]:
+                        concept_data["importance"] = attr_rows[0][0] if attr_rows[0][0] is not None else 0
+                        concept_data["abstractness"] = attr_rows[0][1] if attr_rows[0][1] is not None else 0
+            except Exception:
+                pass
+            concepts.append(concept_data)
         return web.json_response({"concepts": concepts})
 
     async def api_create_concept(self, request: web.Request):
@@ -360,18 +382,45 @@ class MemoryWebServer:
         else:
             concept_rows = self._query_all("SELECT DISTINCT concept_id FROM memories WHERE group_id='' OR group_id IS NULL")
         cids = {r[0] for r in concept_rows}
-        rows = self._query_all("SELECT id, from_concept, to_concept, strength, last_strengthened FROM connections")
-        result = [
-            {
-                "id": r[0],
-                "from_concept": r[1],
-                "to_concept": r[2],
-                "strength": r[3],
-                "last_strengthened": r[4],
-            }
-            for r in rows
-            if r[1] in cids and r[2] in cids
-        ]
+        # 检查表中是否有 relation_type 列
+        try:
+            conn = resource_manager.get_db_connection(self.ms.db_path)
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(connections)")
+            columns = {col[1] for col in cursor.fetchall()}
+            resource_manager.release_db_connection(self.ms.db_path, conn)
+            has_relation_type = "relation_type" in columns
+        except Exception:
+            has_relation_type = False
+        
+        if has_relation_type:
+            rows = self._query_all("SELECT id, from_concept, to_concept, strength, last_strengthened, relation_type FROM connections")
+            result = [
+                {
+                    "id": r[0],
+                    "from_concept": r[1],
+                    "to_concept": r[2],
+                    "strength": r[3],
+                    "last_strengthened": r[4],
+                    "relation_type": r[5] if len(r) > 5 and r[5] else ""
+                }
+                for r in rows
+                if r[1] in cids and r[2] in cids
+            ]
+        else:
+            rows = self._query_all("SELECT id, from_concept, to_concept, strength, last_strengthened FROM connections")
+            result = [
+                {
+                    "id": r[0],
+                    "from_concept": r[1],
+                    "to_concept": r[2],
+                    "strength": r[3],
+                    "last_strengthened": r[4],
+                    "relation_type": ""
+                }
+                for r in rows
+                if r[1] in cids and r[2] in cids
+            ]
         return web.json_response({"connections": result})
 
     async def api_create_connection(self, request: web.Request):
@@ -380,10 +429,17 @@ class MemoryWebServer:
         from_c = body.get("from_concept")
         to_c = body.get("to_concept")
         strength = float(body.get("strength") or 1.0)
+        relation_type = (body.get("relation_type") or "").strip()
         if not from_c or not to_c:
             return web.json_response({"error": "from_concept and to_concept required"}, status=400)
         await self._load_group(group_id)
         cid = self.ms.memory_graph.add_connection(str(from_c), str(to_c), strength=strength)
+        # 如果提供了关系类型，添加到连接上
+        if relation_type:
+            for conn in self.ms.memory_graph.connections:
+                if conn.id == cid:
+                    conn.relation_type = relation_type
+                    break
         await self.ms._queue_save_memory_state(group_id)
         return web.json_response({"id": cid})
 
@@ -392,12 +448,33 @@ class MemoryWebServer:
         body = await request.json()
         group_id = (body.get("group_id") or "").strip()
         strength = body.get("strength")
-        if strength is None:
-            return web.json_response({"error": "strength required"}, status=400)
+        relation_type = body.get("relation_type")
+        
+        if strength is None and relation_type is None:
+            return web.json_response({"error": "strength or relation_type required"}, status=400)
+        
         await self._load_group(group_id)
-        ok = self.ms.memory_graph.set_connection_strength(conn_id, float(strength))
-        if not ok:
-            return web.json_response({"error": "not found"}, status=404)
+        
+        # 更新强度
+        if strength is not None:
+            ok = self.ms.memory_graph.set_connection_strength(conn_id, float(strength))
+            if not ok:
+                return web.json_response({"error": "not found"}, status=404)
+        
+        # 更新关系类型
+        if relation_type is not None:
+            # 查找连接并更新
+            for conn in self.ms.memory_graph.connections:
+                if conn.id == conn_id:
+                    if not hasattr(conn, 'relation_type'):
+                        # 如果没有这个属性，动态添加
+                        conn.relation_type = relation_type
+                    else:
+                        conn.relation_type = relation_type
+                    break
+            else:
+                return web.json_response({"error": "not found"}, status=404)
+        
         await self.ms._queue_save_memory_state(group_id)
         return web.json_response({"ok": True})
 
@@ -459,3 +536,103 @@ class MemoryWebServer:
             return web.json_response({"score": new_score})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
+
+    async def api_emotions(self, request: web.Request):
+        """获取用户的情感档案"""
+        group_id = request.query.get("group_id", "")
+        user_id = request.query.get("user_id", "")
+        
+        if not user_id:
+            return web.json_response({"error": "user_id required"}, status=400)
+        
+        try:
+            # 查询情感记录表（如果存在）
+            rows = self._query_all(
+                "SELECT emotion_type, intensity, timestamp FROM emotion_records WHERE user_id=? AND group_id=? ORDER BY timestamp DESC LIMIT 10",
+                (user_id, group_id)
+            )
+            
+            if rows:
+                # 计算情感档案
+                emotions = {}
+                for r in rows:
+                    emotion_type = r[0]
+                    intensity = r[1]
+                    if emotion_type not in emotions:
+                        emotions[emotion_type] = []
+                    emotions[emotion_type].append(intensity)
+                
+                # 计算平均值
+                avg_emotions = {k: sum(v) / len(v) for k, v in emotions.items()}
+                
+                return web.json_response({
+                    "profile": {
+                        "user_id": user_id,
+                        "group_id": group_id,
+                        "emotions": avg_emotions
+                    }
+                })
+            else:
+                return web.json_response({"profile": None})
+        except Exception as e:
+            logger.error(f"获取情感档案失败: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def api_relations(self, request: web.Request):
+        """获取概念的关系"""
+        group_id = request.query.get("group_id", "")
+        concept_id = request.query.get("concept_id", "")
+        
+        if not concept_id:
+            return web.json_response({"error": "concept_id required"}, status=400)
+        
+        try:
+            # 检查表中是否有 relation_type 列
+            try:
+                conn = resource_manager.get_db_connection(self.ms.db_path)
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(connections)")
+                columns = {col[1] for col in cursor.fetchall()}
+                resource_manager.release_db_connection(self.ms.db_path, conn)
+                has_relation_type = "relation_type" in columns
+            except Exception:
+                has_relation_type = False
+            
+            # 查询与该概念相关的所有连接
+            if has_relation_type:
+                rows = self._query_all(
+                    "SELECT id, from_concept, to_concept, strength, last_strengthened, relation_type FROM connections WHERE from_concept=? OR to_concept=?",
+                    (concept_id, concept_id)
+                )
+                relations = [
+                    {
+                        "id": r[0],
+                        "from_concept": r[1],
+                        "to_concept": r[2],
+                        "strength": r[3],
+                        "last_strengthened": r[4],
+                        "relation_type": r[5] if len(r) > 5 and r[5] else ""
+                    }
+                    for r in rows
+                ]
+            else:
+                rows = self._query_all(
+                    "SELECT id, from_concept, to_concept, strength, last_strengthened FROM connections WHERE from_concept=? OR to_concept=?",
+                    (concept_id, concept_id)
+                )
+                relations = [
+                    {
+                        "id": r[0],
+                        "from_concept": r[1],
+                        "to_concept": r[2],
+                        "strength": r[3],
+                        "last_strengthened": r[4],
+                        "relation_type": ""
+                    }
+                    for r in rows
+                ]
+            
+            return web.json_response({"relations": relations})
+        except Exception as e:
+            logger.error(f"获取概念关系失败: {e}")
+            return web.json_response({"error": str(e)}, status=500)
