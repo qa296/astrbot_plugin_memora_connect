@@ -146,7 +146,7 @@
       "port": {
         "description": "端口",
         "type": "int",
-        "default": 8350
+        "default": 6180
       },
       "access_token": {
         "description": "访问令牌(可选)",
