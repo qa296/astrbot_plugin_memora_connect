@@ -25,12 +25,12 @@ from .embedding_cache_manager import EmbeddingCacheManager
 from .enhanced_memory_recall import EnhancedMemoryRecall
 from .memory_graph_visualization import MemoryGraphVisualizer
 from .resource_management import resource_manager
-from .web_server import MemoryWebServer
-from .memory_events import MemoryEventBus, MemoryEvent, MemoryEventType, initialize_event_bus, shutdown_event_bus
-from .topic_engine import TopicEngine
-from .user_profiling import UserProfilingSystem
-from .temporal_memory import TemporalMemorySystem
-from .memory_api_gateway import MemoryAPIGateway
+from .web.web_server import MemoryWebServer
+from .proactive.memory_events import MemoryEventBus, MemoryEvent, MemoryEventType, initialize_event_bus, shutdown_event_bus
+from .proactive.topic_engine import TopicEngine
+from .proactive.user_profiling import UserProfilingSystem
+from .proactive.temporal_memory import TemporalMemorySystem
+from .proactive.memory_api_gateway import MemoryAPIGateway
 
 
 @register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.6", "https://github.com/qa296/astrbot_plugin_memora_connect")
