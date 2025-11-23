@@ -3,95 +3,149 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Memora Connect Web</title>
+  <title>Memora Dashboard</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="https://unpkg.com/cytoscape@3.26.0/dist/cytoscape.min.js"></script>
+  <!-- Simple icons if needed, can add FontAwesome here if internet access allows, otherwise use unicode/svg -->
 </head>
 <body>
   <header>
-    <h1>Memora Connect Web</h1>
+    <div class="brand">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="#007AFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M2 17L12 22L22 17" stroke="#007AFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M2 12L12 17L22 12" stroke="#007AFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <h1>Memora</h1>
+    </div>
     <div class="toolbar">
-      <label>访问令牌: <input type="password" id="tokenInput" placeholder="如果配置了 access_token 则需填写"></label>
-      <label>群组: <select id="groupSelect"></select></label>
-      <button id="refreshBtn">刷新</button>
+      <select id="groupSelect"></select>
+      <input type="password" id="tokenInput" placeholder="访问令牌">
+      <button id="refreshBtn" class="primary">刷新</button>
     </div>
   </header>
 
   <main>
-    <section class="panel">
-      <h2>记忆图谱</h2>
-      <div id="graph"></div>
-    </section>
-    <section class="panel">
-      <h2>概念与记忆</h2>
-      <div class="two-col">
-        <div>
-          <h3>概念</h3>
-          <div class="list" id="conceptList"></div>
-          <div class="form">
-            <input type="text" id="newConceptName" placeholder="新概念名称">
-            <button id="addConceptBtn">添加概念</button>
-          </div>
+    <!-- Left Column: Concepts -->
+    <div class="sidebar">
+      <section class="panel" style="flex: 1;">
+        <div class="panel-header">
+          <h2>概念</h2>
         </div>
-        <div>
-          <h3>记忆</h3>
-          <div class="form">
-            <input type="text" id="memContent" placeholder="内容">
-            <input type="text" id="memDetails" placeholder="细节">
-            <input type="text" id="memParticipants" placeholder="参与者">
-            <input type="text" id="memTags" placeholder="标签">
-            <input type="text" id="memEmotion" placeholder="情感">
-            <input type="text" id="memLocation" placeholder="地点">
-            <input type="number" id="memStrength" placeholder="强度(0-1)" step="0.1" min="0" max="1">
-            <button id="addMemoryBtn">添加记忆(使用选中概念)</button>
+        <div class="panel-body">
+          <div class="form-grid" style="margin-bottom: 12px;">
+            <div class="form-row">
+              <input type="text" id="newConceptName" placeholder="新概念名称" style="flex:1;">
+              <button id="addConceptBtn" class="primary">+</button>
+            </div>
+          </div>
+          <div class="list" id="conceptList"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Center Column: Graph & Memories -->
+    <div class="center-stage">
+      <section class="panel" style="height: 500px; flex-shrink: 0;">
+        <div class="panel-header">
+          <h2>记忆图谱</h2>
+        </div>
+        <div class="panel-body" style="padding: 0;">
+          <div id="graph"></div>
+        </div>
+      </section>
+
+      <section class="panel" style="flex: 1;">
+        <div class="panel-header">
+          <h2>记忆详情</h2>
+        </div>
+        <div class="panel-body">
+          <div class="form-grid" style="margin-bottom: 20px;">
+            <div class="form-row">
+              <input type="text" id="memContent" placeholder="内容" style="flex: 2;">
+              <input type="text" id="memDetails" placeholder="细节" style="flex: 2;">
+              <button id="addMemoryBtn" class="primary">添加</button>
+            </div>
+            <div class="form-row">
+              <input type="text" id="memParticipants" placeholder="参与者">
+              <input type="text" id="memTags" placeholder="标签">
+              <input type="text" id="memEmotion" placeholder="情感">
+            </div>
+            <div class="form-row">
+              <input type="text" id="memLocation" placeholder="地点">
+              <input type="number" id="memStrength" placeholder="强度(0-1)" step="0.1" min="0" max="1">
+            </div>
           </div>
           <div class="list" id="memoryList"></div>
         </div>
-      </div>
-    </section>
+      </section>
+    </div>
 
-    <section class="panel">
-      <h2>连接</h2>
-      <div class="form">
-        <input type="text" id="connFrom" placeholder="from 概念ID">
-        <input type="text" id="connTo" placeholder="to 概念ID">
-        <input type="number" id="connStrength" placeholder="强度(0-1)" value="1" step="0.1" min="0" max="1">
-        <button id="addConnBtn">添加连接</button>
-      </div>
-      <div class="list" id="connList"></div>
-    </section>
+    <!-- Right Column: Impressions & Search -->
+    <div class="sidebar">
+      <!-- Search Panel -->
+      <section class="panel">
+        <div class="panel-header">
+          <h2>搜索</h2>
+        </div>
+        <div class="panel-body">
+          <div class="form-row">
+            <input type="text" id="memSearchQuery" placeholder="搜索记忆..." style="flex: 1;">
+            <button id="memSearchBtn" class="primary">Go</button>
+            <button id="memSearchClearBtn">X</button>
+          </div>
+          <div class="list" id="memSearchList" style="margin-top: 12px; max-height: 200px; overflow-y: auto;"></div>
+        </div>
+      </section>
 
-    <section class="panel">
-      <h2>记忆搜索</h2>
-      <div class="form">
-        <input type="text" id="memSearchQuery" placeholder="输入关键词搜索记忆">
-        <button id="memSearchBtn">搜索</button>
-        <button id="memSearchClearBtn">清除</button>
-      </div>
-      <div class="list" id="memSearchList"></div>
-    </section>
+      <!-- Impressions Panel -->
+      <section class="panel" style="flex: 1;">
+        <div class="panel-header">
+          <h2>人物印象</h2>
+        </div>
+        <div class="panel-body">
+           <div class="form-grid" style="margin-bottom: 12px;">
+             <div class="form-row">
+                <input type="text" id="impPerson" placeholder="人物" style="flex: 1;">
+                <input type="number" id="impScore" placeholder="分数" style="width: 60px;">
+                <button id="addImpBtn" class="primary">记录</button>
+             </div>
+             <input type="text" id="impSummary" placeholder="摘要">
+             <input type="text" id="impDetails" placeholder="详细">
+           </div>
+           
+           <div class="list" id="impList" style="margin-bottom: 12px; max-height: 200px; overflow-y: auto;"></div>
+           
+           <div id="impDetail" class="impression-detail" style="display: none;"></div>
+           
+           <div class="form-row" style="margin-top: 12px;">
+             <input type="number" id="impDelta" placeholder="调整(-1~1)" step="0.1" min="-1" max="1" style="flex:1">
+             <button id="impAdjustBtn">调整好感</button>
+           </div>
+        </div>
+      </section>
 
-    <section class="panel">
-      <h2>人物印象</h2>
-      <div class="form">
-        <input type="text" id="impPerson" placeholder="人物">
-        <input type="text" id="impSummary" placeholder="摘要">
-        <input type="number" id="impScore" placeholder="分数(0-1)" step="0.1" min="0" max="1">
-        <input type="text" id="impDetails" placeholder="详细">
-        <button id="addImpBtn">记录/更新印象</button>
-      </div>
-      <div class="list" id="impList"></div>
-      <div class="impression-detail" id="impDetail"></div>
-      <div class="form">
-        <input type="number" id="impDelta" placeholder="好感度调整量(-1~1)" step="0.1" min="-1" max="1">
-        <button id="impAdjustBtn">调整选中人物好感度</button>
-      </div>
-    </section>
+      <!-- Connections Panel -->
+      <section class="panel">
+        <div class="panel-header">
+          <h2>连接</h2>
+        </div>
+        <div class="panel-body">
+          <div class="form-grid" style="margin-bottom: 12px;">
+            <div class="form-row">
+              <input type="text" id="connFrom" placeholder="From" style="flex: 1;">
+              <input type="text" id="connTo" placeholder="To" style="flex: 1;">
+            </div>
+            <div class="form-row">
+              <input type="number" id="connStrength" placeholder="强度" value="1" step="0.1" min="0" max="1" style="flex: 1;">
+              <button id="addConnBtn" class="primary">连线</button>
+            </div>
+          </div>
+          <div class="list" id="connList" style="max-height: 200px; overflow-y: auto;"></div>
+        </div>
+      </section>
+    </div>
   </main>
-
-  <footer>
-    <small>Memora Connect Web UI</small>
-  </footer>
 
   <script src="/static/app.js"></script>
 </body>
