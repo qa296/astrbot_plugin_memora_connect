@@ -1,97 +1,401 @@
-<!doctype html>
-<html lang="zh-CN">
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Memora Connect Web</title>
+  <title>Memora Connect Dashboard</title>
+  
+  <!-- Styles -->
+  <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            primary: '#409eff',
+            dark: {
+              bg: '#1a1a1a',
+              panel: '#242424',
+              border: '#363636'
+            }
+          }
+        }
+      }
+    }
+  </script>
   <link rel="stylesheet" href="/static/style.css">
+
+  <!-- Libraries -->
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <script src="https://unpkg.com/element-plus/dist/index.full.js"></script>
+  <script src="https://unpkg.com/@element-plus/icons-vue"></script>
+  <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
   <script src="https://unpkg.com/cytoscape@3.26.0/dist/cytoscape.min.js"></script>
 </head>
-<body>
-  <header>
-    <h1>Memora Connect Web</h1>
-    <div class="toolbar">
-      <label>访问令牌: <input type="password" id="tokenInput" placeholder="如果配置了 access_token 则需填写"></label>
-      <label>群组: <select id="groupSelect"></select></label>
-      <button id="refreshBtn">刷新</button>
+<body class="bg-gray-100 dark:bg-dark-bg text-gray-800 dark:text-gray-200 m-0 transition-colors duration-300">
+  <div id="app" class="h-screen flex flex-col overflow-hidden" v-cloak>
+    
+    <!-- Header -->
+    <header class="bg-white dark:bg-dark-panel border-b border-gray-200 dark:border-dark-border h-14 flex items-center px-4 justify-between shadow-sm z-10">
+      <div class="flex items-center gap-3">
+        <el-icon :size="24" class="text-primary"><connection /></el-icon>
+        <h1 class="font-bold text-lg tracking-wide">Memora Connect</h1>
+      </div>
+      
+      <div class="flex items-center gap-4">
+        <div class="flex items-center gap-2">
+            <span class="text-sm text-gray-500">群组:</span>
+            <el-select v-model="state.group" placeholder="选择群组" size="small" @change="refreshData" class="w-40">
+                <el-option v-for="g in groups" :key="g" :label="g || '默认/私聊'" :value="g"></el-option>
+            </el-select>
+        </div>
+        
+        <el-input
+          v-if="!hasTokenInUrl"
+          v-model="state.token"
+          type="password"
+          placeholder="Access Token"
+          size="small"
+          class="w-32"
+          show-password
+          @change="refreshData"
+        ></el-input>
+
+        <el-button circle size="small" @click="toggleTheme">
+          <el-icon v-if="isDark"><moon /></el-icon>
+          <el-icon v-else><sunny /></el-icon>
+        </el-button>
+        
+        <el-button type="primary" circle size="small" @click="refreshData" :loading="loading">
+          <el-icon><refresh /></el-icon>
+        </el-button>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <div class="flex-1 flex overflow-hidden">
+      
+      <!-- Sidebar -->
+      <aside class="w-64 bg-white dark:bg-dark-panel border-r border-gray-200 dark:border-dark-border flex flex-col">
+        <el-menu
+          :default-active="activeTab"
+          class="border-none bg-transparent"
+          @select="(val) => activeTab = val"
+        >
+          <el-menu-item index="graph">
+            <el-icon><share /></el-icon>
+            <span>记忆图谱</span>
+          </el-menu-item>
+          <el-menu-item index="concepts">
+            <el-icon><collection /></el-icon>
+            <span>概念管理</span>
+          </el-menu-item>
+          <el-menu-item index="memories">
+            <el-icon><notebook /></el-icon>
+            <span>记忆列表</span>
+          </el-menu-item>
+          <el-menu-item index="connections">
+            <el-icon><link /></el-icon>
+            <span>连接管理</span>
+          </el-menu-item>
+          <el-menu-item index="impressions">
+            <el-icon><user /></el-icon>
+            <span>人物印象</span>
+          </el-menu-item>
+        </el-menu>
+
+        <div class="mt-auto p-4 text-xs text-center text-gray-400 border-t border-gray-100 dark:border-dark-border">
+          AstrBot Memora Plugin<br>v0.2.7+
+        </div>
+      </aside>
+
+      <!-- View Area -->
+      <main class="flex-1 relative bg-gray-50 dark:bg-dark-bg overflow-hidden">
+        
+        <!-- Graph View -->
+        <div v-show="activeTab === 'graph'" class="absolute inset-0 flex flex-col">
+          <div id="cy" class="flex-1 bg-gray-50 dark:bg-gray-900"></div>
+          <!-- Graph Overlay Controls -->
+          <div class="absolute top-4 left-4 p-2 bg-white/80 dark:bg-black/50 backdrop-blur rounded shadow space-y-2 z-10 w-64">
+             <div class="text-xs font-bold mb-1">图谱控制</div>
+             <el-select v-model="graphLayout" size="small" class="w-full" placeholder="布局" @change="updateGraphLayout">
+                <el-option label="Cose (智能)" value="cose"></el-option>
+                <el-option label="Grid (网格)" value="grid"></el-option>
+                <el-option label="Circle (圆形)" value="circle"></el-option>
+                <el-option label="Concentric (同心)" value="concentric"></el-option>
+             </el-select>
+             <div class="flex gap-2">
+                <el-button size="small" @click="fitGraph">适配视图</el-button>
+                <el-button size="small" @click="randomizeGraph">随机重排</el-button>
+             </div>
+             <div v-if="selectedNode" class="mt-2 pt-2 border-t border-gray-200 dark:border-gray-600 text-sm">
+                <div class="font-bold truncate">{{ selectedNode.label }}</div>
+                <div class="text-xs text-gray-500">ID: {{ selectedNode.id }}</div>
+                <div class="mt-2 flex gap-2">
+                   <el-button type="primary" size="small" link @click="viewConceptMemories(selectedNode.id)">查看记忆</el-button>
+                </div>
+             </div>
+          </div>
+        </div>
+
+        <!-- Concepts View -->
+        <div v-if="activeTab === 'concepts'" class="h-full flex flex-col p-4 overflow-auto">
+          <div class="flex justify-between items-center mb-4">
+            <h2 class="text-xl font-bold">概念管理</h2>
+            <el-button type="primary" @click="showAddConceptDialog = true">
+                <el-icon class="mr-1"><plus /></el-icon>添加概念
+            </el-button>
+          </div>
+          
+          <el-card shadow="never" class="flex-1 flex flex-col">
+             <el-table :data="concepts" stripe style="width: 100%" height="100%">
+                <el-table-column prop="id" label="ID" width="100" show-overflow-tooltip></el-table-column>
+                <el-table-column prop="name" label="名称"></el-table-column>
+                <el-table-column label="操作" width="200" align="right">
+                    <template #default="scope">
+                        <el-button size="small" @click="selectConcept(scope.row)">查看</el-button>
+                        <el-button size="small" type="warning" @click="editConcept(scope.row)">重命名</el-button>
+                        <el-button size="small" type="danger" @click="deleteConcept(scope.row)">删除</el-button>
+                    </template>
+                </el-table-column>
+             </el-table>
+          </el-card>
+        </div>
+
+        <!-- Memories View -->
+        <div v-if="activeTab === 'memories'" class="h-full flex flex-col p-4 overflow-auto">
+           <div class="flex justify-between items-center mb-4">
+             <div class="flex items-center gap-4">
+                 <h2 class="text-xl font-bold">记忆列表</h2>
+                 <el-input v-model="searchQuery" placeholder="搜索记忆内容..." prefix-icon="Search" clearable @clear="searchMemories" @keyup.enter="searchMemories" class="w-64"></el-input>
+             </div>
+             <el-button type="primary" @click="openAddMemoryDialog()">
+                 <el-icon class="mr-1"><plus /></el-icon>添加记忆
+             </el-button>
+           </div>
+
+           <el-card shadow="never" class="flex-1 flex flex-col">
+              <el-table :data="memories" stripe style="width: 100%" height="100%">
+                 <el-table-column prop="content" label="内容" min-width="300" show-overflow-tooltip></el-table-column>
+                 <el-table-column prop="concept_id" label="所属概念" width="150"></el-table-column>
+                 <el-table-column prop="strength" label="强度" width="100">
+                    <template #default="scope">
+                        <el-tag :type="getStrengthType(scope.row.strength)">{{ scope.row.strength?.toFixed(2) }}</el-tag>
+                    </template>
+                 </el-table-column>
+                 <el-table-column prop="last_accessed" label="最后访问" width="180">
+                    <template #default="scope">
+                        {{ formatDate(scope.row.last_accessed) }}
+                    </template>
+                 </el-table-column>
+                 <el-table-column label="操作" width="180" align="right">
+                     <template #default="scope">
+                         <el-button size="small" @click="editMemory(scope.row)">编辑</el-button>
+                         <el-button size="small" type="danger" @click="deleteMemory(scope.row)">删除</el-button>
+                     </template>
+                 </el-table-column>
+              </el-table>
+           </el-card>
+        </div>
+
+        <!-- Connections View -->
+        <div v-if="activeTab === 'connections'" class="h-full flex flex-col p-4 overflow-auto">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold">连接管理</h2>
+                <el-button type="primary" @click="showAddConnectionDialog = true">
+                    <el-icon class="mr-1"><plus /></el-icon>添加连接
+                </el-button>
+            </div>
+            
+            <el-card shadow="never" class="flex-1 flex flex-col">
+                <el-table :data="connections" stripe style="width: 100%" height="100%">
+                    <el-table-column prop="from_concept" label="From 概念" width="200"></el-table-column>
+                    <el-table-column width="50" align="center">
+                        <template #default>
+                            <el-icon><right /></el-icon>
+                        </template>
+                    </el-table-column>
+                    <el-table-column prop="to_concept" label="To 概念" width="200"></el-table-column>
+                    <el-table-column prop="strength" label="强度" width="120">
+                         <template #default="scope">
+                             <el-progress :percentage="scope.row.strength * 100" :show-text="false"></el-progress>
+                             <span class="text-xs">{{ scope.row.strength.toFixed(2) }}</span>
+                         </template>
+                    </el-table-column>
+                    <el-table-column label="操作" align="right">
+                        <template #default="scope">
+                            <el-button size="small" @click="editConnection(scope.row)">调整强度</el-button>
+                            <el-button size="small" type="danger" @click="deleteConnection(scope.row)">删除</el-button>
+                        </template>
+                    </el-table-column>
+                </el-table>
+            </el-card>
+        </div>
+
+        <!-- Impressions View -->
+        <div v-if="activeTab === 'impressions'" class="h-full flex flex-col p-4 overflow-auto">
+             <div class="flex h-full gap-4">
+                 <!-- Left: Person List -->
+                 <div class="w-1/4 flex flex-col">
+                     <div class="flex justify-between items-center mb-4">
+                         <h2 class="text-xl font-bold">人物列表</h2>
+                         <el-button size="small" type="primary" icon="Plus" circle @click="showAddImpressionDialog = true"></el-button>
+                     </div>
+                     <el-card shadow="never" class="flex-1 overflow-auto" :body-style="{ padding: '0' }">
+                         <el-menu :default-active="selectedPerson" @select="loadImpressionDetail">
+                             <el-menu-item v-for="p in impressionPeople" :key="p.name" :index="p.name">
+                                 <span>{{ p.name }}</span>
+                             </el-menu-item>
+                         </el-menu>
+                     </el-card>
+                 </div>
+
+                 <!-- Right: Detail -->
+                 <div class="flex-1 flex flex-col">
+                      <div v-if="selectedPerson" class="h-full flex flex-col">
+                          <div class="bg-white dark:bg-dark-panel p-4 rounded shadow-sm mb-4">
+                              <div class="flex justify-between items-start">
+                                  <div>
+                                      <h3 class="text-2xl font-bold mb-2">{{ impressionDetail?.summary?.name || selectedPerson }}</h3>
+                                      <div class="text-gray-500 mb-2">{{ impressionDetail?.summary?.summary }}</div>
+                                      <div class="flex items-center gap-4 text-sm">
+                                          <span class="flex items-center gap-1"><el-icon><star /></el-icon> 好感度: {{ impressionDetail?.summary?.score?.toFixed(2) || 'N/A' }}</span>
+                                          <span class="flex items-center gap-1"><el-icon><clock /></el-icon> 更新于: {{ formatDate(impressionDetail?.summary?.last_updated) }}</span>
+                                      </div>
+                                  </div>
+                                  <div class="flex flex-col gap-2">
+                                      <div class="flex gap-2">
+                                          <el-input-number v-model="scoreDelta" size="small" :step="0.1" :min="-1" :max="1" style="width: 100px"></el-input-number>
+                                          <el-button size="small" @click="adjustScore">调整好感</el-button>
+                                      </div>
+                                  </div>
+                              </div>
+                          </div>
+
+                          <el-card shadow="never" class="flex-1 flex flex-col" header="印象记录">
+                              <el-timeline>
+                                  <el-timeline-item
+                                    v-for="(mem, index) in impressionDetail?.memories"
+                                    :key="index"
+                                    :timestamp="formatDate(mem.created_at)"
+                                    placement="top"
+                                  >
+                                    <el-card shadow="hover" :body-style="{ padding: '12px' }">
+                                        <div class="font-medium">{{ mem.content }}</div>
+                                        <div class="text-xs text-gray-400 mt-1" v-if="mem.details">细节: {{ mem.details }}</div>
+                                        <div class="text-xs text-gray-400 mt-1 flex gap-2">
+                                            <span v-if="mem.score !== null">Score: {{ mem.score }}</span>
+                                        </div>
+                                    </el-card>
+                                  </el-timeline-item>
+                              </el-timeline>
+                          </el-card>
+                      </div>
+                      <div v-else class="h-full flex items-center justify-center text-gray-400">
+                          请选择左侧人物查看详情
+                      </div>
+                 </div>
+             </div>
+        </div>
+
+      </main>
     </div>
-  </header>
 
-  <main>
-    <section class="panel">
-      <h2>记忆图谱</h2>
-      <div id="graph"></div>
-    </section>
-    <section class="panel">
-      <h2>概念与记忆</h2>
-      <div class="two-col">
-        <div>
-          <h3>概念</h3>
-          <div class="list" id="conceptList"></div>
-          <div class="form">
-            <input type="text" id="newConceptName" placeholder="新概念名称">
-            <button id="addConceptBtn">添加概念</button>
-          </div>
-        </div>
-        <div>
-          <h3>记忆</h3>
-          <div class="form">
-            <input type="text" id="memContent" placeholder="内容">
-            <input type="text" id="memDetails" placeholder="细节">
-            <input type="text" id="memParticipants" placeholder="参与者">
-            <input type="text" id="memTags" placeholder="标签">
-            <input type="text" id="memEmotion" placeholder="情感">
-            <input type="text" id="memLocation" placeholder="地点">
-            <input type="number" id="memStrength" placeholder="强度(0-1)" step="0.1" min="0" max="1">
-            <button id="addMemoryBtn">添加记忆(使用选中概念)</button>
-          </div>
-          <div class="list" id="memoryList"></div>
-        </div>
-      </div>
-    </section>
+    <!-- Dialogs -->
+    
+    <!-- Add Concept -->
+    <el-dialog v-model="showAddConceptDialog" title="添加概念" width="400px">
+        <el-input v-model="newConceptName" placeholder="输入概念名称"></el-input>
+        <template #footer>
+            <el-button @click="showAddConceptDialog = false">取消</el-button>
+            <el-button type="primary" @click="createConcept">确定</el-button>
+        </template>
+    </el-dialog>
 
-    <section class="panel">
-      <h2>连接</h2>
-      <div class="form">
-        <input type="text" id="connFrom" placeholder="from 概念ID">
-        <input type="text" id="connTo" placeholder="to 概念ID">
-        <input type="number" id="connStrength" placeholder="强度(0-1)" value="1" step="0.1" min="0" max="1">
-        <button id="addConnBtn">添加连接</button>
-      </div>
-      <div class="list" id="connList"></div>
-    </section>
+    <!-- Add/Edit Memory -->
+    <el-dialog v-model="showMemoryDialog" :title="isEditMemory ? '编辑记忆' : '添加记忆'" width="500px">
+        <el-form label-width="80px">
+            <el-form-item label="所属概念" v-if="!isEditMemory">
+                <el-select v-model="memoryForm.concept_id" filterable allow-create default-first-option placeholder="选择或输入概念" class="w-full">
+                    <el-option v-for="c in concepts" :key="c.id" :label="c.name" :value="c.id"></el-option>
+                </el-select>
+            </el-form-item>
+            <el-form-item label="内容">
+                <el-input v-model="memoryForm.content" type="textarea" rows="3"></el-input>
+            </el-form-item>
+            <el-form-item label="细节">
+                <el-input v-model="memoryForm.details"></el-input>
+            </el-form-item>
+            <el-form-item label="参与者">
+                <el-input v-model="memoryForm.participants"></el-input>
+            </el-form-item>
+            <el-form-item label="地点">
+                <el-input v-model="memoryForm.location"></el-input>
+            </el-form-item>
+            <el-form-item label="情感">
+                <el-input v-model="memoryForm.emotion"></el-input>
+            </el-form-item>
+            <el-form-item label="标签">
+                <el-input v-model="memoryForm.tags"></el-input>
+            </el-form-item>
+            <el-form-item label="强度">
+                <el-slider v-model="memoryForm.strength" :min="0" :max="1" :step="0.1" show-input></el-slider>
+            </el-form-item>
+        </el-form>
+        <template #footer>
+            <el-button @click="showMemoryDialog = false">取消</el-button>
+            <el-button type="primary" @click="saveMemory">保存</el-button>
+        </template>
+    </el-dialog>
 
-    <section class="panel">
-      <h2>记忆搜索</h2>
-      <div class="form">
-        <input type="text" id="memSearchQuery" placeholder="输入关键词搜索记忆">
-        <button id="memSearchBtn">搜索</button>
-        <button id="memSearchClearBtn">清除</button>
-      </div>
-      <div class="list" id="memSearchList"></div>
-    </section>
+    <!-- Add Connection -->
+    <el-dialog v-model="showAddConnectionDialog" title="添加连接" width="400px">
+        <el-form label-width="80px">
+            <el-form-item label="From">
+                 <el-select v-model="connectionForm.from_concept" filterable placeholder="起始概念" class="w-full">
+                     <el-option v-for="c in concepts" :key="c.id" :label="c.name" :value="c.id"></el-option>
+                 </el-select>
+            </el-form-item>
+            <el-form-item label="To">
+                 <el-select v-model="connectionForm.to_concept" filterable placeholder="目标概念" class="w-full">
+                     <el-option v-for="c in concepts" :key="c.id" :label="c.name" :value="c.id"></el-option>
+                 </el-select>
+            </el-form-item>
+            <el-form-item label="强度">
+                <el-slider v-model="connectionForm.strength" :min="0" :max="1" :step="0.1" show-input></el-slider>
+            </el-form-item>
+        </el-form>
+        <template #footer>
+            <el-button @click="showAddConnectionDialog = false">取消</el-button>
+            <el-button type="primary" @click="createConnection">确定</el-button>
+        </template>
+    </el-dialog>
 
-    <section class="panel">
-      <h2>人物印象</h2>
-      <div class="form">
-        <input type="text" id="impPerson" placeholder="人物">
-        <input type="text" id="impSummary" placeholder="摘要">
-        <input type="number" id="impScore" placeholder="分数(0-1)" step="0.1" min="0" max="1">
-        <input type="text" id="impDetails" placeholder="详细">
-        <button id="addImpBtn">记录/更新印象</button>
-      </div>
-      <div class="list" id="impList"></div>
-      <div class="impression-detail" id="impDetail"></div>
-      <div class="form">
-        <input type="number" id="impDelta" placeholder="好感度调整量(-1~1)" step="0.1" min="-1" max="1">
-        <button id="impAdjustBtn">调整选中人物好感度</button>
-      </div>
-    </section>
-  </main>
+    <!-- Add Impression -->
+    <el-dialog v-model="showAddImpressionDialog" title="添加印象" width="400px">
+        <el-form label-width="80px">
+             <el-form-item label="人物">
+                 <el-input v-model="impressionForm.person"></el-input>
+             </el-form-item>
+             <el-form-item label="摘要">
+                 <el-input v-model="impressionForm.summary" type="textarea"></el-input>
+             </el-form-item>
+             <el-form-item label="初始好感">
+                 <el-input-number v-model="impressionForm.score" :min="0" :max="1" :step="0.1"></el-input-number>
+             </el-form-item>
+             <el-form-item label="细节">
+                 <el-input v-model="impressionForm.details"></el-input>
+             </el-form-item>
+        </el-form>
+        <template #footer>
+            <el-button @click="showAddImpressionDialog = false">取消</el-button>
+            <el-button type="primary" @click="createImpression">确定</el-button>
+        </template>
+    </el-dialog>
 
-  <footer>
-    <small>Memora Connect Web UI</small>
-  </footer>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>
