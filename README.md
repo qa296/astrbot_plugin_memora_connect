@@ -428,15 +428,26 @@ astrbot_plugin_memora_connect/
 ├── metadata.yaml              # 插件元数据
 ├── requirements.txt           # 依赖包列表
 ├── _conf_schema.json          # 配置模式定义
-├── database_migration.py      # 数据库迁移系统
+├── config.py                  # 记忆系统配置管理
+├── models.py                  # 概念、记忆、连接等数据模型
+├── memory_system_core.py      # 核心记忆系统实现
+├── memory_graph.py            # 内存中的记忆图数据结构
+├── batch_extractor.py         # 批量记忆提取
 ├── enhanced_memory_display.py # 增强记忆显示
 ├── enhanced_memory_recall.py  # 增强记忆召回
 ├── embedding_cache_manager.py # 嵌入向量缓存管理
-├── memory_graph_visualization.py # 记忆图谱可视化
+├── database_migration.py      # 数据库迁移系统
 ├── resource_management.py     # 资源与连接池管理
-├── web_server.py              # 轻量级 Web 管理界面
-├── webui/                     # Web 静态资源
-├── verify_database_structure.py # 结构校验脚本
+├── proactive/                 # 主动能力相关模块
+│   ├── memory_api_gateway.py  # 记忆系统统一 API 网关
+│   ├── topic_engine.py        # 实时话题引擎
+│   ├── user_profiling.py      # 用户画像与亲密度系统
+│   ├── temporal_memory.py     # 时间维度记忆与历史今日
+│   └── memory_events.py       # 记忆系统事件总线
+├── web/                       # 内置 Web 管理界面
+│   ├── web_server.py          # Web 服务入口
+│   ├── web_assets.py          # 内置前端资源模板
+│   └── webui/                 # Web 静态资源
 ├── verify_group_isolation.py  # 群聊隔离验证脚本
 ├── simple_migration_test.py   # 迁移测试脚本
 └── README.md                  # 项目文档
