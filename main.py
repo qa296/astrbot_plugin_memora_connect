@@ -26,11 +26,6 @@ from .enhanced_memory_recall import EnhancedMemoryRecall
 from .memory_graph_visualization import MemoryGraphVisualizer
 from .resource_management import resource_manager
 from .web_server import MemoryWebServer
-from .memory_events import MemoryEventBus, MemoryEvent, MemoryEventType, initialize_event_bus, shutdown_event_bus
-from .topic_engine import TopicEngine
-from .user_profiling import UserProfilingSystem
-from .temporal_memory import TemporalMemorySystem
-from .memory_api_gateway import MemoryAPIGateway
 
 
 @register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.6", "https://github.com/qa296/astrbot_plugin_memora_connect")
@@ -43,14 +38,6 @@ class MemoraConnectPlugin(Star):
         self.graph_visualizer = MemoryGraphVisualizer(self.memory_system)
         self._initialized = False
         self.web_server = None
-        
-        # 新增：主动能力升级模块
-        self.event_bus = None
-        self.topic_engine = None
-        self.user_profiling = None
-        self.temporal_memory = None
-        self.api_gateway = None
-        
         asyncio.create_task(self._async_init())
     
     def _debug_log(self, message: str, level: str = "debug"):
@@ -73,42 +60,7 @@ class MemoraConnectPlugin(Star):
         try:
             logger.info("开始异步初始化记忆系统...")
             await self.memory_system.initialize()
-            
-            # 初始化新增模块
-            try:
-                logger.info("初始化主动能力升级模块...")
-                
-                # 1. 初始化事件总线
-                self.event_bus = await initialize_event_bus()
-                logger.info("✓ 事件总线已启动")
-                
-                # 2. 初始化话题引擎
-                self.topic_engine = TopicEngine(self.memory_system)
-                logger.info("✓ 话题引擎已初始化")
-                
-                # 3. 初始化用户画像系统
-                self.user_profiling = UserProfilingSystem(self.memory_system)
-                logger.info("✓ 用户画像系统已初始化")
-                
-                # 4. 初始化时间维度记忆系统
-                self.temporal_memory = TemporalMemorySystem(self.memory_system)
-                logger.info("✓ 时间维度记忆系统已初始化")
-                
-                # 5. 初始化API网关
-                self.api_gateway = MemoryAPIGateway(
-                    self.memory_system,
-                    self.topic_engine,
-                    self.user_profiling,
-                    self.temporal_memory
-                )
-                logger.info("✓ API网关已初始化")
-                
-                logger.info("主动能力升级模块初始化完成！")
-            except Exception as upgrade_e:
-                logger.error(f"主动能力升级模块初始化失败: {upgrade_e}", exc_info=True)
-            
             self._initialized = True
-            
             # 根据配置启动 Web 界面
             try:
                 web_cfg = (self.memory_system.memory_config or {}).get("web_ui", {}) or {}
@@ -285,31 +237,8 @@ class MemoraConnectPlugin(Star):
     async def _process_message_async(self, event: AstrMessageEvent, group_id: str):
         """异步消息处理，避免阻塞主流程"""
         try:
-            message = event.message_str
-            sender_id = event.get_sender_id()
-            
             # 使用优化后的单次LLM调用处理消息
             await self.memory_system.process_message_optimized(event, group_id)
-            
-            # === 新增：主动能力升级相关处理 ===
-            if self.topic_engine and self.user_profiling and self.temporal_memory:
-                try:
-                    # 1. 话题追踪
-                    await self.topic_engine.add_message_to_topic(message, sender_id, group_id)
-                    
-                    # 2. 未闭合话题检测
-                    await self.temporal_memory.auto_detect_and_track_questions(message, sender_id, group_id)
-                    
-                    # 3. 禁忌词自动学习
-                    await self.user_profiling.learn_taboo_from_message(sender_id, message, group_id)
-                    
-                    # 4. 查找复活的话题
-                    resurrected = await self.topic_engine.find_resurrected_topics(message, group_id, silence_days=7)
-                    if resurrected:
-                        logger.info(f"检测到复活话题: {resurrected}")
-                    
-                except Exception as upgrade_e:
-                    logger.debug(f"主动能力升级处理失败: {upgrade_e}")
             
             # 使用队列化保存，减少I/O操作
             if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
@@ -358,15 +287,6 @@ class MemoraConnectPlugin(Star):
         self._debug_log("开始插件终止流程，清理所有资源", "info")
         
         try:
-            # === 新增：清理主动能力升级模块 ===
-            try:
-                if self.event_bus:
-                    logger.info("关闭事件总线...")
-                    await shutdown_event_bus()
-                    logger.info("✓ 事件总线已关闭")
-            except Exception as bus_e:
-                logger.warning(f"关闭事件总线失败: {bus_e}")
-            
             # 停止 Web 服务
             if hasattr(self, 'web_server') and self.web_server:
                 try:
