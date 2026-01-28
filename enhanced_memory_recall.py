@@ -1,5 +1,6 @@
 import asyncio
 import time
+from datetime import datetime
 import re
 from typing import Dict, List, Any, TYPE_CHECKING
 from dataclasses import dataclass
@@ -30,11 +31,11 @@ class EnhancedMemoryRecall:
     def __init__(self, memory_system: 'MemorySystem'):
         self.memory_system = memory_system
         self.recall_strategies = {
-            'semantic': 0.4,      # 语义相似度
-            'keyword': 0.25,      # 关键词匹配
+            'semantic': 0.55,     # 语义相似度
+            'keyword': 0.2,       # 关键词匹配
             'associative': 0.2,   # 联想记忆
-            'temporal': 0.1,      # 时间关联
-            'strength': 0.05      # 记忆强度
+            'temporal': 0.03,     # 时间关联
+            'strength': 0.02      # 记忆强度
         }
         
     async def recall_all_relevant_memories(
@@ -90,13 +91,16 @@ class EnhancedMemoryRecall:
     async def _semantic_recall(self, query: str, group_id: str = "") -> List[MemoryRecallResult]:
         """基于语义相似度的召回 - 使用并填充缓存"""
         try:
-            if not query or not self.memory_system.embedding_cache:
+            if not query:
+                return []
+            if not self.memory_system.embedding_cache:
+                logger.debug("语义召回跳过：embedding_cache 未就绪")
                 return []
                 
             # 1. 获取查询的嵌入向量
             query_embedding = await self.memory_system.get_embedding(query)
             if not query_embedding:
-                logger.debug("无法获取查询的嵌入向量")
+                logger.debug("语义召回失败：无法获取查询的嵌入向量")
                 return []
             
             results = []
@@ -123,15 +127,21 @@ class EnhancedMemoryRecall:
                 tasks.append((memory.id, task))
 
             # 并发执行所有获取任务
+            failed_embeddings = 0
             for memory_id, task in tasks:
                 try:
                     embedding = await task
                     if embedding:
                         memory_embeddings[memory_id] = embedding
+                    else:
+                        failed_embeddings += 1
                 except Exception as e:
+                    failed_embeddings += 1
                     logger.warning(f"获取记忆 {memory_id} 的嵌入向量失败: {e}")
 
             # 3. 在内存中计算相似度
+            if failed_embeddings:
+                logger.debug(f"语义召回嵌入失败数: {failed_embeddings}")
             for memory in memories_snapshot:
                 if memory.id in memory_embeddings:
                     similarity = self._cosine_similarity(query_embedding, memory_embeddings[memory.id])
@@ -145,6 +155,7 @@ class EnhancedMemoryRecall:
                                 memory_type='semantic',
                                 concept_id=memory.concept_id,
                                 metadata={
+                                    'memory_id': memory.id,
                                     'concept_name': concept.name,
                                     'memory_strength': memory.strength,
                                     'last_accessed': memory.last_accessed,
@@ -194,6 +205,7 @@ class EnhancedMemoryRecall:
                             memory_type='temporal',
                             concept_id=memory.concept_id,
                             metadata={
+                                'memory_id': memory.id,
                                 'hours_ago': time_diff / 3600,
                                 'concept_name': concept.name,
                                 'memory_strength': memory.strength,
@@ -241,6 +253,7 @@ class EnhancedMemoryRecall:
                         memory_type='strength',
                         concept_id=memory.concept_id,
                         metadata={
+                            'memory_id': memory.id,
                             'concept_name': concept.name,
                             'memory_strength': memory.strength,
                             'access_count': memory.access_count,
@@ -257,18 +270,20 @@ class EnhancedMemoryRecall:
     def _extract_keywords(self, text: str) -> List[str]:
         """从文本中提取关键词"""
         try:
-            # 提取中文关键词
-            words = re.findall(r'\b[\u4e00-\u9fff]{2,6}\b', text)
-            
-            # 过滤常用词
             stop_words = {
                 "你好", "谢谢", "再见", "请问", "可以", "这个", "那个",
-                "什么", "怎么", "为什么", "因为", "所以", "但是"
+                "什么", "怎么", "为什么", "因为", "所以", "但是",
+                "我", "你", "他", "她", "它", "我们", "你们", "他们", "她们", "它们",
+                "啊", "呀", "呢", "吧", "哈", "吗", "喔", "哦"
             }
             
-            keywords = [word for word in words if word not in stop_words and len(word) >= 2]
+            try:
+                import jieba
+                words = [w.strip() for w in jieba.cut(text) if w.strip()]
+            except Exception:
+                words = re.findall(r'[\u4e00-\u9fff]{2,6}', text)
             
-            # 返回前8个关键词
+            keywords = [word for word in words if word not in stop_words and len(word) >= 2]
             return keywords[:8]
             
         except Exception as e:
@@ -358,7 +373,7 @@ class EnhancedMemoryRecall:
             logger.error(f"生成记忆摘要失败: {e}")
             return f"【记忆提示】找到{len(memories)}条相关记忆"
     
-    def format_memories_for_llm(self, memories: List[MemoryRecallResult]) -> str:
+    def format_memories_for_llm(self, memories: List[MemoryRecallResult], include_ids: bool = False) -> str:
         """将记忆格式化为LLM友好的上下文"""
         try:
             if not memories:
@@ -371,24 +386,49 @@ class EnhancedMemoryRecall:
             context_parts = ["【相关记忆】"]
             
             for i, memory in enumerate(memories[:5], 1):  # 最多5条
-                # 获取完整的记忆对象以检查参与者信息
                 memory_obj = None
                 for mem in self.memory_system.memory_graph.memories.values():
                     if mem.content == memory.memory:
                         memory_obj = mem
                         break
                 
-                # 如果找到记忆对象，检查是否包含Bot的发言
+                time_str = ""
+                if memory_obj and memory_obj.created_at:
+                    try:
+                        dt = datetime.fromtimestamp(memory_obj.created_at)
+                        time_str = f"[记录于: {dt.strftime('%Y-%m-%d %H:%M:%S')}] "
+                    except Exception:
+                        pass
+                
+                prefix = ""
                 if memory_obj and memory_obj.participants:
                     if "我" in memory_obj.participants:
-                        # 如果参与者包含"我"，说明是Bot的发言，使用第一人称格式
-                        context_parts.append(f"{i}. 我记得: {memory.memory}")
-                    else:
-                        # 否则使用第三人称格式
-                        context_parts.append(f"{i}. {memory.memory}")
-                else:
-                    # 如果没有参与者信息，使用默认格式
-                    context_parts.append(f"{i}. {memory.memory}")
+                        prefix = "我记得: "
+
+                context_parts.append(f"{i}. {time_str}{prefix}{memory.memory}")
+                if include_ids:
+                    memory_id = memory.metadata.get("memory_id") if memory.metadata else None
+                    if not memory_id and memory_obj:
+                        memory_id = getattr(memory_obj, "id", "")
+                    if memory_id:
+                        context_parts.append(f"   记忆ID: {memory_id}")
+
+                if memory_obj:
+                    details = getattr(memory_obj, "details", "") or ""
+                    participants = getattr(memory_obj, "participants", "") or ""
+                    location = getattr(memory_obj, "location", "") or ""
+                    emotion = getattr(memory_obj, "emotion", "") or ""
+                    tags = getattr(memory_obj, "tags", "") or ""
+                    extra_fields = [
+                        ("细节", details),
+                        ("参与者", participants),
+                        ("地点", location),
+                        ("情感", emotion),
+                        ("标签", tags),
+                    ]
+                    for label, value in extra_fields:
+                        if value:
+                            context_parts.append(f"   {label}: {value}")
             
             # 添加元信息
             if len(memories) > 5:
@@ -400,13 +440,14 @@ class EnhancedMemoryRecall:
             logger.error(f"格式化记忆上下文失败: {e}")
             return ""
     
-    async def _keyword_recall(self, query: str, group_id: str = "") -> List[MemoryRecallResult]:
+    async def _keyword_recall(self, query: str, group_id: str = "", keywords: List[str] = None) -> List[MemoryRecallResult]:
         """基于关键词的召回"""
         try:
             if not query:
                 return []
-                
-            keywords = self._extract_keywords(query)
+
+            if keywords is None:
+                keywords = self._extract_keywords(query)
             if not keywords:
                 return []
             
@@ -423,15 +464,18 @@ class EnhancedMemoryRecall:
                     if memory_group_id:
                         continue
                 
-                memory_lower = memory.content.lower()
                 concept = self.memory_system.memory_graph.concepts.get(memory.concept_id)
+                details = getattr(memory, 'details', '') or ''
+                tags = getattr(memory, 'tags', '') or ''
+                concept_name = concept.name if concept else ''
+                searchable_text = f"{memory.content} {details} {tags} {concept_name}".lower()
                 
                 # 计算关键词匹配度
                 keyword_score = 0
                 matched_keywords = []
                 
                 for keyword in keywords:
-                    if keyword in memory_lower:
+                    if keyword in searchable_text:
                         keyword_score += 1
                         matched_keywords.append(keyword)
                 
@@ -443,7 +487,9 @@ class EnhancedMemoryRecall:
                         memory_type='keyword',
                         concept_id=memory.concept_id,
                         metadata={
+                            'memory_id': memory.id,
                             'matched_keywords': matched_keywords,
+                            'keyword_total': len(keywords),
                             'concept_name': concept.name if concept else '',
                             'memory_strength': memory.strength,
                             'group_id': group_id
@@ -512,6 +558,7 @@ class EnhancedMemoryRecall:
                                     memory_type='associative',
                                     concept_id=neighbor_id,
                                     metadata={
+                                        'memory_id': memory.id,
                                         'original_concept': concept_id,
                                         'connection_strength': strength,
                                         'concept_name': concept.name,
@@ -525,21 +572,99 @@ class EnhancedMemoryRecall:
             logger.error(f"联想记忆召回失败: {e}")
             return []
 
+    def _filter_injection_results(self, results: List[MemoryRecallResult], keywords: List[str], semantic_primary: bool) -> List[MemoryRecallResult]:
+        try:
+            if not results:
+                return []
+
+            keyword_total = len(keywords)
+            if keyword_total >= 4:
+                min_keyword_matches = 2
+            elif keyword_total == 3:
+                min_keyword_matches = 2
+            else:
+                min_keyword_matches = 1
+
+            semantic_min_similarity = 0.45
+
+            semantic_primary_effective = semantic_primary
+            primary_results = []
+            for result in results:
+                if result.memory_type == "semantic":
+                    similarity = result.metadata.get("similarity", 0)
+                    if similarity >= semantic_min_similarity:
+                        primary_results.append(result)
+
+            if not primary_results or not semantic_primary:
+                semantic_primary_effective = False
+                primary_results = []
+                for result in results:
+                    if result.memory_type == "keyword":
+                        matched = len(result.metadata.get("matched_keywords", []))
+                        total = result.metadata.get("keyword_total", keyword_total)
+                        ratio = matched / total if total else 0
+                        if matched >= min_keyword_matches and ratio >= 0.5:
+                            primary_results.append(result)
+                    elif result.memory_type == "semantic":
+                        similarity = result.metadata.get("similarity", 0)
+                        if similarity >= semantic_min_similarity:
+                            primary_results.append(result)
+
+            if not primary_results:
+                return []
+
+            primary_concepts = {r.concept_id for r in primary_results if r.concept_id}
+            primary_ids = {id(r) for r in primary_results}
+            semantic_primary_concepts = {r.concept_id for r in primary_results if r.memory_type == "semantic" and r.concept_id}
+
+            filtered = []
+            for result in results:
+                if id(result) in primary_ids:
+                    filtered.append(result)
+                    continue
+
+                if result.memory_type == "keyword":
+                    matched = len(result.metadata.get("matched_keywords", []))
+                    total = result.metadata.get("keyword_total", keyword_total)
+                    ratio = matched / total if total else 0
+                    if matched >= min_keyword_matches and ratio >= 0.5:
+                        if not semantic_primary_effective or result.concept_id in semantic_primary_concepts:
+                            filtered.append(result)
+                elif result.memory_type == "associative":
+                    original_concept = result.metadata.get("original_concept")
+                    if original_concept and original_concept in primary_concepts:
+                        filtered.append(result)
+                elif result.memory_type in {"temporal", "strength"}:
+                    if result.concept_id in primary_concepts:
+                        filtered.append(result)
+
+            return filtered
+
+        except Exception as e:
+            logger.error(f"注入结果过滤失败: {e}")
+            return results
+
     async def recall_relevant_memories_for_injection(self, message: str, group_id: str = "") -> List[MemoryRecallResult]:
         """为自动注入召回相关记忆"""
         try:
             if not self.memory_system.memory_graph.memories:
                 return []
                 
-            recall_mode = self.memory_system.memory_config.get("recall_mode", "simple")
+            enable_associative = self.memory_system.memory_config.get("enable_associative_recall", True)
+            keywords = self._extract_keywords(message)
             all_results = []
+
+            semantic_results = await self._semantic_recall(message, group_id)
+            semantic_primary = bool(semantic_results)
+            all_results.extend(semantic_results)
             
             # 基础召回策略（所有模式都包含）
-            keyword_results = await self._keyword_recall(message, group_id)
+            keyword_results = await self._keyword_recall(message, group_id, keywords=keywords)
             all_results.extend(keyword_results)
             
-            associative_results = await self._associative_recall(message, group_id)
-            all_results.extend(associative_results)
+            if enable_associative:
+                associative_results = await self._associative_recall(message, group_id)
+                all_results.extend(associative_results)
             
             temporal_results = await self._temporal_recall(message, group_id)
             all_results.extend(temporal_results)
@@ -547,17 +672,15 @@ class EnhancedMemoryRecall:
             strength_results = await self._strength_based_recall(message, group_id)
             all_results.extend(strength_results)
             
-            # 仅在嵌入模式下添加语义召回
-            if recall_mode == "embedding":
-                semantic_results = await self._semantic_recall(message, group_id)
-                all_results.extend(semantic_results)
-            
             # 去重和排序
             unique_results = self._deduplicate_and_rank(all_results)
+
+            # 注入专用过滤
+            filtered_results = self._filter_injection_results(unique_results, keywords, semantic_primary)
             
             # 限制数量
             max_memories = self.memory_system.memory_config.get("max_injected_memories", 5)
-            return unique_results[:max_memories]
+            return filtered_results[:max_memories]
             
         except Exception as e:
             logger.error(f"为注入召回记忆失败: {e}")
@@ -593,17 +716,26 @@ class EnhancedMemoryRecall:
                         memory_obj = mem
                         break
                 
+                # 格式化时间
+                time_str = ""
+                if memory_obj and memory_obj.created_at:
+                    try:
+                        dt = datetime.fromtimestamp(memory_obj.created_at)
+                        time_str = f"[记录于: {dt.strftime('%Y-%m-%d %H:%M:%S')}] "
+                    except Exception:
+                        pass
+                
                 # 如果找到记忆对象，检查是否包含Bot的发言
                 if memory_obj and memory_obj.participants:
                     if "我" in memory_obj.participants:
                         # 如果参与者包含"我"，说明是Bot的发言，使用第一人称格式
-                        context_parts.append(f"{i}. 我记得: {memory.memory}")
+                        context_parts.append(f"{i}. {time_str}我记得: {memory.memory}")
                     else:
                         # 否则使用第三人称格式
-                        context_parts.append(f"{i}. {memory.memory}")
+                        context_parts.append(f"{i}. {time_str}{memory.memory}")
                 else:
                     # 如果没有参与者信息，使用默认格式
-                    context_parts.append(f"{i}. {memory.memory}")
+                    context_parts.append(f"{i}. {time_str}{memory.memory}")
             
             # 添加元信息
             if len(memories) > 5:

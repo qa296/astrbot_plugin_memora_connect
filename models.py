@@ -37,6 +37,7 @@ class Memory:
     last_accessed: float = None
     access_count: int = 0
     strength: float = 1.0
+    allow_forget: bool = True
     group_id: str = ""  # 群组ID，用于群聊隔离
     
     def __post_init__(self):
@@ -44,6 +45,8 @@ class Memory:
             self.created_at = time.time()
         if self.last_accessed is None:
             self.last_accessed = time.time()
+        if self.allow_forget is None:
+            self.allow_forget = True
 
 
 @dataclass

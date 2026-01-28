@@ -18,6 +18,18 @@ class BatchMemoryExtractor:
     
     def __init__(self, memory_system):
         self.memory_system = memory_system
+
+    def _safe_load_json(self, text: str):
+        try:
+            return json.loads(text)
+        except Exception:
+            match = re.search(r"\{[\s\S]*\}", text)
+            if not match:
+                return None
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                return None
     
     async def extract_impressions_from_conversation(self, conversation_history: List[Dict[str, Any]], group_id: str) -> List[Dict[str, Any]]:
         """
@@ -76,8 +88,12 @@ class BatchMemoryExtractor:
                 contexts=[],
                 system_prompt="你是一个人物印象提取助手"
             )
-            
-            data = json.loads(response.completion_text)
+            raw_text = (getattr(response, "completion_text", "") or "").strip()
+            if not raw_text:
+                return []
+            data = self._safe_load_json(raw_text)
+            if not isinstance(data, dict):
+                return []
             impressions = data.get("impressions", [])
             
             # 过滤有效印象

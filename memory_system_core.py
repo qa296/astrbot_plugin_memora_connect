@@ -23,6 +23,8 @@ try:
     from .memory_graph import MemoryGraph
     from .batch_extractor import BatchMemoryExtractor
     from .resource_management import resource_manager
+    from .database_migration import SmartDatabaseMigration
+    from .embedding_cache_manager import EmbeddingCacheManager
 except ImportError:
     # Fallback for testing without astrbot
     import logging
@@ -36,6 +38,8 @@ except ImportError:
     Context = None
     StarTools = None
     resource_manager = None
+    SmartDatabaseMigration = None
+    EmbeddingCacheManager = None
 
 class MemorySystem:
     """核心记忆系统，模仿人类海马体功能"""
@@ -123,6 +127,10 @@ class MemorySystem:
         self.batch_extractor = BatchMemoryExtractor(self)
         self.embedding_cache = None  # 嵌入向量缓存管理器
         
+        # 组件引用（由外部注入）
+        self.topic_engine = None
+        self.user_profiling = None
+        
         # 印象系统配置
         self.impression_config = {
             "default_score": 0.5,
@@ -153,6 +161,11 @@ class MemorySystem:
         self._should_stop_maintenance = asyncio.Event()  # 停止维护事件
         self._should_stop_maintenance.clear()  # 初始不停止
         
+    def set_components(self, topic_engine, user_profiling):
+        """注入组件依赖"""
+        self.topic_engine = topic_engine
+        self.user_profiling = user_profiling
+
     def _create_managed_task(self, coro):
         """创建托管的异步任务，确保任务生命周期被正确管理"""
         if not asyncio.iscoroutine(coro):
@@ -206,6 +219,53 @@ class MemorySystem:
         """从事件中提取群聊ID"""
         group_id = event.get_group_id()
         return group_id if group_id else ""
+
+    def _record_memory_access_by_ids(self, memory_ids: List[str]) -> int:
+        if not memory_ids:
+            return 0
+        updated = 0
+        now = time.time()
+        for memory_id in set(memory_ids):
+            memory = self.memory_graph.memories.get(memory_id)
+            if not memory:
+                continue
+            memory.access_count = int(memory.access_count or 0) + 1
+            memory.last_accessed = now
+            updated += 1
+        return updated
+
+    def _record_memory_access_by_contents(self, contents: List[str]) -> int:
+        if not contents:
+            return 0
+        content_set = {c for c in contents if c}
+        if not content_set:
+            return 0
+        updated = 0
+        now = time.time()
+        for memory in self.memory_graph.memories.values():
+            if memory.content in content_set:
+                memory.access_count = int(memory.access_count or 0) + 1
+                memory.last_accessed = now
+                updated += 1
+        return updated
+
+    def _record_recall_results_accesses(self, results: List[Any]) -> int:
+        if not results:
+            return 0
+        memory_ids = []
+        contents = []
+        for result in results:
+            metadata = getattr(result, "metadata", None)
+            memory_id = metadata.get("memory_id") if isinstance(metadata, dict) else None
+            if memory_id:
+                memory_ids.append(memory_id)
+            else:
+                memory_content = getattr(result, "memory", None)
+                if memory_content:
+                    contents.append(memory_content)
+        updated = self._record_memory_access_by_ids(memory_ids)
+        updated += self._record_memory_access_by_contents(contents)
+        return updated
     
     async def _queue_save_memory_state(self, group_id: str = ""):
         """队列化保存操作，减少频繁的I/O"""
@@ -314,8 +374,14 @@ class MemorySystem:
         except Exception as e:
             self._debug_log("提供商连接异常，系统将继续运行", "warning")
         
+        migration = None
+        migration_success = False
+
         # 执行数据库迁移
         try:
+            if SmartDatabaseMigration is None:
+                raise RuntimeError("SmartDatabaseMigration 不可用")
+
             migration = SmartDatabaseMigration(self.db_path, self.context)
             
             # 1. 先执行主数据库迁移
@@ -330,30 +396,26 @@ class MemorySystem:
             self._debug_log(f"主数据库迁移过程异常: {e}", "error")
             migration_success = False
         
-        # 2. 执行嵌入向量缓存数据库迁移
-        embedding_migration_success = False
-        try:
-            embedding_migration_success = await migration.run_embedding_cache_migration()
-            if embedding_migration_success:
-                self._debug_log("嵌入向量缓存数据库迁移成功", "info")
-            else:
-                self._debug_log("嵌入向量缓存数据库迁移失败", "warning")
-        except Exception as embedding_e:
-            self._debug_log(f"嵌入向量缓存数据库迁移异常: {embedding_e}", "warning")
+
         
-        # 3. 只有在两个迁移都成功的情况下，才继续初始化
-        if migration_success and embedding_migration_success:
+        # 3. 主数据库迁移成功即可继续初始化；嵌入缓存迁移失败则降级为非语义模式
+        if migration_success:
             try:
                 # 加载默认数据库（用于私有对话）
                 self.load_memory_state()
                 asyncio.create_task(self.memory_maintenance_loop())
                 
                 # 初始化嵌入向量缓存管理器
-                self.embedding_cache = EmbeddingCacheManager(self, self.db_path)
-                await self.embedding_cache.initialize()
+                if EmbeddingCacheManager is not None:
+                    try:
+                        self.embedding_cache = EmbeddingCacheManager(self, self.db_path)
+                        await self.embedding_cache.initialize()
+                    except Exception as cache_e:
+                        self.embedding_cache = None
+                        self._debug_log(f"嵌入向量缓存初始化失败，已降级: {cache_e}", "warning")
                 
                 # 调度初始预计算任务
-                if self.memory_graph.memories:
+                if self.embedding_cache and self.memory_graph.memories:
                     asyncio.create_task(self.embedding_cache.schedule_initial_precompute())
                     logger.info(f"已调度 {len(self.memory_graph.memories)} 条记忆的预计算任务")
                 
@@ -373,6 +435,7 @@ class MemorySystem:
         if not os.path.exists(db_path):
             return
             
+        conn = None
         try:
             # 使用连接池获取数据库连接
             conn = resource_manager.get_db_connection(db_path)
@@ -395,13 +458,26 @@ class MemorySystem:
                     access_count=concept_data[4]
                 )
                 
+            cursor.execute("PRAGMA table_info('memories')")
+            memory_columns = [col[1] for col in cursor.fetchall()]
+            has_allow_forget = "allow_forget" in memory_columns
+
             # 加载记忆 - 支持群聊隔离
-            if group_id:
-                cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories WHERE group_id = ?", (group_id,))
+            if has_allow_forget:
+                if group_id:
+                    cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength, allow_forget FROM memories WHERE group_id = ?", (group_id,))
+                else:
+                    cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength, allow_forget FROM memories WHERE group_id = '' OR group_id IS NULL")
             else:
-                cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories WHERE group_id = '' OR group_id IS NULL")
+                if group_id:
+                    cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories WHERE group_id = ?", (group_id,))
+                else:
+                    cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories WHERE group_id = '' OR group_id IS NULL")
             memories = cursor.fetchall()
             for memory_data in memories:
+                allow_forget = True
+                if has_allow_forget and len(memory_data) > 12:
+                    allow_forget = True if memory_data[12] is None else bool(memory_data[12])
                 self.memory_graph.add_memory(
                     content=memory_data[2],
                     concept_id=memory_data[1],
@@ -415,6 +491,7 @@ class MemorySystem:
                     last_accessed=memory_data[9],
                     access_count=memory_data[10],
                     strength=memory_data[11],
+                    allow_forget=allow_forget,
                     group_id=group_id
                 )
                 
@@ -430,15 +507,15 @@ class MemorySystem:
                     last_strengthened=conn_data[4]
                 )
                 
-            # 释放连接回连接池
-            resource_manager.release_db_connection(db_path, conn)
-                
             # 仅在成功加载时输出一次统计信息
             group_info = f" (群: {group_id})" if group_id else ""
             self._debug_log(f"记忆系统加载{group_info}，包含 {len(concepts)} 个概念，{len(memories)} 条记忆", "debug")
             
         except Exception as e:
             self._debug_log(f"状态加载异常: {e}", "error")
+        finally:
+            if conn is not None:
+                resource_manager.release_db_connection(db_path, conn)
 
     async def save_memory_state(self, group_id: str = ""):
         """保存记忆状态到数据库"""
@@ -471,11 +548,12 @@ class MemorySystem:
                     cursor.execute('''
                         INSERT OR REPLACE INTO memories
                         (id, concept_id, content, details, participants,
-                        location, emotion, tags, created_at, last_accessed, access_count, strength, group_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        location, emotion, tags, created_at, last_accessed, access_count, strength, allow_forget, group_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (memory.id, memory.concept_id, memory.content, memory.details,
                          memory.participants, memory.location, memory.emotion, memory.tags,
-                         memory.created_at, memory.last_accessed, memory.access_count, memory.strength, group_id))
+                         memory.created_at, memory.last_accessed, memory.access_count, memory.strength,
+                         int(bool(memory.allow_forget)), group_id))
                 
                 # 增量更新连接
                 existing_connections = set()
@@ -520,6 +598,44 @@ class MemorySystem:
                 
         except Exception as e:
             self._debug_log(f"保存过程异常: {e}", "error")
+
+    async def delete_memory_by_id(self, memory_id: str, group_id: str = "") -> bool:
+        try:
+            if not memory_id:
+                return False
+
+            removed_from_graph = False
+            if memory_id in self.memory_graph.memories:
+                self.memory_graph.remove_memory(memory_id)
+                removed_from_graph = True
+
+            db_path = self._get_group_db_path(group_id)
+            await self._ensure_database_structure(db_path)
+            conn = resource_manager.get_db_connection(db_path)
+            cursor = conn.cursor()
+
+            if group_id:
+                cursor.execute(
+                    "DELETE FROM memories WHERE id = ? AND group_id = ?",
+                    (memory_id, group_id)
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM memories WHERE id = ?",
+                    (memory_id,)
+                )
+
+            deleted_rows = cursor.rowcount
+            conn.commit()
+            resource_manager.release_db_connection(db_path, conn)
+
+            if self.embedding_cache:
+                await self.embedding_cache.delete_embedding(memory_id, group_id)
+
+            return removed_from_graph or deleted_rows > 0
+        except Exception as e:
+            self._debug_log(f"删除记忆失败: {e}", "error")
+            return False
     
     async def _ensure_database_structure(self, db_path: str):
         """确保数据库和所需的表结构存在"""
@@ -560,6 +676,7 @@ class MemorySystem:
                         last_accessed REAL,
                         access_count INTEGER DEFAULT 0,
                         strength REAL DEFAULT 1.0,
+                        allow_forget INTEGER DEFAULT 1,
                         group_id TEXT DEFAULT "",
                         FOREIGN KEY (concept_id) REFERENCES concepts (id)
                     )
@@ -577,6 +694,12 @@ class MemorySystem:
                     CREATE INDEX idx_memories_created_group ON memories(created_at, group_id)
                 ''')
                 self._debug_log(f"创建群聊隔离索引", "debug")
+            else:
+                cursor.execute("PRAGMA table_info('memories')")
+                memory_columns = {col[1] for col in cursor.fetchall()}
+                if "allow_forget" not in memory_columns:
+                    cursor.execute("ALTER TABLE memories ADD COLUMN allow_forget INTEGER DEFAULT 1")
+                    cursor.execute("UPDATE memories SET allow_forget = 1 WHERE allow_forget IS NULL")
             
             if 'connections' not in existing_tables:
                 cursor.execute('''
@@ -688,6 +811,7 @@ class MemorySystem:
                     tags = str(memory_data.get("tags", "")).strip()
                     confidence = float(memory_data.get("confidence", 0.7))
                     memory_type = str(memory_data.get("memory_type", "normal")).strip().lower()
+                    allow_forget = self._parse_allow_forget_value(memory_data.get("allow_forget", True), True)
                     
                     # 验证数据完整性
                     if not theme or not content:
@@ -722,7 +846,8 @@ class MemorySystem:
                             location=location,
                             emotion=emotion,
                             tags=tags,
-                            strength=adjusted_strength
+                            strength=adjusted_strength,
+                            allow_forget=allow_forget
                         )
                         
                         themes.append(theme)
@@ -994,6 +1119,9 @@ class MemorySystem:
                 if keyword_lower in memory.content.lower():
                     related_memories.append(memory)
             
+            if related_memories:
+                self._record_memory_access_by_ids([m.id for m in related_memories])
+
             return related_memories
                 
         except Exception as e:
@@ -1484,10 +1612,21 @@ class MemorySystem:
         # 移除不活跃的记忆
         memories_to_remove = []
         for memory in list(self.memory_graph.memories.values()):
-            if current_time - memory.last_accessed > forget_threshold:
-                memory.strength *= 0.8
-                if memory.strength < 0.1:
-                    memories_to_remove.append(memory.id)
+            if not memory.allow_forget:
+                continue
+            if forget_threshold <= 0:
+                continue
+            last_accessed = memory.last_accessed or memory.created_at or current_time
+            time_since = max(0.0, current_time - last_accessed)
+            time_factor = time_since / forget_threshold
+            access_count = max(0, int(memory.access_count or 0))
+            access_factor = 1.0 / (1.0 + access_count)
+            decay = min(0.6, time_factor * access_factor * 0.4)
+            if decay > 0:
+                memory.strength = max(0.0, memory.strength * (1.0 - decay))
+            forget_score = time_factor * access_factor
+            if time_factor >= 1.0 and memory.strength < 0.12 and forget_score > 0.9:
+                memories_to_remove.append(memory.id)
         
         # 批量移除记忆
         for memory_id in memories_to_remove:
@@ -1632,6 +1771,51 @@ class MemorySystem:
             "enable_consolidation": self.memory_config['enable_consolidation'],
         }
 
+    def _parse_allow_forget_value(self, value, default: Optional[bool] = True) -> Optional[bool]:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if not text:
+            return default
+        for token in ["不允许", "不可", "不能", "禁止", "false", "no", "0", "否", "不要"]:
+            if token in text:
+                return False
+        for token in ["允许", "可以", "true", "yes", "1", "是", "要"]:
+            if token in text:
+                return True
+        return default
+
+    async def resolve_allow_forget(self, content: str, theme: str, details: str, participants: str,
+                                   location: str, emotion: str, tags: str, initial_allow_forget: bool) -> bool:
+        provider = await self.get_llm_provider()
+        if not provider:
+            return initial_allow_forget
+        initial_label = "允许遗忘" if initial_allow_forget else "不允许遗忘"
+        prompt = (
+            "请判断以下记忆是否允许遗忘(对于日常习惯，用户相关信息通常不允许遗忘，对于近期安排不长久影响未来的事件，通常允许遗忘)，只回复：允许遗忘/不允许遗忘/无法判断\n"
+            f"记忆内容：{content}\n"
+            f"主题：{theme}\n"
+            f"细节：{details}\n"
+            f"参与者：{participants}\n"
+            f"地点：{location}\n"
+            f"情感：{emotion}\n"
+            f"标签：{tags}\n"
+            f"当前判断：{initial_label}"
+        )
+        try:
+            response = await provider.text_chat(prompt=prompt, contexts=[])
+            text = getattr(response, "completion_text", "") if response else ""
+            parsed = self._parse_allow_forget_value(text, None)
+            if parsed is None:
+                return initial_allow_forget
+            return parsed
+        except Exception:
+            return initial_allow_forget
+
     async def get_llm_provider(self):
         """使用配置文件指定的提供商"""
         try:
@@ -1666,8 +1850,12 @@ class MemorySystem:
         try:
             provider_id = self.memory_config['embedding_provider']
             
-            # 获取所有已注册的提供商
-            all_providers = self.context.get_all_providers()
+            # 获取所有已注册的嵌入提供商
+            if hasattr(self.context, 'get_all_embedding_providers'):
+                all_providers = self.context.get_all_embedding_providers()
+            else:
+                # 兼容性回退
+                all_providers = self.context.get_all_providers()
             
             # 精确匹配配置的提供商ID
             for provider in all_providers:
@@ -1753,101 +1941,147 @@ class MemorySystem:
         finally:
             self._embedding_in_progress = False
 
-    async def inject_memories_to_context(self, event: AstrMessageEvent):
-        """将相关记忆和印象注入到对话上下文中"""
+    async def inject_memories_to_context(self, event: AstrMessageEvent) -> str:
+        """生成需要注入到上下文的记忆和印象内容
+        
+        Args:
+            event: 消息事件对象
+            
+        Returns:
+            str: 生成的上下文内容，如果为空则返回空字符串
+        """
         try:
+            # [新增] 入口日志，确认是否被调用
+            self._debug_log(f"开始执行 inject_memories_to_context, 消息: {event.message_str[:20]}...", "debug")
+
             if not self.memory_config.get("enable_enhanced_memory", True):
-                return
+                return ""
             
             current_message = event.message_str.strip()
             if not current_message:
-                return
-            
-            # 避免重复注入：检查是否已经有记忆上下文
-            if hasattr(event, 'context_extra') and event.context_extra and 'memory_context' in event.context_extra:
-                return
+                return ""
             
             # 短消息过滤：避免为过短的消息注入记忆
-            if len(current_message) < 3:
-                return
+            # [修改] 缩短长度限制以方便测试
+            if len(current_message) < 1:
+                return ""
             
             # 获取群组ID
             group_id = self._extract_group_id_from_event(event)
             
-            # 注入印象上下文（如果启用）
             impression_context = ""
             if self.impression_config.get("enable_impression_injection", True):
-                impression_context = await self._inject_impressions_to_context(current_message, group_id)
+                sender_name = ""
+                try:
+                    sender_name = event.get_sender_name() or ""
+                except Exception:
+                    sender_name = ""
+                if not sender_name:
+                    try:
+                        sender_name = str(event.get_sender_id() or "")
+                    except Exception:
+                        sender_name = ""
+                impression_context = await self._inject_impressions_to_context(sender_name, group_id)
             
+            # [新增] 注入话题上下文
+            topic_context = ""
+            if self.topic_engine:
+                try:
+                    sender_id = event.get_sender_id()
+                    # 确保使用正确的 scope (与 main.py 保持一致)
+                    topic_scope = group_id if group_id else f"private:{sender_id}"
+                    
+                    # 获取当前最相关的话题
+                    topics = await self.topic_engine.get_topic_relevance(current_message, topic_scope, max_results=1)
+                    if topics:
+                        topic_id, score, info = topics[0]
+                        # [修改] 降低阈值以确保话题连贯性
+                        if score > 0.3: 
+                            keywords = ", ".join(info.get('keywords', [])[:5])
+                            heat = info.get('heat', 0)
+                            topic_context = f"【当前话题】\n讨论焦点: {keywords}\n热度: {heat:.1f}"
+                except Exception as e:
+                    self._debug_log(f"获取话题上下文失败: {e}", "warning")
+
+            # [新增] 注入用户画像/亲密度上下文
+            profile_context = ""
+            if self.user_profiling:
+                try:
+                    sender_id = event.get_sender_id()
+                    # 自用模式：移除亲密度计算，默认为主人/最高权限
+                    # 仅保留互动统计，作为数据参考
+                    intimacy = await self.user_profiling.calculate_intimacy(sender_id, group_id)
+                    if intimacy:
+                         profile_context = f"【用户状态】\n身份: 主人\n互动: {intimacy.total_interactions}次"
+                except Exception as e:
+                    self._debug_log(f"获取用户画像失败: {e}", "warning")
+
             # 使用增强记忆召回系统获取相关记忆
             from .enhanced_memory_recall import EnhancedMemoryRecall
             
             enhanced_recall = EnhancedMemoryRecall(self)
-            results = await enhanced_recall.recall_all_relevant_memories(
-                query=current_message,
-                max_memories=self.memory_config.get("max_injected_memories", 5),
-                group_id=group_id  # 传递群聊ID实现群聊隔离
+            results = await enhanced_recall.recall_relevant_memories_for_injection(
+                message=current_message,
+                group_id=group_id
             )
             
-            # 过滤低相关性的记忆
-            threshold = self.memory_config.get("memory_injection_threshold", 0.3)
+            threshold = self.memory_config.get("memory_injection_threshold", 0.2)
             filtered_results = [r for r in results if hasattr(r, 'relevance_score') and r.relevance_score >= threshold]
+
+            if filtered_results:
+                updated = self._record_recall_results_accesses(filtered_results)
+                if updated:
+                    await self._queue_save_memory_state(group_id)
+            
+            # 调试日志：记录召回详情
+            if results:
+                scores = [f"{r.relevance_score:.2f}" for r in results]
+                self._debug_log(f"记忆召回: {len(results)}条, 分数: {scores}, 阈值: {threshold}", "debug")
             
             # 组合记忆上下文和印象上下文
             combined_context = ""
+            if profile_context:
+                combined_context += profile_context + "\n\n"
             if impression_context:
                 combined_context += impression_context + "\n\n"
+            if topic_context:
+                combined_context += topic_context + "\n\n"
             
             if filtered_results:
                 # 使用增强格式化
-                memory_context = enhanced_recall.format_memories_for_llm(filtered_results)
+                memory_context = enhanced_recall.format_memories_for_llm(filtered_results, include_ids=False)
                 combined_context += memory_context
             
             if combined_context:
-                # 注入到AstrBot的上下文中
-                if not hasattr(event, 'context_extra'):
-                    event.context_extra = {}
-                event.context_extra["memory_context"] = combined_context
-                
                 debug_info = []
+                if profile_context:
+                    debug_info.append("用户画像")
                 if impression_context:
                     debug_info.append("印象")
+                if topic_context:
+                    debug_info.append("话题")
                 if filtered_results:
                     debug_info.append(f"{len(filtered_results)}条记忆")
-                self._debug_log(f"已注入 {'+'.join(debug_info)} 到上下文", "debug")
+                self._debug_log(f"生成注入上下文: {'+'.join(debug_info)}", "debug")
+                
+            return combined_context
                 
         except Exception as e:
             self._debug_log(f"注入记忆到上下文失败: {e}", "warning")
+            return ""
 
-    async def _inject_impressions_to_context(self, current_message: str, group_id: str) -> str:
+    async def _inject_impressions_to_context(self, sender_name: str, group_id: str) -> str:
         """注入印象信息到对话上下文"""
         try:
-            # 从消息中提取人名
-            mentioned_names = self._extract_mentioned_names(current_message)
-            if not mentioned_names:
+            if not sender_name:
                 return ""
-            
-            # 获取发送者名称
-            sender_name = self._extract_sender_name_from_message(current_message)
-            
-            # 合并所有相关人名（包括发送者和提及的人）
-            all_names = set()
-            if sender_name:
-                all_names.add(sender_name)
-            all_names.update(mentioned_names)
-            
-            # 获取这些人的印象信息
-            impression_lines = []
-            for name in all_names:
-                impression_summary = self.get_person_impression_summary(group_id, name)
-                if impression_summary and impression_summary.get("summary"):
-                    score = impression_summary.get("score", 0.5)
-                    score_desc = self._score_to_description(score)
-                    impression_lines.append(f"- {name}: {impression_summary['summary']} (好感度: {score_desc})")
-            
-            if impression_lines:
-                return "【人物印象】\n" + "\n".join(impression_lines)
-            
+
+            impression_summary = self.get_person_impression_summary(group_id, sender_name)
+            if impression_summary and impression_summary.get("summary"):
+                score = impression_summary.get("score", 0.5)
+                score_desc = self._score_to_description(score)
+                return f"【人物印象】\n- {sender_name}: {impression_summary['summary']} (好感度: {score_desc})"
+
             return ""
             
         except Exception as e:
@@ -2018,7 +2252,7 @@ class MemorySystem:
                 ))
             
             enhanced_recall = EnhancedMemoryRecall(self)
-            return enhanced_recall.format_memories_for_llm(enhanced_results)
+            return enhanced_recall.format_memories_for_llm(enhanced_results, include_ids=False)
             
         except Exception as e:
             logger.error(f"上下文格式化失败: {e}")
@@ -2368,5 +2602,3 @@ class MemorySystem:
         except Exception as e:
             self._debug_log(f"安全格式化时间失败: {e}", "warning")
             return "未知时间"
-
-

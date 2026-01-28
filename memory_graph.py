@@ -44,7 +44,8 @@ class MemoryGraph:
                    details: str = "", participants: str = "", location: str = "",
                    emotion: str = "", tags: str = "", created_at: float = None,
                    last_accessed: float = None, access_count: int = 0,
-                   strength: float = 1.0, group_id: str = "") -> str:
+                   strength: float = 1.0, allow_forget: bool = True,
+                   group_id: str = "") -> str:
         """添加记忆"""
         if memory_id is None:
             memory_id = f"memory_{int(time.time() * 1000)}"
@@ -62,6 +63,7 @@ class MemoryGraph:
             last_accessed=last_accessed,
             access_count=access_count,
             strength=strength,
+            allow_forget=allow_forget,
             group_id=group_id
         )
         self.memories[memory_id] = memory
@@ -156,6 +158,7 @@ class MemoryGraph:
             "concept_id",
             "last_accessed",
             "created_at",
+            "allow_forget",
         }
         for k, v in fields.items():
             if k in allowed and v is not None:

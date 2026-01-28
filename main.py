@@ -4,6 +4,7 @@ AstrBot Memora Connect 插件主文件
 """
 import asyncio
 import os
+from tkinter.constants import N
 from typing import Dict, List, Optional, Any
 
 from astrbot.api.provider import ProviderRequest
@@ -26,6 +27,11 @@ from .enhanced_memory_recall import EnhancedMemoryRecall
 from .memory_graph_visualization import MemoryGraphVisualizer
 from .resource_management import resource_manager
 from .web_server import MemoryWebServer
+from .memory_events import MemoryEventBus, MemoryEvent, MemoryEventType, initialize_event_bus, shutdown_event_bus
+from .topic_engine import TopicEngine
+from .user_profiling import UserProfilingSystem
+from .temporal_memory import TemporalMemorySystem
+from .memory_api_gateway import MemoryAPIGateway
 
 
 @register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.6", "https://github.com/qa296/astrbot_plugin_memora_connect")
@@ -38,7 +44,45 @@ class MemoraConnectPlugin(Star):
         self.graph_visualizer = MemoryGraphVisualizer(self.memory_system)
         self._initialized = False
         self.web_server = None
+        
+        # 新增：主动能力升级模块
+        self.event_bus = None
+        self.topic_engine = None
+        self.user_profiling = None
+        self.temporal_memory = None
+        self.api_gateway = None
+        
         asyncio.create_task(self._async_init())
+
+    def _load_group_context_for_event(self, event: AstrMessageEvent) -> str:
+        group_id = event.get_group_id() if event.get_group_id() else ""
+        if not self.memory_system.memory_config.get("enable_group_isolation", True):
+            return group_id
+
+        def _load_scope(scope_id: str) -> bool:
+            self.memory_system.memory_graph = MemoryGraph()
+            self.memory_system.load_memory_state(scope_id)
+            return bool(self.memory_system.memory_graph.memories)
+
+        if group_id:
+            _load_scope(group_id)
+            return group_id
+
+        if _load_scope(""):
+            return ""
+
+        sender_id = ""
+        try:
+            sender_id = str(event.get_sender_id() or "")
+        except Exception:
+            sender_id = ""
+
+        candidates = [c for c in [sender_id, f"pm:{sender_id}" if sender_id else ""] if c]
+        for scope_id in candidates:
+            if _load_scope(scope_id):
+                return scope_id
+
+        return ""
     
     def _debug_log(self, message: str, level: str = "debug"):
         try:
@@ -58,9 +102,50 @@ class MemoraConnectPlugin(Star):
     async def _async_init(self):
         """异步初始化包装器"""
         try:
+            # 等待一小段时间，确保所有提供商都已加载完成
+            await asyncio.sleep(2)
+            
             logger.info("开始异步初始化记忆系统...")
             await self.memory_system.initialize()
+            
+            # 初始化新增模块
+            try:
+                logger.info("初始化主动能力升级模块...")
+                
+                # 1. 初始化事件总线
+                self.event_bus = await initialize_event_bus()
+                logger.info("✓ 事件总线已启动")
+                
+                # 2. 初始化话题引擎
+                self.topic_engine = TopicEngine(self.memory_system)
+                logger.info("✓ 话题引擎已初始化")
+                
+                # 3. 初始化用户画像系统
+                self.user_profiling = UserProfilingSystem(self.memory_system)
+                logger.info("✓ 用户画像系统已初始化")
+                
+                # 注入组件到记忆系统
+                self.memory_system.set_components(self.topic_engine, self.user_profiling)
+                
+                # 4. 初始化时间维度记忆系统
+                self.temporal_memory = TemporalMemorySystem(self.memory_system)
+                logger.info("✓ 时间维度记忆系统已初始化")
+                
+                # 5. 初始化API网关
+                self.api_gateway = MemoryAPIGateway(
+                    self.memory_system,
+                    self.topic_engine,
+                    self.user_profiling,
+                    self.temporal_memory
+                )
+                logger.info("✓ API网关已初始化")
+                
+                logger.info("主动能力升级模块初始化完成！")
+            except Exception as upgrade_e:
+                logger.error(f"主动能力升级模块初始化失败: {upgrade_e}", exc_info=True)
+            
             self._initialized = True
+            
             # 根据配置启动 Web 界面
             try:
                 web_cfg = (self.memory_system.memory_config or {}).get("web_ui", {}) or {}
@@ -83,14 +168,31 @@ class MemoraConnectPlugin(Star):
         pass
 
     @memory.command("回忆")
-    async def memory_recall(self, event: AstrMessageEvent, keyword: str):
+    async def memory_recall(self, event: AstrMessageEvent, keyword: str = ""):
         # 检查记忆系统是否启用
         if not self.memory_system.config_manager.is_memory_system_enabled():
             yield event.plain_result("记忆系统已禁用，无法使用回忆功能。")
             return
+        group_id = self._load_group_context_for_event(event)
         memories = await self.memory_system.recall_memories_full(keyword)
+        if memories:
+            await self.memory_system._queue_save_memory_state(group_id)
         response = self.memory_display.format_memory_search_result(memories, keyword)
         yield event.plain_result(response)
+
+    @memory.command("删除")
+    async def memory_delete(self, event: AstrMessageEvent, memory_id: str):
+        if not self.memory_system.config_manager.is_memory_system_enabled():
+            yield event.plain_result("记忆系统已禁用，无法删除记忆。")
+            return
+
+        group_id = self._load_group_context_for_event(event)
+        success = await self.memory_system.delete_memory_by_id(memory_id, group_id)
+        if success:
+            await self.memory_system._queue_save_memory_state(group_id)
+            yield event.plain_result(f"✅ 记忆已删除: {memory_id}")
+        else:
+            yield event.plain_result(f"未找到记忆: {memory_id}")
 
     @memory.command("状态")
     async def memory_status(self, event: AstrMessageEvent):
@@ -98,8 +200,32 @@ class MemoraConnectPlugin(Star):
         if not self.memory_system.config_manager.is_memory_system_enabled():
             yield event.plain_result("记忆系统已禁用，无法查看状态。")
             return
-            
+        scope_id = self._load_group_context_for_event(event)
         stats = self.memory_display.format_memory_statistics()
+        if stats == "记忆库为空":
+            try:
+                from .resource_management import resource_manager
+
+                conn = resource_manager.get_db_connection(self.memory_system.db_path)
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='memories'")
+                    if cur.fetchone():
+                        cur.execute("SELECT COUNT(*) FROM memories")
+                        total = int(cur.fetchone()[0])
+                        cur.execute("SELECT COUNT(*) FROM memories WHERE group_id = ?", (scope_id,))
+                        scope_total = int(cur.fetchone()[0])
+                        stats = "\n".join([
+                            stats,
+                            f"当前会话ID: {scope_id or '(default)'}",
+                            f"数据库总记忆数: {total}",
+                            f"当前会话记忆数: {scope_total}",
+                            f"数据库路径: {self.memory_system.db_path}",
+                        ])
+                finally:
+                    resource_manager.release_db_connection(self.memory_system.db_path, conn)
+            except Exception:
+                pass
         yield event.plain_result(stats)
         
     @memory.command("印象")
@@ -111,8 +237,7 @@ class MemoraConnectPlugin(Star):
             return
             
         try:
-            # 获取群组ID
-            group_id = self.memory_system._extract_group_id_from_event(event)
+            group_id = self._load_group_context_for_event(event)
             
             # 获取印象摘要
             impression_summary = self.memory_system.get_person_impression_summary(group_id, name)
@@ -174,6 +299,7 @@ class MemoraConnectPlugin(Star):
             return
             
         try:
+            self._load_group_context_for_event(event)
             # 发送生成中的提示
             yield event.plain_result(f"🔄 正在生成记忆图谱（布局风格: {layout_style}），请稍候...")
             
@@ -214,19 +340,13 @@ class MemoraConnectPlugin(Star):
         # 检查记忆系统是否启用
         if not self.memory_system.config_manager.is_memory_system_enabled():
             return
+        if not event.is_private_chat() and not getattr(
+            event, "is_at_or_wake_command", False
+        ):
+            return
             
         try:
-            # 提取群聊ID，用于群聊隔离
-            group_id = event.get_group_id() if event.get_group_id() else ""
-            
-            # 1. 为当前群聊加载相应的记忆状态（异步优化）
-            if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
-                # 清空当前记忆图，重新加载群聊特定的记忆
-                self.memory_system.memory_graph = MemoryGraph()
-                self.memory_system.load_memory_state(group_id)
-            
-            # 2. 注入相关记忆到上下文（快速异步操作）
-            self.memory_system._create_managed_task(self.memory_system.inject_memories_to_context(event))
+            group_id = self._load_group_context_for_event(event)
             
             # 3. 消息处理使用异步队列，避免阻塞主流程
             self.memory_system._create_managed_task(self._process_message_async(event, group_id))
@@ -237,8 +357,44 @@ class MemoraConnectPlugin(Star):
     async def _process_message_async(self, event: AstrMessageEvent, group_id: str):
         """异步消息处理，避免阻塞主流程"""
         try:
+            message = event.message_str
+            
+            # 排除指令消息（以 / ! ！ 开头的消息）
+            # 修复话题模块在任何消息下都会触发的问题
+            if not message or not message.strip() or any(message.strip().startswith(prefix) for prefix in ["/", "!", "！"]):
+                return
+            
+            # 检查配置中的排除关键词
+            exclude_keywords = self.memory_system.config_manager.config.exclude_keywords
+            if exclude_keywords and any(k in message.strip() for k in exclude_keywords):
+                return
+
+            sender_id = event.get_sender_id()
+            
             # 使用优化后的单次LLM调用处理消息
             await self.memory_system.process_message_optimized(event, group_id)
+            
+            # === 新增：主动能力升级相关处理 ===
+            if self.topic_engine and self.user_profiling and self.temporal_memory:
+                try:
+                    # 1. 话题追踪
+                    # 私聊场景下（group_id为空），使用 sender_id 作为 topic_engine 的 group_id，实现用户隔离
+                    topic_scope = group_id if group_id else f"private:{sender_id}"
+                    await self.topic_engine.add_message_to_topic(message, sender_id, topic_scope)
+                    
+                    # 2. 未闭合话题检测
+                    await self.temporal_memory.auto_detect_and_track_questions(message, sender_id, group_id)
+                    
+                    # 3. 禁忌词自动学习
+                    await self.user_profiling.learn_taboo_from_message(sender_id, message, group_id)
+                    
+                    # 4. 查找复活的话题
+                    resurrected = await self.topic_engine.find_resurrected_topics(message, topic_scope, silence_days=7)
+                    if resurrected:
+                        logger.info(f"检测到复活话题: {resurrected}")
+                    
+                except Exception as upgrade_e:
+                    logger.debug(f"主动能力升级处理失败: {upgrade_e}")
             
             # 使用队列化保存，减少I/O操作
             if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
@@ -249,35 +405,34 @@ class MemoraConnectPlugin(Star):
         except Exception as e:
             self._debug_log(f"异步消息处理失败: {e}", "error")
 
-    @filter.on_llm_request()
+    @filter.on_llm_request(priority=999)
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         """处理LLM请求时的记忆召回"""
         try:
+            logger.info("Memora Connect 拦截到 LLM 请求，准备注入记忆...")
             if not self._initialized:
+                logger.warning("Memora Connect 尚未初始化，跳过注入")
+                return
+            if not event.is_private_chat() and not getattr(
+                event, "is_at_or_wake_command", False
+            ):
                 return
                 
             # 获取当前消息内容
             current_message = event.message_str.strip()
             if not current_message:
                 return
+
+            group_id = self._load_group_context_for_event(event)
             
-            # 使用增强记忆召回系统
-            enhanced_recall = EnhancedMemoryRecall(self.memory_system)
-            results = await enhanced_recall.recall_all_relevant_memories(
-                query=current_message,
-                max_memories=self.memory_system.memory_config.get("max_injected_memories", 5)
-            )
-            
-            if results:
-                # 格式化记忆为上下文
-                memory_context = enhanced_recall.format_memories_for_llm(results)
-                
-                # 将记忆注入到系统提示中
-                if hasattr(req, 'system_prompt'):
-                    original_prompt = req.system_prompt or ""
-                    if "【相关记忆】" not in original_prompt:
-                        req.system_prompt = f"{original_prompt}\n\n{memory_context}"
-                        logger.debug(f"已注入 {len(results)} 条记忆到LLM上下文")
+            # [修改] 统一使用 inject_memories_to_context 获取完整上下文（包含记忆、话题、画像等）
+            # 避免重复召回和注入
+            full_context = await self.memory_system.inject_memories_to_context(event)
+            if full_context and hasattr(req, 'system_prompt'):
+                # 避免重复注入（简单检查）
+                if "【相关记忆】" not in (req.system_prompt or ""):
+                    req.system_prompt = f"{req.system_prompt or ''}\n\n{full_context}"
+                    logger.debug(f"已将完整上下文注入到 System Prompt")
                         
         except Exception as e:
             logger.error(f"LLM请求记忆召回失败: {e}", exc_info=True)
@@ -287,6 +442,15 @@ class MemoraConnectPlugin(Star):
         self._debug_log("开始插件终止流程，清理所有资源", "info")
         
         try:
+            # === 新增：清理主动能力升级模块 ===
+            try:
+                if self.event_bus:
+                    logger.info("关闭事件总线...")
+                    await shutdown_event_bus()
+                    logger.info("✓ 事件总线已关闭")
+            except Exception as bus_e:
+                logger.warning(f"关闭事件总线失败: {bus_e}")
+            
             # 停止 Web 服务
             if hasattr(self, 'web_server') and self.web_server:
                 try:
@@ -363,7 +527,7 @@ class MemoraConnectPlugin(Star):
         
         try:
             # 切换到正确的群聊上下文
-            if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
+            if self.memory_system.memory_config.get("enable_group_isolation", True):
                 self.memory_system.memory_graph = MemoryGraph()
                 self.memory_system.load_memory_state(group_id)
 
@@ -396,11 +560,13 @@ class MemoraConnectPlugin(Star):
 
         try:
             # 切换到正确的群聊上下文
-            if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
+            if self.memory_system.memory_config.get("enable_group_isolation", True):
                 self.memory_system.memory_graph = MemoryGraph()
                 self.memory_system.load_memory_state(group_id)
 
             memories = await self.memory_system.recall_memories_full(keyword)
+            if memories:
+                await self.memory_system._queue_save_memory_state(group_id)
             return [memory.__dict__ for memory in memories]
         except Exception as e:
             logger.error(f"API recall_memories_api 失败: {e}", exc_info=True)
@@ -413,7 +579,7 @@ class MemoraConnectPlugin(Star):
             return False
 
         try:
-            if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
+            if self.memory_system.memory_config.get("enable_group_isolation", True):
                 self.memory_system.memory_graph = MemoryGraph()
                 self.memory_system.load_memory_state(group_id)
 
@@ -431,7 +597,7 @@ class MemoraConnectPlugin(Star):
             return None
 
         try:
-            if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
+            if self.memory_system.memory_config.get("enable_group_isolation", True):
                 self.memory_system.memory_graph = MemoryGraph()
                 self.memory_system.load_memory_state(group_id)
 
@@ -447,7 +613,7 @@ class MemoraConnectPlugin(Star):
             return None
 
         try:
-            if group_id and self.memory_system.memory_config.get("enable_group_isolation", True):
+            if self.memory_system.memory_config.get("enable_group_isolation", True):
                 self.memory_system.memory_graph = MemoryGraph()
                 self.memory_system.load_memory_state(group_id)
 
@@ -471,9 +637,10 @@ class MemoraConnectPlugin(Star):
         location: str = "",
         emotion: str = "",
         tags: str = "",
+        allow_forget: str = None,
         confidence: str = "0.7"
     ) -> MessageEventResult:
-        """通过LLM调用创建记忆
+        """通过LLM调用创建记忆(必须传入完整参数！！！)
 
         Args:
             content(string): 需要记录的完整对话内容
@@ -484,6 +651,7 @@ class MemoraConnectPlugin(Star):
             location(string): 相关场景或地点
             emotion(string): 情感色彩
             tags(string): 分类标签
+            allow_forget(string): 是否允许遗忘
             confidence(number): 置信度，0-1之间的数值
         """
         try:
@@ -492,12 +660,10 @@ class MemoraConnectPlugin(Star):
             if not actual_theme:
                 logger.warning("创建记忆失败：主题为空")
                 return "创建记忆失败：主题为空"
-            
             # 参数验证和清理
             if not content:
                 logger.warning("创建记忆失败：内容为空")
                 return "创建记忆失败：内容为空"
-            
             # 清理特殊字符
             import re
             actual_theme = re.sub(r'[^\w\u4e00-\u9fff,，]', '', str(actual_theme))
@@ -506,6 +672,11 @@ class MemoraConnectPlugin(Star):
             location = str(location).strip()
             emotion = str(emotion).strip()
             tags = str(tags).strip()
+            parsed_allow_forget = self.memory_system._parse_allow_forget_value(allow_forget, None)
+            if allow_forget is not None and parsed_allow_forget is None:
+                logger.warning("创建记忆失败：allow_forget参数无效")
+                return "创建记忆失败：allow_forget参数无效"
+            initial_allow_forget = parsed_allow_forget if parsed_allow_forget is not None else True
             
             # 将confidence从字符串转换为浮点数
             try:
@@ -515,16 +686,24 @@ class MemoraConnectPlugin(Star):
                 confidence_float = 0.7
             
             # 创建概念
+            group_id = self._load_group_context_for_event(event)
             concept_id = self.memory_system.memory_graph.add_concept(actual_theme)
             
             # 根据置信度调整记忆强度
             base_strength = 1.0
             adjusted_strength = base_strength * confidence_float
             
-            # 获取群组ID
-            group_id = self.memory_system._extract_group_id_from_event(event)
-            
             # 创建丰富记忆
+            resolved_allow_forget = await self.memory_system.resolve_allow_forget(
+                content=content,
+                theme=actual_theme,
+                details=details,
+                participants=participants,
+                location=location,
+                emotion=emotion,
+                tags=tags,
+                initial_allow_forget=initial_allow_forget
+            )
             memory_id = self.memory_system.memory_graph.add_memory(
                 content=content,
                 concept_id=concept_id,
@@ -533,8 +712,12 @@ class MemoraConnectPlugin(Star):
                 location=location,
                 emotion=emotion,
                 tags=tags,
-                strength=adjusted_strength
+                strength=adjusted_strength,
+                allow_forget=resolved_allow_forget,
+                group_id=group_id
             )
+
+            await self.memory_system._queue_save_memory_state(group_id)
             
             logger.info(f"LLM工具创建丰富记忆：{actual_theme} -> {content} (置信度: {confidence})")
             
@@ -553,16 +736,18 @@ class MemoraConnectPlugin(Star):
             keyword(string): 要查询的关键词或内容
         """
         try:
+            group_id = self._load_group_context_for_event(event)
             enhanced_recall = EnhancedMemoryRecall(self.memory_system)
             results = await enhanced_recall.recall_all_relevant_memories(
                 query=keyword,
-                max_memories=8
+                max_memories=8,
+                group_id=group_id
             )
             
             if results:
                 # 生成增强的上下文
-                formatted_memories = enhanced_recall.format_memories_for_llm(results)
-                return f"记忆召回结果:{formatted_memories}"
+                formatted_memories = enhanced_recall.format_memories_for_llm(results, include_ids=True)
+                return f"记忆召回结果:{formatted_memories}\n提示：如果记忆已过时允许删除记忆"
             else:
                 return "没有相关记忆"
                   
@@ -570,6 +755,36 @@ class MemoraConnectPlugin(Star):
             logger.error(f"增强记忆召回工具失败：{e}")
             await event.send(MessageChain().message("记忆召回失败"))
             return "记忆召回失败"
+
+    @filter.llm_tool(name="delete_memory")
+    async def delete_memory_tool(
+        self,
+        event: AstrMessageEvent,
+        memory_id: str,
+        reason: str = ""
+    ) -> MessageEventResult:
+        """删除指定记忆
+
+        Args:
+            memory_id(string): 需要删除的记忆ID
+            reason(string): 删除原因或说明
+        """
+        try:
+            if not self.memory_system.config_manager.is_memory_system_enabled():
+                return "记忆系统已禁用，无法删除记忆"
+
+            group_id = self._load_group_context_for_event(event)
+            success = await self.memory_system.delete_memory_by_id(memory_id, group_id)
+            if success:
+                await self.memory_system._queue_save_memory_state(group_id)
+                logger.info(f"LLM工具删除记忆：{memory_id} 原因:{reason}")
+                return f"记忆已删除: {memory_id}"
+
+            return f"未找到记忆: {memory_id}"
+        except Exception as e:
+            logger.error(f"LLM工具删除记忆失败：{e}")
+            await event.send(MessageChain().message("删除记忆失败"))
+            return "删除记忆失败"
 
     @filter.llm_tool(name="adjust_impression")
     async def adjust_impression_tool(
@@ -588,7 +803,7 @@ class MemoraConnectPlugin(Star):
         """
         try:
             # 获取群组ID
-            group_id = self.memory_system._extract_group_id_from_event(event)
+            group_id = self._load_group_context_for_event(event)
             
             # 调整印象分数 - 将字符串转换为浮点数
             try:
@@ -598,6 +813,7 @@ class MemoraConnectPlugin(Star):
                 delta_float = 0.0
             
             new_score = self.memory_system.adjust_impression_score(group_id, person_name, delta_float)
+            await self.memory_system._queue_save_memory_state(group_id)
             
             # 记录调整原因
             if reason:
@@ -632,7 +848,7 @@ class MemoraConnectPlugin(Star):
         """
         try:
             # 获取群组ID
-            group_id = self.memory_system._extract_group_id_from_event(event)
+            group_id = self._load_group_context_for_event(event)
             
             # 验证分数范围 - 将字符串转换为浮点数
             score_float = None
@@ -647,6 +863,7 @@ class MemoraConnectPlugin(Star):
             memory_id = self.memory_system.record_person_impression(
                 group_id, person_name, summary, score_float, details
             )
+            await self.memory_system._queue_save_memory_state(group_id)
             
             if memory_id:
                 current_score = self.memory_system.get_impression_score(group_id, person_name)

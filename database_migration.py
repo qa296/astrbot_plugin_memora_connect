@@ -10,6 +10,11 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from astrbot.api import logger
 
+try:
+    from .resource_management import resource_manager
+except ImportError:
+    resource_manager = None
+
 @dataclass
 class FieldSchema:
     """字段结构定义"""
@@ -595,7 +600,8 @@ class SmartDatabaseMigration:
             FieldSchema(name="created_at", type="REAL", not_null=True),
             FieldSchema(name="last_accessed", type="REAL", not_null=True),
             FieldSchema(name="access_count", type="INTEGER", default_value=0),
-            FieldSchema(name="strength", type="REAL", default_value=1.0)
+            FieldSchema(name="strength", type="REAL", default_value=1.0),
+            FieldSchema(name="allow_forget", type="INTEGER", default_value=1)
         ]
         # 添加群聊隔离索引
         memories_table.indexes = [
@@ -734,47 +740,119 @@ class SmartDatabaseMigration:
     
     async def _execute_smart_migration(self, diff: SchemaDiff) -> bool:
         """执行智能迁移"""
-        temp_db_path = self.db_path + ".smart_migration"
+        temp_db_path = self._get_temp_db_path()
         try:
-            if os.path.exists(temp_db_path):
-                os.remove(temp_db_path)
-            
             self._create_new_structure(temp_db_path)
             await self._smart_data_migration(self.db_path, temp_db_path, diff)
             
-            # 替换数据库
-            os.remove(self.db_path)
-            os.rename(temp_db_path, self.db_path)
+            # 强制关闭所有连接，确保文件可以被替换
+            if resource_manager:
+                resource_manager.close_db_connections(self.db_path)
+            
+            # 替换数据库（带重试机制）
+            for i in range(5):
+                try:
+                    if os.path.exists(self.db_path):
+                        os.remove(self.db_path)
+                    os.rename(temp_db_path, self.db_path)
+                    break
+                except PermissionError:
+                    if i == 4: raise  # 最后一次尝试失败则抛出异常
+                    await asyncio.sleep(0.5)  # 等待文件句柄释放
+                    # 再次尝试关闭连接
+                    if resource_manager:
+                        resource_manager.close_db_connections(self.db_path)
             
             return True
             
         except Exception as e:
             logger.error(f"智能迁移执行失败: {e}", exc_info=True)
-            if os.path.exists(temp_db_path):
-                os.remove(temp_db_path)
+            await self._safe_remove_file_async(temp_db_path)
             return False
 
     def _execute_smart_migration_sync(self, diff: SchemaDiff) -> bool:
         """执行智能迁移（同步版）"""
-        temp_db_path = self.db_path + ".smart_migration"
+        temp_db_path = self._get_temp_db_path()
         try:
-            if os.path.exists(temp_db_path):
-                os.remove(temp_db_path)
-            
             self._create_new_structure(temp_db_path)
             self._smart_data_migration_sync(self.db_path, temp_db_path, diff)
             
-            # 替换数据库
-            os.remove(self.db_path)
-            os.rename(temp_db_path, self.db_path)
+            # 强制关闭所有连接，确保文件可以被替换
+            if resource_manager:
+                resource_manager.close_db_connections(self.db_path)
+            
+            # 替换数据库（带重试机制）
+            for i in range(5):
+                try:
+                    if os.path.exists(self.db_path):
+                        os.remove(self.db_path)
+                    os.rename(temp_db_path, self.db_path)
+                    break
+                except PermissionError:
+                    if i == 4: raise  # 最后一次尝试失败则抛出异常
+                    time.sleep(0.5)  # 等待文件句柄释放
+                    # 再次尝试关闭连接
+                    if resource_manager:
+                        resource_manager.close_db_connections(self.db_path)
             
             return True
             
         except Exception as e:
             logger.error(f"智能迁移执行失败: {e}", exc_info=True)
-            if os.path.exists(temp_db_path):
-                os.remove(temp_db_path)
+            self._safe_remove_file(temp_db_path)
             return False
+
+    def _get_temp_db_path(self) -> str:
+        base_path = self.db_path + ".smart_migration"
+        if not os.path.exists(base_path):
+            return base_path
+        self._safe_remove_file(base_path)
+        if not os.path.exists(base_path):
+            return base_path
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{base_path}.{timestamp}"
+
+    def _safe_remove_file(self, file_path: str, retries: int = 5, delay: float = 0.5) -> None:
+        if not file_path or not os.path.exists(file_path):
+            return
+        for attempt in range(retries):
+            try:
+                if resource_manager:
+                    resource_manager.close_db_connections(file_path)
+                os.remove(file_path)
+                return
+            except PermissionError:
+                if attempt == retries - 1:
+                    try:
+                        pending_path = f"{file_path}.pending_delete"
+                        if os.path.exists(pending_path):
+                            os.remove(pending_path)
+                        os.rename(file_path, pending_path)
+                        return
+                    except Exception:
+                        return
+                time.sleep(delay)
+
+    async def _safe_remove_file_async(self, file_path: str, retries: int = 5, delay: float = 0.5) -> None:
+        if not file_path or not os.path.exists(file_path):
+            return
+        for attempt in range(retries):
+            try:
+                if resource_manager:
+                    resource_manager.close_db_connections(file_path)
+                os.remove(file_path)
+                return
+            except PermissionError:
+                if attempt == retries - 1:
+                    try:
+                        pending_path = f"{file_path}.pending_delete"
+                        if os.path.exists(pending_path):
+                            os.remove(pending_path)
+                        os.rename(file_path, pending_path)
+                        return
+                    except Exception:
+                        return
+                await asyncio.sleep(delay)
     
     def _create_new_structure(self, db_path: str):
         """创建新数据库结构"""

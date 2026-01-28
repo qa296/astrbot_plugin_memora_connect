@@ -127,6 +127,12 @@
     "hint": "每隔多少轮对话形成一次记忆。",
     "default": 15
   },
+  "exclude_keywords": {
+    "description": "排除关键词列表",
+    "type": "list",
+    "hint": "如果消息以这些关键词开头，将被记忆系统忽略",
+    "default": []
+  },
   "web_ui": {
     "description": "Web 界面",
     "type": "object",

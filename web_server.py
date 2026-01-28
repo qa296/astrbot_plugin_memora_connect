@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import sqlite3
 from typing import Any, Dict, List, Optional
 
 try:
@@ -40,6 +41,7 @@ class MemoryWebServer:
 
     # ---------------------- lifecycle ----------------------
     async def start(self):
+        self._ensure_db_schema()
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self.host, self.port)
@@ -146,13 +148,75 @@ class MemoryWebServer:
         except Exception as e:
             logger.warning(f"加载分组数据失败: {e}")
 
+    def _ensure_db_schema(self) -> None:
+        conn = resource_manager.get_db_connection(self.ms.db_path)
+        try:
+            cur = conn.cursor()
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS concepts (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    created_at REAL,
+                    last_accessed REAL,
+                    access_count INTEGER DEFAULT 0
+                )
+            ''')
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS memories (
+                    id TEXT PRIMARY KEY,
+                    concept_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    details TEXT DEFAULT '',
+                    participants TEXT DEFAULT '',
+                    location TEXT DEFAULT '',
+                    emotion TEXT DEFAULT '',
+                    tags TEXT DEFAULT '',
+                    created_at REAL,
+                    last_accessed REAL,
+                    access_count INTEGER DEFAULT 0,
+                    strength REAL DEFAULT 1.0,
+                    group_id TEXT DEFAULT '',
+                    FOREIGN KEY (concept_id) REFERENCES concepts (id)
+                )
+            ''')
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS connections (
+                    id TEXT PRIMARY KEY,
+                    from_concept TEXT NOT NULL,
+                    to_concept TEXT NOT NULL,
+                    strength REAL DEFAULT 1.0,
+                    last_strengthened REAL,
+                    FOREIGN KEY (from_concept) REFERENCES concepts (id),
+                    FOREIGN KEY (to_concept) REFERENCES concepts (id)
+                )
+            ''')
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_memories_group_id ON memories(group_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_memories_concept_group ON memories(concept_id, group_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_memories_created_group ON memories(created_at, group_id)")
+            conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning(f"初始化 Memora Web 数据表失败: {e}")
+        finally:
+            resource_manager.release_db_connection(self.ms.db_path, conn)
+
     def _query_all(self, sql: str, params: tuple = ()) -> List[tuple]:
         conn = resource_manager.get_db_connection(self.ms.db_path)
         try:
             cur = conn.cursor()
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-            return rows
+            try:
+                cur.execute(sql, params)
+                return cur.fetchall()
+            except sqlite3.OperationalError as e:
+                if "no such table" in str(e).lower():
+                    self._ensure_db_schema()
+                    cur.execute(sql, params)
+                    return cur.fetchall()
+                raise
         finally:
             resource_manager.release_db_connection(self.ms.db_path, conn)
 
@@ -160,12 +224,29 @@ class MemoryWebServer:
         conn = resource_manager.get_db_connection(self.ms.db_path)
         try:
             cur = conn.cursor()
-            cur.execute("BEGIN TRANSACTION")
-            cur.execute(sql, params)
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
+            try:
+                cur.execute("BEGIN TRANSACTION")
+                cur.execute(sql, params)
+                conn.commit()
+            except sqlite3.OperationalError as e:
+                if "no such table" in str(e).lower():
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    self._ensure_db_schema()
+                    cur.execute("BEGIN TRANSACTION")
+                    cur.execute(sql, params)
+                    conn.commit()
+                else:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    raise
+            except Exception:
+                conn.rollback()
+                raise
         finally:
             resource_manager.release_db_connection(self.ms.db_path, conn)
 
@@ -278,6 +359,8 @@ class MemoryWebServer:
             # 搜索
             await self._load_group(group_id)
             mems = await self.ms.recall_memories_full(q)
+            if mems:
+                await self.ms._queue_save_memory_state(group_id)
             data = [m.__dict__ for m in mems]
             return web.json_response({"memories": data})
 
@@ -369,8 +452,8 @@ class MemoryWebServer:
         memory_id = request.match_info.get("memory_id")
         group_id = request.query.get("group_id", "")
         await self._load_group(group_id)
-        if memory_id in self.ms.memory_graph.memories:
-            self.ms.memory_graph.remove_memory(memory_id)
+        ok = await self.ms.delete_memory_by_id(memory_id, group_id)
+        if ok:
             await self.ms._queue_save_memory_state(group_id)
             return web.json_response({"ok": True})
         return web.json_response({"error": "not found"}, status=404)

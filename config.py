@@ -12,20 +12,23 @@ except ImportError:
 
 class MemorySystemConfig:
     """记忆系统配置数据类"""
-    def __init__(self, enable_memory_system: bool = True):
+    def __init__(self, enable_memory_system: bool = True, exclude_keywords: list = None):
         self.enable_memory_system = enable_memory_system
+        self.exclude_keywords = exclude_keywords or []
     
     @classmethod
     def from_dict(cls, config_dict):
         """从字典创建配置对象"""
         return cls(
-            enable_memory_system=config_dict.get('enable_memory_system', True)
+            enable_memory_system=config_dict.get('enable_memory_system', True),
+            exclude_keywords=config_dict.get('exclude_keywords', [])
         )
     
     def to_dict(self):
         """转换为字典"""
         return {
-            'enable_memory_system': self.enable_memory_system
+            'enable_memory_system': self.enable_memory_system,
+            'exclude_keywords': self.exclude_keywords
         }
 
 
@@ -48,6 +51,10 @@ class MemoryConfigManager:
         # 处理主开关
         if 'enable_memory_system' in config:
             memory_config_dict['enable_memory_system'] = bool(config['enable_memory_system'])
+            
+        # 处理排除关键词
+        if 'exclude_keywords' in config:
+            memory_config_dict['exclude_keywords'] = config['exclude_keywords']
         
         # 创建配置对象
         self.config = MemorySystemConfig.from_dict(memory_config_dict)

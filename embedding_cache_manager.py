@@ -892,6 +892,38 @@ class EmbeddingCacheManager:
                     
         except Exception as e:
             logger.error(f"清理旧嵌入向量失败: {e}")
+
+    async def delete_embedding(self, memory_id: str, group_id: str = "") -> bool:
+        """删除指定记忆的嵌入向量"""
+        try:
+            if not memory_id:
+                return False
+
+            conn = resource_manager.get_db_connection(self.cache_db_path)
+            cursor = conn.cursor()
+
+            if group_id:
+                cursor.execute(
+                    "DELETE FROM memory_embeddings WHERE memory_id = ? AND group_id = ?",
+                    (memory_id, group_id)
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM memory_embeddings WHERE memory_id = ?",
+                    (memory_id,)
+                )
+
+            deleted = cursor.rowcount
+            conn.commit()
+            resource_manager.release_db_connection(self.cache_db_path, conn)
+
+            if deleted and self.precompute_stats.get("cached_memories", 0) > 0:
+                self.precompute_stats["cached_memories"] = max(0, self.precompute_stats["cached_memories"] - deleted)
+
+            return deleted > 0
+        except Exception as e:
+            logger.error(f"删除嵌入向量失败: {e}")
+            return False
     
     async def cleanup(self):
         """清理资源，支持优雅退出"""
