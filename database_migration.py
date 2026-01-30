@@ -10,6 +10,11 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from astrbot.api import logger
 
+try:
+    from .resource_management import resource_manager
+except ImportError:
+    resource_manager = None
+
 @dataclass
 class FieldSchema:
     """字段结构定义"""
@@ -595,7 +600,8 @@ class SmartDatabaseMigration:
             FieldSchema(name="created_at", type="REAL", not_null=True),
             FieldSchema(name="last_accessed", type="REAL", not_null=True),
             FieldSchema(name="access_count", type="INTEGER", default_value=0),
-            FieldSchema(name="strength", type="REAL", default_value=1.0)
+            FieldSchema(name="strength", type="REAL", default_value=1.0),
+            FieldSchema(name="allow_forget", type="INTEGER", default_value=1)
         ]
         # 添加群聊隔离索引
         memories_table.indexes = [
@@ -734,47 +740,315 @@ class SmartDatabaseMigration:
     
     async def _execute_smart_migration(self, diff: SchemaDiff) -> bool:
         """执行智能迁移"""
-        temp_db_path = self.db_path + ".smart_migration"
+        temp_db_path = self._get_temp_db_path()
+
         try:
-            if os.path.exists(temp_db_path):
-                os.remove(temp_db_path)
-            
+            # 创建临时数据库并迁移数据
             self._create_new_structure(temp_db_path)
             await self._smart_data_migration(self.db_path, temp_db_path, diff)
-            
-            # 替换数据库
-            os.remove(self.db_path)
-            os.rename(temp_db_path, self.db_path)
-            
-            return True
-            
+
+            # 使用更安全的替换策略：先备份原文件，然后重命名临时文件
+            # 这样即使有连接锁定，新文件也能正确创建
+            backup_path = self._create_smart_backup()
+
+            # Windows下使用VACUUM INTO策略避免文件锁定问题
+            # 直接使用重命名方式，配合更长的重试时间和Windows特定处理
+            success = await self._safe_replace_database_async(temp_db_path, backup_path)
+
+            if success:
+                return True
+            else:
+                # 如果替换失败，尝试使用备份恢复
+                logger.warning("数据库替换失败，尝试使用备份恢复...")
+                return await self._rollback_from_backup_async(backup_path)
+
         except Exception as e:
             logger.error(f"智能迁移执行失败: {e}", exc_info=True)
-            if os.path.exists(temp_db_path):
-                os.remove(temp_db_path)
+            await self._safe_remove_file_async(temp_db_path)
             return False
+
+    async def _safe_replace_database_async(self, temp_db_path: str, backup_path: str) -> bool:
+        """安全替换数据库文件（异步版，支持Windows）"""
+        import platform
+
+        # Windows需要更长的等待时间
+        max_retries = 10 if platform.system() == 'Windows' else 5
+        delay = 1.0 if platform.system() == 'Windows' else 0.3
+
+        for attempt in range(max_retries):
+            try:
+                # 强制关闭所有连接
+                if resource_manager:
+                    resource_manager.close_db_connections(self.db_path)
+
+                # 尝试删除原文件（Windows下可能失败）
+                if os.path.exists(self.db_path):
+                    try:
+                        os.remove(self.db_path)
+                    except PermissionError:
+                        # Windows下，如果文件被锁定，尝试重命名为待删除文件
+                        if attempt < max_retries - 1:
+                            pending_delete = f"{self.db_path}.pending_delete.{attempt}"
+                            try:
+                                # 先删除旧的待删除文件
+                                if os.path.exists(pending_delete):
+                                    os.remove(pending_delete)
+                                # 将当前文件重命名为待删除
+                                os.replace(self.db_path, pending_delete)
+                            except Exception:
+                                pass  # 忽略错误，继续重试
+                        else:
+                            raise  # 最后一次尝试仍然失败，抛出异常
+
+                # 重命名临时文件为原文件名
+                os.replace(temp_db_path, self.db_path)
+
+                logger.info(f"数据库替换成功 (尝试 {attempt + 1}/{max_retries})")
+                return True
+
+            except PermissionError as e:
+                logger.debug(f"替换数据库失败 (尝试 {attempt + 1}/{max_retries}): 文件被占用")
+                if attempt == max_retries - 1:
+                    logger.error(f"数据库替换失败，已达到最大重试次数: {e}")
+                    return False
+                await asyncio.sleep(delay)
+
+            except Exception as e:
+                logger.error(f"数据库替换失败: {e}", exc_info=True)
+                return False
+
+        return False
+
+    async def _rollback_from_backup_async(self, backup_path: str) -> bool:
+        """从备份回滚数据库（异步版）"""
+        import platform
+
+        if not os.path.exists(backup_path):
+            logger.error("备份文件不存在，无法回滚")
+            return False
+
+        max_retries = 10 if platform.system() == 'Windows' else 5
+        delay = 1.0 if platform.system() == 'Windows' else 0.3
+        is_windows = platform.system() == 'Windows'
+
+        for attempt in range(max_retries):
+            try:
+                # 强制关闭所有连接
+                if resource_manager:
+                    resource_manager.close_db_connections(self.db_path)
+
+                # 先将备份复制到临时文件
+                temp_restore = f"{self.db_path}.restore.{attempt}"
+                shutil.copy2(backup_path, temp_restore)
+
+                # 使用 os.replace() 替换原数据库
+                # Windows 下会自动覆盖目标文件
+                os.replace(temp_restore, self.db_path)
+                logger.info(f"已从备份回滚成功 (尝试 {attempt + 1}/{max_retries})")
+                return True
+
+            except PermissionError:
+                logger.debug(f"回滚失败 (尝试 {attempt + 1}/{max_retries}): 文件被占用")
+                if attempt == max_retries - 1:
+                    logger.error("从备份回滚失败")
+                    return False
+                await asyncio.sleep(delay)
+
+            except Exception as e:
+                logger.error(f"从备份回滚失败: {e}", exc_info=True)
+                return False
+
+        return False
 
     def _execute_smart_migration_sync(self, diff: SchemaDiff) -> bool:
         """执行智能迁移（同步版）"""
-        temp_db_path = self.db_path + ".smart_migration"
+        temp_db_path = self._get_temp_db_path()
+
         try:
-            if os.path.exists(temp_db_path):
-                os.remove(temp_db_path)
-            
+            # 创建临时数据库并迁移数据
             self._create_new_structure(temp_db_path)
             self._smart_data_migration_sync(self.db_path, temp_db_path, diff)
-            
-            # 替换数据库
-            os.remove(self.db_path)
-            os.rename(temp_db_path, self.db_path)
-            
-            return True
-            
+
+            # 使用更安全的替换策略：先备份原文件，然后重命名临时文件
+            # 这样即使有连接锁定，新文件也能正确创建
+            backup_path = self._create_smart_backup()
+
+            # Windows下使用VACUUM INTO策略避免文件锁定问题
+            # 直接使用重命名方式，配合更长的重试时间和Windows特定处理
+            success = self._safe_replace_database_sync(temp_db_path, backup_path)
+
+            if success:
+                return True
+            else:
+                # 如果替换失败，尝试使用备份恢复
+                logger.warning("数据库替换失败，尝试使用备份恢复...")
+                return self._rollback_from_backup_sync(backup_path)
+
         except Exception as e:
             logger.error(f"智能迁移执行失败: {e}", exc_info=True)
-            if os.path.exists(temp_db_path):
-                os.remove(temp_db_path)
+            self._safe_remove_file(temp_db_path)
             return False
+
+    def _safe_replace_database_sync(self, temp_db_path: str, backup_path: str) -> bool:
+        """安全替换数据库文件（同步版，支持Windows）"""
+        import platform
+
+        # Windows需要更长的等待时间
+        max_retries = 10 if platform.system() == 'Windows' else 5
+        delay = 1.0 if platform.system() == 'Windows' else 0.3
+
+        for attempt in range(max_retries):
+            try:
+                # 强制关闭所有连接
+                if resource_manager:
+                    resource_manager.close_db_connections(self.db_path)
+
+                # 尝试删除原文件（Windows下可能失败）
+                if os.path.exists(self.db_path):
+                    try:
+                        os.remove(self.db_path)
+                    except PermissionError:
+                        # Windows下，如果文件被锁定，尝试重命名为待删除文件
+                        if attempt < max_retries - 1:
+                            pending_delete = f"{self.db_path}.pending_delete.{attempt}"
+                            try:
+                                # 先删除旧的待删除文件
+                                if os.path.exists(pending_delete):
+                                    os.remove(pending_delete)
+                                # 将当前文件重命名为待删除
+                                os.replace(self.db_path, pending_delete)
+                            except Exception:
+                                pass  # 忽略错误，继续重试
+                        else:
+                            raise  # 最后一次尝试仍然失败，抛出异常
+
+                # 重命名临时文件为原文件名
+                os.replace(temp_db_path, self.db_path)
+
+                logger.info(f"数据库替换成功 (尝试 {attempt + 1}/{max_retries})")
+                return True
+
+            except PermissionError as e:
+                logger.debug(f"替换数据库失败 (尝试 {attempt + 1}/{max_retries}): 文件被占用")
+                if attempt == max_retries - 1:
+                    logger.error(f"数据库替换失败，已达到最大重试次数: {e}")
+                    return False
+                time.sleep(delay)
+
+            except Exception as e:
+                logger.error(f"数据库替换失败: {e}", exc_info=True)
+                return False
+
+        return False
+
+    def _rollback_from_backup_sync(self, backup_path: str) -> bool:
+        """从备份回滚数据库（同步版）"""
+        import platform
+
+        if not os.path.exists(backup_path):
+            logger.error("备份文件不存在，无法回滚")
+            return False
+
+        max_retries = 10 if platform.system() == 'Windows' else 5
+        delay = 1.0 if platform.system() == 'Windows' else 0.3
+
+        for attempt in range(max_retries):
+            try:
+                # 强制关闭所有连接
+                if resource_manager:
+                    resource_manager.close_db_connections(self.db_path)
+
+                # 删除当前损坏的数据库
+                if os.path.exists(self.db_path):
+                    try:
+                        os.remove(self.db_path)
+                    except PermissionError:
+                        # Windows下处理锁定文件
+                        if attempt < max_retries - 1:
+                            pending_delete = f"{self.db_path}.pending_delete.{attempt}"
+                            try:
+                                if os.path.exists(pending_delete):
+                                    os.remove(pending_delete)
+                                os.replace(self.db_path, pending_delete)
+                            except Exception:
+                                pass
+                        else:
+                            raise
+
+                # 从备份恢复
+                # 先将备份复制到临时文件
+                temp_restore = f"{self.db_path}.restore.{attempt}"
+                shutil.copy2(backup_path, temp_restore)
+
+                # 使用 os.replace() 在 Windows 上可以覆盖目标文件
+                os.replace(temp_restore, self.db_path)
+                logger.info(f"已从备份回滚成功 (尝试 {attempt + 1}/{max_retries})")
+                return True
+
+            except PermissionError:
+                logger.debug(f"回滚失败 (尝试 {attempt + 1}/{max_retries}): 文件被占用")
+                if attempt == max_retries - 1:
+                    logger.error("从备份回滚失败")
+                    return False
+                time.sleep(delay)
+
+            except Exception as e:
+                logger.error(f"从备份回滚失败: {e}", exc_info=True)
+                return False
+
+        return False
+
+    def _get_temp_db_path(self) -> str:
+        base_path = self.db_path + ".smart_migration"
+        if not os.path.exists(base_path):
+            return base_path
+        self._safe_remove_file(base_path)
+        if not os.path.exists(base_path):
+            return base_path
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{base_path}.{timestamp}"
+
+    def _safe_remove_file(self, file_path: str, retries: int = 5, delay: float = 0.5) -> None:
+        if not file_path or not os.path.exists(file_path):
+            return
+        for attempt in range(retries):
+            try:
+                if resource_manager:
+                    resource_manager.close_db_connections(file_path)
+                os.remove(file_path)
+                return
+            except PermissionError:
+                if attempt == retries - 1:
+                    try:
+                        pending_path = f"{file_path}.pending_delete"
+                        if os.path.exists(pending_path):
+                            os.remove(pending_path)
+                        os.rename(file_path, pending_path)
+                        return
+                    except Exception:
+                        return
+                time.sleep(delay)
+
+    async def _safe_remove_file_async(self, file_path: str, retries: int = 5, delay: float = 0.5) -> None:
+        if not file_path or not os.path.exists(file_path):
+            return
+        for attempt in range(retries):
+            try:
+                if resource_manager:
+                    resource_manager.close_db_connections(file_path)
+                os.remove(file_path)
+                return
+            except PermissionError:
+                if attempt == retries - 1:
+                    try:
+                        pending_path = f"{file_path}.pending_delete"
+                        if os.path.exists(pending_path):
+                            os.remove(pending_path)
+                        os.rename(file_path, pending_path)
+                        return
+                    except Exception:
+                        return
+                await asyncio.sleep(delay)
     
     def _create_new_structure(self, db_path: str):
         """创建新数据库结构"""

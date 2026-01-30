@@ -146,6 +146,21 @@ class DatabaseConnectionPool:
             except Exception as e:
                 logger.warning(f"关闭数据库连接失败: {e}")
     
+    def close_connections(self, db_path: str):
+        """关闭指定数据库的所有连接"""
+        if db_path not in self.connections:
+            return
+            
+        lock = self.connection_locks[db_path]
+        with lock:
+            for conn_info in self.connections[db_path]:
+                try:
+                    conn_info.connection.close()
+                except Exception as e:
+                    logger.warning(f"关闭数据库连接失败: {e}")
+            self.connections[db_path].clear()
+            logger.debug(f"已关闭数据库所有连接: {db_path}")
+
     def close_all_connections(self):
         """关闭所有连接"""
         for db_path, connections in self.connections.items():
@@ -302,6 +317,10 @@ class ResourceManager:
     def release_db_connection(self, db_path: str, connection: sqlite3.Connection):
         """释放数据库连接"""
         self.db_pool.release_connection(db_path, connection)
+        
+    def close_db_connections(self, db_path: str):
+        """关闭指定数据库的所有连接"""
+        self.db_pool.close_connections(db_path)
     
     @contextmanager
     def get_db_connection_context(self, db_path: str):

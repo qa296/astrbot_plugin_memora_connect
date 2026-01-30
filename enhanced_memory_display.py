@@ -150,6 +150,7 @@ class EnhancedMemoryDisplay:
             lines = [
                 f"{'='*50}",
                 f"记忆 #{index} - {concept.name}",
+                f"记忆ID: {memory.id}",
                 f"内容: {memory.content}"
             ]
             
@@ -181,8 +182,10 @@ class EnhancedMemoryDisplay:
             
             # 时间和统计信息
             created_time = datetime.fromtimestamp(memory.created_at).strftime('%Y-%m-%d %H:%M')
+            allow_forget_text = "是" if getattr(memory, "allow_forget", True) else "否"
             lines.extend([
                 f"创建: {created_time}",
+                f"允许遗忘: {allow_forget_text}",
                 f"强度: {memory.strength:.2f} | 👀 访问: {memory.access_count}次",
                 f"{'='*50}"
             ])

@@ -1,5 +1,5 @@
 name: astrbot_plugin_memora_connect # 这是你的插件的唯一识别名。
 desc: 赋予AI模仿人类的记忆和印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。 # 插件简短描述
-version: v0.2.6 # 插件版本号。格式：v1.1.1 或者 v1.1
+version: v0.2.7 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: qa296 # 作者
 repo: https://github.com/qa296/astrbot_plugin_memora_connect # 插件的仓库地址
