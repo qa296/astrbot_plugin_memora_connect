@@ -794,14 +794,14 @@ class SmartDatabaseMigration:
                                 if os.path.exists(pending_delete):
                                     os.remove(pending_delete)
                                 # 将当前文件重命名为待删除
-                                os.rename(self.db_path, pending_delete)
+                                os.replace(self.db_path, pending_delete)
                             except Exception:
                                 pass  # 忽略错误，继续重试
                         else:
                             raise  # 最后一次尝试仍然失败，抛出异常
 
                 # 重命名临时文件为原文件名
-                os.rename(temp_db_path, self.db_path)
+                os.replace(temp_db_path, self.db_path)
 
                 logger.info(f"数据库替换成功 (尝试 {attempt + 1}/{max_retries})")
                 return True
@@ -829,6 +829,7 @@ class SmartDatabaseMigration:
 
         max_retries = 10 if platform.system() == 'Windows' else 5
         delay = 1.0 if platform.system() == 'Windows' else 0.3
+        is_windows = platform.system() == 'Windows'
 
         for attempt in range(max_retries):
             try:
@@ -836,25 +837,13 @@ class SmartDatabaseMigration:
                 if resource_manager:
                     resource_manager.close_db_connections(self.db_path)
 
-                # 删除当前损坏的数据库
-                if os.path.exists(self.db_path):
-                    try:
-                        os.remove(self.db_path)
-                    except PermissionError:
-                        # Windows下处理锁定文件
-                        if attempt < max_retries - 1:
-                            pending_delete = f"{self.db_path}.pending_delete.{attempt}"
-                            try:
-                                if os.path.exists(pending_delete):
-                                    os.remove(pending_delete)
-                                os.rename(self.db_path, pending_delete)
-                            except Exception:
-                                pass
-                        else:
-                            raise
+                # 先将备份复制到临时文件
+                temp_restore = f"{self.db_path}.restore.{attempt}"
+                shutil.copy2(backup_path, temp_restore)
 
-                # 从备份恢复
-                shutil.copy2(backup_path, self.db_path)
+                # 使用 os.replace() 替换原数据库
+                # Windows 下会自动覆盖目标文件
+                os.replace(temp_restore, self.db_path)
                 logger.info(f"已从备份回滚成功 (尝试 {attempt + 1}/{max_retries})")
                 return True
 
@@ -927,14 +916,14 @@ class SmartDatabaseMigration:
                                 if os.path.exists(pending_delete):
                                     os.remove(pending_delete)
                                 # 将当前文件重命名为待删除
-                                os.rename(self.db_path, pending_delete)
+                                os.replace(self.db_path, pending_delete)
                             except Exception:
                                 pass  # 忽略错误，继续重试
                         else:
                             raise  # 最后一次尝试仍然失败，抛出异常
 
                 # 重命名临时文件为原文件名
-                os.rename(temp_db_path, self.db_path)
+                os.replace(temp_db_path, self.db_path)
 
                 logger.info(f"数据库替换成功 (尝试 {attempt + 1}/{max_retries})")
                 return True
@@ -980,14 +969,19 @@ class SmartDatabaseMigration:
                             try:
                                 if os.path.exists(pending_delete):
                                     os.remove(pending_delete)
-                                os.rename(self.db_path, pending_delete)
+                                os.replace(self.db_path, pending_delete)
                             except Exception:
                                 pass
                         else:
                             raise
 
                 # 从备份恢复
-                shutil.copy2(backup_path, self.db_path)
+                # 先将备份复制到临时文件
+                temp_restore = f"{self.db_path}.restore.{attempt}"
+                shutil.copy2(backup_path, temp_restore)
+
+                # 使用 os.replace() 在 Windows 上可以覆盖目标文件
+                os.replace(temp_restore, self.db_path)
                 logger.info(f"已从备份回滚成功 (尝试 {attempt + 1}/{max_retries})")
                 return True
 
