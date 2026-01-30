@@ -384,10 +384,7 @@ class MemoraConnectPlugin(Star):
                     # 2. 未闭合话题检测
                     await self.temporal_memory.auto_detect_and_track_questions(message, sender_id, group_id)
                     
-                    # 3. 禁忌词自动学习
-                    await self.user_profiling.learn_taboo_from_message(sender_id, message, group_id)
-                    
-                    # 4. 查找复活的话题
+                    # 3. 查找复活的话题
                     resurrected = await self.topic_engine.find_resurrected_topics(message, topic_scope, silence_days=7)
                     if resurrected:
                         logger.info(f"检测到复活话题: {resurrected}")

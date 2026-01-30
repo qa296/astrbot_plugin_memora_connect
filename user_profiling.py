@@ -100,14 +100,6 @@ class UserInterest:
     last_interacted: datetime = field(default_factory=datetime.now)
 
 
-@dataclass
-class TabooWord:
-    """禁忌词数据类"""
-    word: str
-    reason: str = ""
-    added_at: datetime = field(default_factory=datetime.now)
-    triggered_count: int = 0
-
 
 class UserProfilingSystem:
     """
@@ -130,9 +122,6 @@ class UserProfilingSystem:
         # 兴趣偏好缓存：{(user_id, group_id): List[UserInterest]}
         self._interest_cache: Dict[Tuple[str, str], List[UserInterest]] = {}
         
-        # 禁忌词存储：{(user_id, group_id): List[TabooWord]}
-        self._taboo_words: Dict[Tuple[str, str], List[TabooWord]] = {}
-        
         # 配置
         self.cache_duration = 3600  # 1小时缓存
         
@@ -147,20 +136,6 @@ class UserProfilingSystem:
             db_path = self.memory_system.db_path
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            
-            # 创建禁忌词表
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS taboo_words (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT NOT NULL,
-                    group_id TEXT DEFAULT '',
-                    word TEXT NOT NULL,
-                    reason TEXT DEFAULT '',
-                    added_at REAL NOT NULL,
-                    triggered_count INTEGER DEFAULT 0,
-                    UNIQUE(user_id, group_id, word)
-                )
-            """)
             
             # 创建用户兴趣表
             cursor.execute("""

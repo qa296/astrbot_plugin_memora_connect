@@ -366,41 +366,6 @@ class MemoryAPIGateway:
             )
     
     @performance_monitored
-    async def check_taboo(self, user_id: str, content: str, group_id: str = "") -> APIResponse:
-        """
-        检查禁忌词
-        
-        Args:
-            user_id: 用户ID
-            content: 内容
-            group_id: 群组ID
-            
-        Returns:
-            APIResponse: {has_taboo: bool, taboo_words: []}
-        """
-        start_time = time.time()
-        
-        try:
-            triggered = await self.user_profiling.check_taboo(user_id, content, group_id)
-            
-            return APIResponse(
-                success=True,
-                data={
-                    "has_taboo": len(triggered) > 0,
-                    "taboo_words": triggered
-                },
-                latency_ms=(time.time() - start_time) * 1000
-            )
-            
-        except Exception as e:
-            logger.error(f"检查禁忌词失败: {e}", exc_info=True)
-            return APIResponse(
-                success=False,
-                error=str(e),
-                latency_ms=(time.time() - start_time) * 1000
-            )
-    
-    @performance_monitored
     async def get_open_topics(self, group_id: str = "", days: int = 7) -> APIResponse:
         """
         获取未闭合话题
