@@ -4,7 +4,6 @@ AstrBot Memora Connect 插件主文件
 """
 import asyncio
 import os
-from tkinter.constants import N
 from typing import Dict, List, Optional, Any
 
 from astrbot.api.provider import ProviderRequest
