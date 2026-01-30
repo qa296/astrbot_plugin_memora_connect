@@ -1266,10 +1266,16 @@ class MemorySystem:
                     return [m.content for m in selected]
                 return []
             
+            # 检查是否配置了嵌入提供商，如果没有直接回退到简单模式
+            provider = await self.get_embedding_provider()
+            if not provider:
+                logger.debug("嵌入提供商不可用，回退到简单模式")
+                return await self._recall_simple(keyword)
+            
             # 获取关键词的嵌入向量
             keyword_embedding = await self.get_embedding(keyword)
             if not keyword_embedding:
-                logger.warning("无法获取关键词嵌入向量，回退到简单模式")
+                logger.debug("无法获取关键词嵌入向量，回退到简单模式")
                 return await self._recall_simple(keyword)
             
             # 计算与所有记忆的相似度
@@ -1817,16 +1823,25 @@ class MemorySystem:
             return initial_allow_forget
 
     async def get_llm_provider(self):
-        """使用配置文件指定的提供商"""
+        """使用配置文件指定的提供商 - 添加缓存和日志限制"""
+        # 检查是否已经有缓存结果
+        if hasattr(self, '_llm_provider_cache'):
+            return self._llm_provider_cache
+            
         try:
             provider_id = self.memory_config.get('llm_provider')
             if not provider_id:
-                logger.error("插件配置中未指定 'llm_provider'")
+                if not hasattr(self, '_llm_provider_no_config_time') or \
+                   time.time() - self._llm_provider_no_config_time > 60:  # 每分钟最多记录一次
+                    logger.error("插件配置中未指定 'llm_provider'")
+                    self._llm_provider_no_config_time = time.time()
+                self._llm_provider_cache = None
                 return None
 
             # 1. 尝试通过ID精确查找
             provider = self.context.get_provider_by_id(provider_id)
             if provider:
+                self._llm_provider_cache = provider
                 return provider
 
             # 2. 如果ID查找失败，尝试通过名称模糊匹配
@@ -1834,19 +1849,34 @@ class MemorySystem:
             for p in all_providers:
                 p_name = getattr(getattr(p, 'meta', None), 'name', getattr(p, 'name', None))
                 if p_name and p_name.lower() == provider_id.lower():
+                    self._llm_provider_cache = p
                     return p
             
-            logger.error(f"无法找到配置的LLM提供商: '{provider_id}'")
-            available_ids = [f"ID: {getattr(p, 'id', 'N/A')}, Name: {getattr(p, 'name', 'N/A')}" for p in all_providers]
-            logger.error(f"可用提供商: {available_ids}")
+            if not hasattr(self, '_llm_provider_error_time') or \
+               time.time() - self._llm_provider_error_time > 60:  # 每分钟最多记录一次
+                logger.error(f"无法找到配置的LLM提供商: '{provider_id}'")
+                available_ids = [f"ID: {getattr(p, 'id', 'N/A')}, Name: {getattr(p, 'name', 'N/A')}" for p in all_providers]
+                logger.error(f"可用提供商: {available_ids}")
+                self._llm_provider_error_time = time.time()
+            
+            self._llm_provider_cache = None
             return None
             
         except Exception as e:
-            logger.error(f"获取LLM提供商失败: {e}", exc_info=True)
+            if not hasattr(self, '_llm_provider_exception_time') or \
+               time.time() - self._llm_provider_exception_time > 60:  # 每分钟最多记录一次
+                logger.error(f"获取LLM提供商失败: {e}", exc_info=True)
+                self._llm_provider_exception_time = time.time()
+            
+            self._llm_provider_cache = None
             return None
 
     async def get_embedding_provider(self):
-        """使用配置文件指定的提供商"""
+        """使用配置文件指定的提供商 - 添加缓存和日志限制"""
+        # 检查是否已经有缓存结果
+        if hasattr(self, '_embedding_provider_cache'):
+            return self._embedding_provider_cache
+            
         try:
             provider_id = self.memory_config['embedding_provider']
             
@@ -1861,11 +1891,13 @@ class MemorySystem:
             for provider in all_providers:
                 if hasattr(provider, 'id') and provider.id == provider_id:
                     logger.debug(f"成功使用配置指定的嵌入提供商: {provider_id}")
+                    self._embedding_provider_cache = provider
                     return provider
             
             # 如果找不到，尝试通过ID获取
             provider = self.context.get_provider_by_id(provider_id)
             if provider:
+                self._embedding_provider_cache = provider
                 return provider
             
             # 最后尝试通过名称匹配
@@ -1873,13 +1905,25 @@ class MemorySystem:
                 if hasattr(provider, 'meta') and hasattr(provider.meta, 'name'):
                     if provider.meta.name == provider_id:
                         logger.debug(f"通过名称匹配使用嵌入提供商: {provider_id}")
+                        self._embedding_provider_cache = provider
                         return provider
             
-            logger.error(f"无法找到配置的嵌入提供商: {provider_id}")
+            # 添加日志频率限制，避免刷屏
+            if not hasattr(self, '_embedding_provider_error_time') or \
+               time.time() - self._embedding_provider_error_time > 60:  # 每分钟最多记录一次
+                logger.error(f"无法找到配置的嵌入提供商: {provider_id}")
+                self._embedding_provider_error_time = time.time()
+            
+            self._embedding_provider_cache = None
             return None
             
         except Exception as e:
-            logger.error(f"获取嵌入提供商失败: {e}")
+            if not hasattr(self, '_embedding_provider_exception_time') or \
+               time.time() - self._embedding_provider_exception_time > 60:  # 每分钟最多记录一次
+                logger.error(f"获取嵌入提供商失败: {e}")
+                self._embedding_provider_exception_time = time.time()
+            
+            self._embedding_provider_cache = None
             return None
 
     async def get_embedding(self, text: str) -> List[float]:
@@ -1889,6 +1933,10 @@ class MemorySystem:
             return []
         self._embedding_in_progress = True
         try:
+            # 检查当前回忆模式，如果不是embedding模式，直接返回空列表，避免不必要的嵌入计算
+            if self.memory_config["recall_mode"] not in ["embedding"]:
+                return []
+                
             # 如果启用了嵌入向量缓存，尝试从缓存获取
             if self.embedding_cache:
                 # 生成一个临时ID用于缓存查询

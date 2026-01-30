@@ -93,8 +93,20 @@ class EnhancedMemoryRecall:
         try:
             if not query:
                 return []
+                
+            # 检查当前回忆模式，如果不是embedding模式，直接返回空列表
+            if self.memory_system.memory_config["recall_mode"] not in ["embedding"]:
+                logger.debug("语义召回跳过：当前不是embedding模式")
+                return []
+                
             if not self.memory_system.embedding_cache:
                 logger.debug("语义召回跳过：embedding_cache 未就绪")
+                return []
+                
+            # 检查是否配置了嵌入提供商
+            provider = await self.memory_system.get_embedding_provider()
+            if not provider:
+                logger.debug("语义召回跳过：嵌入提供商不可用")
                 return []
                 
             # 1. 获取查询的嵌入向量
