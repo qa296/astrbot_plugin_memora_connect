@@ -12,23 +12,35 @@ except ImportError:
 
 class MemorySystemConfig:
     """记忆系统配置数据类"""
-    def __init__(self, enable_memory_system: bool = True, exclude_keywords: list = None):
+    def __init__(self, enable_memory_system: bool = True, exclude_keywords: list = None,
+                 topic_trigger_interval_minutes: int = 5,
+                 topic_message_threshold: int = 12,
+                 recent_completed_sessions_count: int = 5):
         self.enable_memory_system = enable_memory_system
         self.exclude_keywords = exclude_keywords or []
-    
+        self.topic_trigger_interval_minutes = topic_trigger_interval_minutes
+        self.topic_message_threshold = topic_message_threshold
+        self.recent_completed_sessions_count = recent_completed_sessions_count
+
     @classmethod
     def from_dict(cls, config_dict):
         """从字典创建配置对象"""
         return cls(
             enable_memory_system=config_dict.get('enable_memory_system', True),
-            exclude_keywords=config_dict.get('exclude_keywords', [])
+            exclude_keywords=config_dict.get('exclude_keywords', []),
+            topic_trigger_interval_minutes=config_dict.get('topic_trigger_interval_minutes', 5),
+            topic_message_threshold=config_dict.get('topic_message_threshold', 12),
+            recent_completed_sessions_count=config_dict.get('recent_completed_sessions_count', 5)
         )
-    
+
     def to_dict(self):
         """转换为字典"""
         return {
             'enable_memory_system': self.enable_memory_system,
-            'exclude_keywords': self.exclude_keywords
+            'exclude_keywords': self.exclude_keywords,
+            'topic_trigger_interval_minutes': self.topic_trigger_interval_minutes,
+            'topic_message_threshold': self.topic_message_threshold,
+            'recent_completed_sessions_count': self.recent_completed_sessions_count
         }
 
 

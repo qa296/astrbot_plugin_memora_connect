@@ -21,7 +21,6 @@ try:
     from .models import Concept, Memory, Connection
     from .config import MemoryConfigManager
     from .memory_graph import MemoryGraph
-    from ..memory.extractor import BatchMemoryExtractor
     from ..infrastructure.resources import resource_manager
     from ..infrastructure.database import SmartDatabaseMigration
     from ..infrastructure.embedding import EmbeddingCacheManager
@@ -32,7 +31,6 @@ except ImportError:
     from models import Concept, Memory, Connection
     from config import MemoryConfigManager
     from memory_graph import MemoryGraph
-    from memory.extractor import BatchMemoryExtractor
     ProviderRequest = None
     AstrMessageEvent = None
     Context = None
@@ -124,11 +122,10 @@ class MemorySystem:
         self.memory_graph = MemoryGraph()
         self.llm_provider = None
         self.embedding_provider = None
-        self.batch_extractor = BatchMemoryExtractor(self)
         self.embedding_cache = None  # 嵌入向量缓存管理器
-        
+
         # 组件引用（由外部注入）
-        self.topic_engine = None
+        self.topic_analyzer = None
         self.user_profiling = None
         
         # 印象系统配置
@@ -161,9 +158,9 @@ class MemorySystem:
         self._should_stop_maintenance = asyncio.Event()  # 停止维护事件
         self._should_stop_maintenance.clear()  # 初始不停止
         
-    def set_components(self, topic_engine, user_profiling):
+    def set_components(self, topic_analyzer, user_profiling):
         """注入组件依赖"""
-        self.topic_engine = topic_engine
+        self.topic_analyzer = topic_analyzer
         self.user_profiling = user_profiling
 
     def _create_managed_task(self, coro):
@@ -766,151 +763,26 @@ class MemorySystem:
             logger.error(f"处理消息时出错: {e}")
 
     async def process_message_optimized(self, event: AstrMessageEvent, group_id: str = ""):
-        """优化的消息处理，使用单次LLM调用"""
+        """优化的消息处理，委托给TopicAnalyzer"""
         try:
-            # 获取完整的对话历史
-            full_history = await self.get_conversation_history_full(event)
-            if not full_history:
-                return
-            
-            # 检查是否启用批量记忆提取
-            enable_batch_extraction = self.memory_config.get("enable_batch_memory_extraction", True)
-            
-            if not enable_batch_extraction:
-                # 如果禁用批量记忆提取，则跳过记忆形成
+            if not self.topic_analyzer:
                 return
 
-            # 获取记忆形成间隔（对话轮数）
-            memory_formation_interval = self.memory_config.get("memory_formation_interval", 15)
-            
-            # 简单实现：每隔一定轮数形成一次记忆
-            # 这里可以根据实际需求实现更复杂的逻辑
-            if len(full_history) % memory_formation_interval != 0:
+            message = event.message_str
+            if not message or not message.strip():
                 return
 
-            # 使用批量提取器，单次LLM调用获取多个记忆
-            extracted_memories = await self.batch_extractor.extract_memories_and_themes(full_history)
-            
-            if not extracted_memories:
-                return
-            
-            # 批量处理提取的记忆
-            themes = []
-            concept_ids = []  # 存储创建的概念ID
-            valid_memories = 0
-            valid_impressions = 0  # 记录有效印象数量
-            
-            for memory_data in extracted_memories:
-                try:
-                    theme = str(memory_data.get("theme", "")).strip()
-                    content = str(memory_data.get("content", "")).strip()
-                    details = str(memory_data.get("details", "")).strip()
-                    participants = str(memory_data.get("participants", "")).strip()
-                    location = str(memory_data.get("location", "")).strip()
-                    emotion = str(memory_data.get("emotion", "")).strip()
-                    tags = str(memory_data.get("tags", "")).strip()
-                    confidence = float(memory_data.get("confidence", 0.7))
-                    memory_type = str(memory_data.get("memory_type", "normal")).strip().lower()
-                    allow_forget = self._parse_allow_forget_value(memory_data.get("allow_forget", True), True)
-                    
-                    # 验证数据完整性
-                    if not theme or not content:
-                        continue
-                    
-                    # 根据置信度调整记忆强度
-                    base_strength = 1.0
-                    adjusted_strength = base_strength * max(0.0, min(1.0, confidence))
-                    
-                    # 特殊处理印象记忆
-                    if memory_type == "impression":
-                        # 从主题中提取人物姓名
-                        person_name = self._extract_person_name_from_theme(theme)
-                        if person_name:
-                            # 使用印象系统记录人物印象
-                            impression_score = adjusted_strength  # 使用记忆强度作为印象分数
-                            self.record_person_impression(group_id, person_name, content, impression_score, details)
-                            valid_impressions += 1
-                        else:
-                            # 如果无法提取人名，作为普通记忆处理
-                            memory_type = "normal"
-                    
-                    # 处理普通记忆
-                    if memory_type == "normal":
-                        # 添加概念和记忆
-                        concept_id = self.memory_graph.add_concept(theme)
-                        memory_id = self.memory_graph.add_memory(
-                            content=content,
-                            concept_id=concept_id,
-                            details=details,
-                            participants=participants,
-                            location=location,
-                            emotion=emotion,
-                            tags=tags,
-                            strength=adjusted_strength,
-                            allow_forget=allow_forget
-                        )
-                        
-                        themes.append(theme)
-                        concept_ids.append(concept_id)
-                        valid_memories += 1
-                    
-                except (KeyError, ValueError, TypeError):
-                    continue
-            
-            # 仅在成功创建记忆时输出一次日志
-            if valid_memories > 0:
-                group_info = f" (群: {group_id})" if group_id else ""
-                self._debug_log(f"批量创建记忆{group_info}: {valid_memories}条", "debug")
-            
-            # 建立概念之间的连接 - 使用存储的概念ID
-            if concept_ids:
-                for concept_id in concept_ids:
-                    try:
-                        self.establish_connections(concept_id, themes)
-                    except Exception:
-                        continue
-            
-            # 提取人物印象（如果启用）
-            if self.impression_config.get("enable_impression_injection", True):
-                try:
-                    # 检查LLM是否可用
-                    llm_provider = await self.get_llm_provider()
-                    if llm_provider:
-                        extracted_impressions = await self.batch_extractor.extract_impressions_from_conversation(full_history, group_id)
-                        
-                        if extracted_impressions:
-                            valid_impressions = 0
-                            for impression_data in extracted_impressions:
-                                try:
-                                    person_name = impression_data.get("person_name", "").strip()
-                                    summary = impression_data.get("summary", "").strip()
-                                    score = impression_data.get("score", 0.5)
-                                    details = impression_data.get("details", "").strip()
-                                    confidence = impression_data.get("confidence", 0.5)
-                                    
-                                    # 验证数据完整性
-                                    if not person_name or not summary:
-                                        continue
-                                    
-                                    # 根据置信度决定是否记录印象
-                                    if confidence >= 0.3:  # 置信度阈值
-                                        memory_id = self.record_person_impression(
-                                            group_id, person_name, summary, score, details
-                                        )
-                                        if memory_id:
-                                            valid_impressions += 1
-                                            
-                                except (KeyError, ValueError, TypeError):
-                                    continue
-                            
-                            if valid_impressions > 0:
-                                self._debug_log(f"提取印象{group_info}: {valid_impressions}条", "debug")
-                    else:
-                        # LLM不可用时的回退逻辑：基于关键词的简单印象提取
-                        await self._fallback_impression_extraction(full_history, group_id)
-                            
-                except Exception as e:
-                    self._debug_log(f"印象提取失败: {e}", "warning")
+            sender_id = str(event.get_sender_id() or "")
+            sender_name = sender_id  # 默认用ID作为名称
+            try:
+                nick = getattr(event, 'get_sender_name', None)
+                if nick:
+                    sender_name = str(nick()) or sender_id
+            except Exception:
+                pass
+
+            await self.topic_analyzer.add_message(message, sender_id, sender_name, group_id)
+
         except Exception as e:
             self._debug_log(f"优化消息处理失败: {e}", "error")
 
@@ -2033,21 +1905,18 @@ class MemorySystem:
             
             # [新增] 注入话题上下文
             topic_context = ""
-            if self.topic_engine:
+            if self.topic_analyzer:
                 try:
                     sender_id = event.get_sender_id()
-                    # 确保使用正确的 scope (与 main.py 保持一致)
                     topic_scope = group_id if group_id else f"private:{sender_id}"
-                    
-                    # 获取当前最相关的话题
-                    topics = await self.topic_engine.get_topic_relevance(current_message, topic_scope, max_results=1)
-                    if topics:
-                        topic_id, score, info = topics[0]
-                        # [修改] 降低阈值以确保话题连贯性
-                        if score > 0.3: 
-                            keywords = ", ".join(info.get('keywords', [])[:5])
-                            heat = info.get('heat', 0)
-                            topic_context = f"【当前话题】\n讨论焦点: {keywords}\n热度: {heat:.1f}"
+
+                    # 获取当前活跃会话信息
+                    active_sessions = self.topic_analyzer.get_active_sessions(topic_scope)
+                    if active_sessions:
+                        # 取最近活跃的会话
+                        latest = active_sessions[-1]
+                        keywords = ", ".join(latest.get('keywords', [])[:5])
+                        topic_context = f"【当前话题】\n讨论焦点: {keywords}"
                 except Exception as e:
                     self._debug_log(f"获取话题上下文失败: {e}", "warning")
 
