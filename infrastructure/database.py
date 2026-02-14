@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from astrbot.api import logger
 
 try:
-    from .resource_management import resource_manager
+    from .resources import resource_manager
 except ImportError:
     resource_manager = None
 

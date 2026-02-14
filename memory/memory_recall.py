@@ -12,7 +12,7 @@ except ImportError:
 
 
 if TYPE_CHECKING:
-    from .main import MemorySystem
+    from ..core.memory_system import MemorySystem
 
 
 @dataclass

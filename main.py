@@ -14,23 +14,22 @@ from astrbot.api import AstrBotConfig
 from astrbot.api.star import StarTools
 
 # 导入模块化的组件
-from .models import Concept, Memory, Connection
-from .config import MemorySystemConfig, MemoryConfigManager
-from .memory_graph import MemoryGraph
-from .batch_extractor import BatchMemoryExtractor
-from .memory_system_core import MemorySystem
-from .database_migration import SmartDatabaseMigration
-from .enhanced_memory_display import EnhancedMemoryDisplay
-from .embedding_cache_manager import EmbeddingCacheManager
-from .enhanced_memory_recall import EnhancedMemoryRecall
-from .memory_graph_visualization import MemoryGraphVisualizer
-from .resource_management import resource_manager
-from .web_server import MemoryWebServer
-from .memory_events import MemoryEventBus, MemoryEvent, MemoryEventType, initialize_event_bus, shutdown_event_bus
-from .topic_engine import TopicEngine
-from .user_profiling import UserProfilingSystem
-from .temporal_memory import TemporalMemorySystem
-from .memory_api_gateway import MemoryAPIGateway
+from .core.models import Concept, Memory, Connection
+from .core.config import MemorySystemConfig, MemoryConfigManager
+from .core.memory_graph import MemoryGraph
+from .core.memory_system import MemorySystem
+from .infrastructure.database import SmartDatabaseMigration
+from .memory.memory_display import EnhancedMemoryDisplay
+from .infrastructure.embedding import EmbeddingCacheManager
+from .memory.memory_recall import EnhancedMemoryRecall
+from .memory.visualization import MemoryGraphVisualizer
+from .infrastructure.resources import resource_manager
+from .web.server import MemoryWebServer
+from .infrastructure.events import MemoryEventBus, MemoryEvent, MemoryEventType, initialize_event_bus, shutdown_event_bus
+from .intelligence.topic_analyzer import TopicAnalyzer
+from .intelligence.profiling import UserProfilingSystem
+from .intelligence.temporal import TemporalMemorySystem
+from .api.gateway import MemoryAPIGateway
 
 
 @register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.6", "https://github.com/qa296/astrbot_plugin_memora_connect")
@@ -46,7 +45,7 @@ class MemoraConnectPlugin(Star):
         
         # 新增：主动能力升级模块
         self.event_bus = None
-        self.topic_engine = None
+        self.topic_analyzer = None
         self.user_profiling = None
         self.temporal_memory = None
         self.api_gateway = None
@@ -114,17 +113,17 @@ class MemoraConnectPlugin(Star):
                 # 1. 初始化事件总线
                 self.event_bus = await initialize_event_bus()
                 logger.info("✓ 事件总线已启动")
-                
-                # 2. 初始化话题引擎
-                self.topic_engine = TopicEngine(self.memory_system)
-                logger.info("✓ 话题引擎已初始化")
-                
+
+                # 2. 初始化话题分析器
+                self.topic_analyzer = TopicAnalyzer(self.memory_system)
+                logger.info("✓ 话题分析器已初始化")
+
                 # 3. 初始化用户画像系统
                 self.user_profiling = UserProfilingSystem(self.memory_system)
                 logger.info("✓ 用户画像系统已初始化")
-                
+
                 # 注入组件到记忆系统
-                self.memory_system.set_components(self.topic_engine, self.user_profiling)
+                self.memory_system.set_components(self.topic_analyzer, self.user_profiling)
                 
                 # 4. 初始化时间维度记忆系统
                 self.temporal_memory = TemporalMemorySystem(self.memory_system)
@@ -133,7 +132,7 @@ class MemoraConnectPlugin(Star):
                 # 5. 初始化API网关
                 self.api_gateway = MemoryAPIGateway(
                     self.memory_system,
-                    self.topic_engine,
+                    self.topic_analyzer,
                     self.user_profiling,
                     self.temporal_memory
                 )
@@ -372,23 +371,12 @@ class MemoraConnectPlugin(Star):
             
             # 使用优化后的单次LLM调用处理消息
             await self.memory_system.process_message_optimized(event, group_id)
-            
-            # === 新增：主动能力升级相关处理 ===
-            if self.topic_engine and self.user_profiling and self.temporal_memory:
+
+            # === 主动能力升级相关处理 ===
+            if self.temporal_memory:
                 try:
-                    # 1. 话题追踪
-                    # 私聊场景下（group_id为空），使用 sender_id 作为 topic_engine 的 group_id，实现用户隔离
-                    topic_scope = group_id if group_id else f"private:{sender_id}"
-                    await self.topic_engine.add_message_to_topic(message, sender_id, topic_scope)
-                    
-                    # 2. 未闭合话题检测
+                    # 未闭合话题检测
                     await self.temporal_memory.auto_detect_and_track_questions(message, sender_id, group_id)
-                    
-                    # 3. 查找复活的话题
-                    resurrected = await self.topic_engine.find_resurrected_topics(message, topic_scope, silence_days=7)
-                    if resurrected:
-                        logger.info(f"检测到复活话题: {resurrected}")
-                    
                 except Exception as upgrade_e:
                     logger.debug(f"主动能力升级处理失败: {upgrade_e}")
             

@@ -120,21 +120,21 @@ class MemoryAPIGateway:
     封装所有记忆能力为标准化API
     """
     
-    def __init__(self, memory_system, topic_engine, user_profiling, temporal_memory):
+    def __init__(self, memory_system, topic_analyzer, user_profiling, temporal_memory):
         """
         初始化API网关
-        
+
         Args:
             memory_system: 记忆系统
-            topic_engine: 话题引擎
+            topic_analyzer: 话题分析器
             user_profiling: 用户画像系统
             temporal_memory: 时间维度记忆系统
         """
         self.memory_system = memory_system
-        self.topic_engine = topic_engine
+        self.topic_analyzer = topic_analyzer
         self.user_profiling = user_profiling
         self.temporal_memory = temporal_memory
-        
+
         # 性能监控
         self.performance_monitor = PerformanceMonitor()
         
@@ -198,17 +198,18 @@ class MemoryAPIGateway:
                     cached=True
                 )
             
-            # 调用话题引擎
-            results = await self.topic_engine.get_topic_relevance(message, group_id, max_results)
-            
+            # 调用话题分析器
+            active_sessions = self.topic_analyzer.get_active_sessions(group_id) if self.topic_analyzer else []
+
             # 格式化返回
             formatted_results = [
                 {
-                    "topic_id": topic_id,
-                    "relevance_score": score,
-                    "topic_info": info
+                    "session_id": s.get("session_id"),
+                    "topic": s.get("topic"),
+                    "keywords": s.get("keywords", []),
+                    "message_count": s.get("message_count", 0)
                 }
-                for topic_id, score, info in results
+                for s in active_sessions[:max_results]
             ]
             
             # 缓存结果
@@ -567,7 +568,7 @@ class MemoryAPIGateway:
             # 检查各个组件
             components = {
                 "memory_system": self.memory_system is not None,
-                "topic_engine": self.topic_engine is not None,
+                "topic_analyzer": self.topic_analyzer is not None,
                 "user_profiling": self.user_profiling is not None,
                 "temporal_memory": self.temporal_memory is not None
             }
