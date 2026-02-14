@@ -374,8 +374,7 @@ class SmartDatabaseMigration:
     
     async def _create_minimal_structure(self) -> None:
         """创建最小可用数据库结构（异步接口，内部为同步实现）"""
-        conn = sqlite3.connect(self.db_path)
-        try:
+        with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
             # 判断是否为嵌入向量缓存数据库
@@ -438,13 +437,10 @@ class SmartDatabaseMigration:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_concept_group ON memories(concept_id, group_id)")
             
             conn.commit()
-        finally:
-            conn.close()
     
     def _create_minimal_structure_sync(self) -> None:
         """创建最小可用数据库结构（同步版）"""
-        conn = sqlite3.connect(self.db_path)
-        try:
+        with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
             # 判断是否为嵌入向量缓存数据库
@@ -507,8 +503,6 @@ class SmartDatabaseMigration:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_concept_group ON memories(concept_id, group_id)")
             
             conn.commit()
-        finally:
-            conn.close()
     
     def get_migration_status(self) -> Dict[str, Any]:
         """获取迁移状态信息"""
@@ -531,8 +525,7 @@ class SmartDatabaseMigration:
         """分析当前数据库结构"""
         schema = DatabaseSchema()
         
-        conn = sqlite3.connect(self.db_path)
-        try:
+        with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
             # 获取所有表
@@ -564,8 +557,6 @@ class SmartDatabaseMigration:
                     table.indexes.append(str(idx[1]))
                 
                 schema.tables[table_name] = table
-        finally:
-            conn.close()
         
         return schema
     
@@ -1061,8 +1052,7 @@ class SmartDatabaseMigration:
     
     def _create_new_structure(self, db_path: str):
         """创建新数据库结构"""
-        conn = sqlite3.connect(db_path)
-        try:
+        with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
             
             target_schema = self._generate_target_schema()
@@ -1108,15 +1098,12 @@ class SmartDatabaseMigration:
                         cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_status ON precompute_tasks(status, priority)")
             
             conn.commit()
-        finally:
-            conn.close()
     
     async def _smart_data_migration(self, source_db: str, target_db: str, 
                                   diff: SchemaDiff) -> None:
         """智能数据迁移"""
-        source_conn = sqlite3.connect(source_db)
-        target_conn = sqlite3.connect(target_db)
-        try:
+        with sqlite3.connect(source_db) as source_conn, \
+             sqlite3.connect(target_db) as target_conn:
             
             source_cursor = source_conn.cursor()
             target_cursor = target_conn.cursor()
@@ -1133,16 +1120,12 @@ class SmartDatabaseMigration:
                     )
             
             target_conn.commit()
-        finally:
-            source_conn.close()
-            target_conn.close()
     
     def _smart_data_migration_sync(self, source_db: str, target_db: str, 
                                   diff: SchemaDiff) -> None:
         """智能数据迁移（同步版）"""
-        source_conn = sqlite3.connect(source_db)
-        target_conn = sqlite3.connect(target_db)
-        try:
+        with sqlite3.connect(source_db) as source_conn, \
+             sqlite3.connect(target_db) as target_conn:
             
             source_cursor = source_conn.cursor()
             target_cursor = target_conn.cursor()
@@ -1159,9 +1142,6 @@ class SmartDatabaseMigration:
                     )
             
             target_conn.commit()
-        finally:
-            source_conn.close()
-            target_conn.close()
     
     async def _migrate_table_data(self, source_cursor, target_cursor,
                                 table_name: str, table_diff: TableDiff) -> None:
