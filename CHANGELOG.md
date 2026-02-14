@@ -1,6 +1,25 @@
 ## 📈 版本历史
 
-### v0.2.6 (当前版本)
+### v0.3.0 (当前版本)
+- 🚀 架构升级：基于话题的统一LLM调用系统
+  - 新增 `TopicAnalyzer` 替代原有的 `TopicEngine` 和 `BatchMemoryExtractor`
+  - 一次LLM调用处理多条消息，减少约95%的LLM调用次数
+  - 消息带序号发送给LLM，精确对应分析结果
+  - 会话completed时自动生成记忆、印象和摘要
+  - 支持言外之意（subtext）分析
+- ⚙️ 新增配置项：
+  - `topic_trigger_interval_minutes`: 触发间隔（默认5分钟，可配置）
+  - `topic_message_threshold`: 消息数量阈值（默认12条，可配置）
+  - `recent_completed_sessions_count`: 保留的已完成会话数量（默认5个，可配置）
+- 🗑️ 移除配置项：
+  - `enable_batch_memory_extraction`（已被新系统取代）
+  - `memory_formation_interval`（已被新系统取代）
+- 🏗️ 内部模块重组：
+  - `intelligence/topic_analyzer.py`: 新核心分析器
+  - `intelligence/topics.py`: 已废弃（保留文件但不再使用）
+  - `memory/extractor.py`: 已废弃（保留文件但不再使用）
+
+### v0.2.6
 - 🗺️ 新增记忆图谱可视化命令：/记忆 图谱，支持多种布局
 - 🖥️ 新增内置 Web 管理界面，可通过 web_ui 配置启用
 - 🧩 新增资源管理器与数据库连接池，提升并发与稳定性
