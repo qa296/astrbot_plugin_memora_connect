@@ -14,23 +14,23 @@ from astrbot.api import AstrBotConfig
 from astrbot.api.star import StarTools
 
 # 导入模块化的组件
-from .models import Concept, Memory, Connection
-from .config import MemorySystemConfig, MemoryConfigManager
-from .memory_graph import MemoryGraph
-from .batch_extractor import BatchMemoryExtractor
-from .memory_system_core import MemorySystem
-from .database_migration import SmartDatabaseMigration
-from .enhanced_memory_display import EnhancedMemoryDisplay
-from .embedding_cache_manager import EmbeddingCacheManager
-from .enhanced_memory_recall import EnhancedMemoryRecall
-from .memory_graph_visualization import MemoryGraphVisualizer
-from .resource_management import resource_manager
-from .web_server import MemoryWebServer
-from .memory_events import MemoryEventBus, MemoryEvent, MemoryEventType, initialize_event_bus, shutdown_event_bus
-from .topic_engine import TopicEngine
-from .user_profiling import UserProfilingSystem
-from .temporal_memory import TemporalMemorySystem
-from .memory_api_gateway import MemoryAPIGateway
+from .core.models import Concept, Memory, Connection
+from .core.config import MemorySystemConfig, MemoryConfigManager
+from .core.memory_graph import MemoryGraph
+from .memory.extractor import BatchMemoryExtractor
+from .core.memory_system import MemorySystem
+from .infrastructure.database import SmartDatabaseMigration
+from .memory.memory_display import EnhancedMemoryDisplay
+from .infrastructure.embedding import EmbeddingCacheManager
+from .memory.memory_recall import EnhancedMemoryRecall
+from .memory.visualization import MemoryGraphVisualizer
+from .infrastructure.resources import resource_manager
+from .web.server import MemoryWebServer
+from .infrastructure.events import MemoryEventBus, MemoryEvent, MemoryEventType, initialize_event_bus, shutdown_event_bus
+from .intelligence.topics import TopicEngine
+from .intelligence.profiling import UserProfilingSystem
+from .intelligence.temporal import TemporalMemorySystem
+from .api.gateway import MemoryAPIGateway
 
 
 @register("astrbot_plugin_memora_connect", "qa296", "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。", "0.2.6", "https://github.com/qa296/astrbot_plugin_memora_connect")
