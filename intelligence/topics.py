@@ -309,7 +309,7 @@ class TopicEngine:
                 logger.debug(f"消息已添加到话题: {matched_topic.topic_id}")
                 
                 # 发布话题更新事件
-                from .memory_events import MemoryEvent, MemoryEventType, get_event_bus
+                from ..infrastructure.events import MemoryEvent, MemoryEventType, get_event_bus
                 event = MemoryEvent(
                     event_type=MemoryEventType.MEMORY_TRIGGERED,
                     group_id=group_id,
@@ -334,7 +334,7 @@ class TopicEngine:
                 logger.info(f"创建新话题: {topic_id}, 关键词: {keywords}")
                 
                 # 发布话题创建事件
-                from .memory_events import MemoryEvent, MemoryEventType, get_event_bus
+                from ..infrastructure.events import MemoryEvent, MemoryEventType, get_event_bus
                 event = MemoryEvent(
                     event_type=MemoryEventType.TOPIC_CREATED,
                     group_id=group_id,
@@ -437,7 +437,7 @@ class TopicEngine:
                     logger.info(f"话题合并: {topic2.topic_id} -> {topic1.topic_id}, 相似度: {similarity:.2f}")
                     
                     # 发布合并事件
-                    from .memory_events import MemoryEvent, MemoryEventType, get_event_bus
+                    from ..infrastructure.events import MemoryEvent, MemoryEventType, get_event_bus
                     event = MemoryEvent(
                         event_type=MemoryEventType.TOPIC_MERGED,
                         group_id=group_id,
@@ -473,7 +473,7 @@ class TopicEngine:
                 logger.debug(f"话题已过期: {topic_id}")
                 
                 # 发布过期事件
-                from .memory_events import MemoryEvent, MemoryEventType, get_event_bus
+                from ..infrastructure.events import MemoryEvent, MemoryEventType, get_event_bus
                 event = MemoryEvent(
                     event_type=MemoryEventType.TOPIC_EXPIRED,
                     group_id=group_id,
@@ -642,7 +642,7 @@ class TopicEngine:
                         logger.info(f"话题复活: {topic.topic_id}, 沉默了 {topic.get_idle_seconds()/86400:.1f} 天")
                         
                         # 发布复活事件
-                        from .memory_events import MemoryEvent, MemoryEventType, get_event_bus
+                        from ..infrastructure.events import MemoryEvent, MemoryEventType, get_event_bus
                         event = MemoryEvent(
                             event_type=MemoryEventType.TOPIC_RESURRECTED,
                             group_id=group_id,

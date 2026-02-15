@@ -115,17 +115,23 @@
     "hint": "获取对话历史时的最大条数，影响记忆提取的上下文范围",
     "default": 20
   },
-  "enable_batch_memory_extraction": {
-    "description": "启用批量记忆提取",
-    "type": "bool",
-    "hint": "是否启用批量记忆提取优化，减少LLM调用次数，提高性能。注意：在能力较差的LLM上可能会导致无法正常提取",
-    "default": true
-  },
-  "memory_formation_interval": {
-    "description": "记忆形成间隔",
+  "topic_trigger_interval_minutes": {
+    "description": "话题分析触发间隔（分钟）",
     "type": "int",
-    "hint": "每隔多少轮对话形成一次记忆。",
-    "default": 15
+    "hint": "距离上次分析超过此时间后自动触发话题分析",
+    "default": 5
+  },
+  "topic_message_threshold": {
+    "description": "话题分析消息阈值",
+    "type": "int",
+    "hint": "积累到此数量的消息后触发话题分析",
+    "default": 12
+  },
+  "recent_completed_sessions_count": {
+    "description": "保留的已完成会话数量",
+    "type": "int",
+    "hint": "用于构建LLM上下文的最近已完成会话摘要数量",
+    "default": 5
   },
   "exclude_keywords": {
     "description": "排除关键词列表",
