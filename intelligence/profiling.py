@@ -490,7 +490,7 @@ class UserProfilingSystem:
             logger.info(f"添加禁忌词: {word}, 用户: {user_id}")
             
             # 发布事件
-            from .memory_events import MemoryEvent, MemoryEventType, get_event_bus
+            from ..infrastructure.events import MemoryEvent, MemoryEventType, get_event_bus
             event = MemoryEvent(
                 event_type=MemoryEventType.TABOO_ADDED,
                 group_id=group_id,
@@ -537,7 +537,7 @@ class UserProfilingSystem:
                     await self._update_taboo_trigger_count(user_id, group_id, taboo.word)
                     
                     # 发布事件
-                    from .memory_events import MemoryEvent, MemoryEventType, get_event_bus
+                    from ..infrastructure.events import MemoryEvent, MemoryEventType, get_event_bus
                     event = MemoryEvent(
                         event_type=MemoryEventType.TABOO_DETECTED,
                         group_id=group_id,

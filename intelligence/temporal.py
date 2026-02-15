@@ -192,7 +192,7 @@ class TemporalMemorySystem:
             
             # 发布事件
             for anniversary in anniversaries:
-                from .memory_events import MemoryEvent, MemoryEventType, get_event_bus
+                from ..infrastructure.events import MemoryEvent, MemoryEventType, get_event_bus
                 event = MemoryEvent(
                     event_type=MemoryEventType.ANNIVERSARY_DETECTED,
                     group_id=group_id,
@@ -318,7 +318,7 @@ class TemporalMemorySystem:
             logger.info(f"追踪到未闭合问题: {question[:50]}")
             
             # 发布事件
-            from .memory_events import MemoryEvent, MemoryEventType, get_event_bus
+            from ..infrastructure.events import MemoryEvent, MemoryEventType, get_event_bus
             event = MemoryEvent(
                 event_type=MemoryEventType.OPEN_TOPIC_FOUND,
                 group_id=group_id,

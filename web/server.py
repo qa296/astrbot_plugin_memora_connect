@@ -15,8 +15,8 @@ except Exception:  # pragma: no cover
     import logging
     logger = logging.getLogger(__name__)
 
-from .resource_management import resource_manager
-from .web_assets import DEFAULT_INDEX_HTML, DEFAULT_STYLE_CSS, DEFAULT_APP_JS
+from ..infrastructure.resources import resource_manager
+from .assets import DEFAULT_INDEX_HTML, DEFAULT_STYLE_CSS, DEFAULT_APP_JS
 
 
 class MemoryWebServer:
@@ -276,7 +276,7 @@ class MemoryWebServer:
         return web.json_response({"groups": groups})
 
     async def api_graph(self, request: web.Request):
-        from .memory_graph_visualization import MemoryGraphVisualizer
+        from .memory.visualization import MemoryGraphVisualizer
         group_id = request.query.get("group_id", "")
         layout = request.query.get("layout", "auto")
         try:

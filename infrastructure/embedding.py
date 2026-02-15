@@ -27,8 +27,8 @@ except ImportError:
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
 
-from .resource_management import resource_manager
-from .database_migration import SmartDatabaseMigration
+from .resources import resource_manager
+from .database import SmartDatabaseMigration
 
 @dataclass
 class EmbeddedMemory:
