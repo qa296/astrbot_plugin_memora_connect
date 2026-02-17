@@ -2,72 +2,54 @@
 记忆图数据结构
 管理概念节点、记忆和连接
 """
-
-import asyncio
 import time
-
+import asyncio
+from typing import Dict, List, Tuple
 try:
-    from .models import Concept, Connection, Memory
+    from .models import Concept, Memory, Connection
 except ImportError:
-    from models import Concept, Connection, Memory
+    from models import Concept, Memory, Connection
 
 
 class MemoryGraph:
     """记忆图数据结构"""
-
+    
     def __init__(self):
-        self.concepts: dict[str, Concept] = {}
-        self.memories: dict[str, Memory] = {}
-        self.connections: list[Connection] = []
-        self.adjacency_list: dict[str, list[tuple[str, float]]] = {}  # 邻接表优化
-
-    def add_concept(
-        self,
-        name: str,
-        concept_id: str = None,
-        created_at: float = None,
-        last_accessed: float = None,
-        access_count: int = 0,
-    ) -> str:
+        self.concepts: Dict[str, Concept] = {}
+        self.memories: Dict[str, Memory] = {}
+        self.connections: List[Connection] = []
+        self.adjacency_list: Dict[str, List[Tuple[str, float]]] = {}  # 邻接表优化
+        
+    def add_concept(self, name: str, concept_id: str = None, created_at: float = None,
+                   last_accessed: float = None, access_count: int = 0) -> str:
         """添加概念节点"""
         if concept_id is None:
             concept_id = f"concept_{int(time.time() * 1000)}"
-
+        
         if concept_id not in self.concepts:
             concept = Concept(
                 id=concept_id,
                 name=name,
                 created_at=created_at,
                 last_accessed=last_accessed,
-                access_count=access_count,
+                access_count=access_count
             )
             self.concepts[concept_id] = concept
             if concept_id not in self.adjacency_list:
                 self.adjacency_list[concept_id] = []
-
+        
         return concept_id
-
-    def add_memory(
-        self,
-        content: str,
-        concept_id: str,
-        memory_id: str = None,
-        details: str = "",
-        participants: str = "",
-        location: str = "",
-        emotion: str = "",
-        tags: str = "",
-        created_at: float = None,
-        last_accessed: float = None,
-        access_count: int = 0,
-        strength: float = 1.0,
-        allow_forget: bool = True,
-        group_id: str = "",
-    ) -> str:
+    
+    def add_memory(self, content: str, concept_id: str, memory_id: str = None,
+                   details: str = "", participants: str = "", location: str = "",
+                   emotion: str = "", tags: str = "", created_at: float = None,
+                   last_accessed: float = None, access_count: int = 0,
+                   strength: float = 1.0, allow_forget: bool = True,
+                   group_id: str = "") -> str:
         """添加记忆"""
         if memory_id is None:
             memory_id = f"memory_{int(time.time() * 1000)}"
-
+        
         memory = Memory(
             id=memory_id,
             concept_id=concept_id,
@@ -82,60 +64,52 @@ class MemoryGraph:
             access_count=access_count,
             strength=strength,
             allow_forget=allow_forget,
-            group_id=group_id,
+            group_id=group_id
         )
         self.memories[memory_id] = memory
-
+        
         # 如果启用了嵌入向量缓存，调度预计算任务
-        if hasattr(self, "embedding_cache") and self.embedding_cache:
-            asyncio.create_task(
-                self.embedding_cache.schedule_precompute_task([memory_id], priority=3)
-            )
-
+        if hasattr(self, 'embedding_cache') and self.embedding_cache:
+            asyncio.create_task(self.embedding_cache.schedule_precompute_task([memory_id], priority=3))
+        
         return memory_id
-
-    def add_connection(
-        self,
-        from_concept: str,
-        to_concept: str,
-        strength: float = 1.0,
-        connection_id: str = None,
-        last_strengthened: float = None,
-    ) -> str:
+    
+    def add_connection(self, from_concept: str, to_concept: str,
+                      strength: float = 1.0, connection_id: str = None,
+                      last_strengthened: float = None) -> str:
         """添加连接"""
         if connection_id is None:
             connection_id = f"conn_{from_concept}_{to_concept}"
-
+        
         # 检查是否已存在
         for conn in self.connections:
-            if (
-                conn.from_concept == from_concept and conn.to_concept == to_concept
-            ) or (conn.from_concept == to_concept and conn.to_concept == from_concept):
+            if (conn.from_concept == from_concept and conn.to_concept == to_concept) or \
+               (conn.from_concept == to_concept and conn.to_concept == from_concept):
                 conn.strength += 0.1
                 conn.last_strengthened = time.time()
                 return conn.id
-
+        
         connection = Connection(
             id=connection_id,
             from_concept=from_concept,
             to_concept=to_concept,
             strength=strength,
-            last_strengthened=last_strengthened or time.time(),
+            last_strengthened=last_strengthened or time.time()
         )
         self.connections.append(connection)
-
+        
         # 更新邻接表
         if from_concept not in self.adjacency_list:
             self.adjacency_list[from_concept] = []
         if to_concept not in self.adjacency_list:
             self.adjacency_list[to_concept] = []
-
+        
         # 添加双向连接
         self.adjacency_list[from_concept].append((to_concept, strength))
         self.adjacency_list[to_concept].append((from_concept, strength))
-
+        
         return connection_id
-
+    
     def remove_connection(self, connection_id: str):
         """移除连接"""
         # 找到要移除的连接
@@ -144,30 +118,24 @@ class MemoryGraph:
             if conn.id == connection_id:
                 conn_to_remove = conn
                 break
-
+        
         if conn_to_remove:
             # 从连接列表中移除
             self.connections = [c for c in self.connections if c.id != connection_id]
-
+            
             # 更新邻接表
             if conn_to_remove.from_concept in self.adjacency_list:
                 self.adjacency_list[conn_to_remove.from_concept] = [
-                    (neighbor, strength)
-                    for neighbor, strength in self.adjacency_list[
-                        conn_to_remove.from_concept
-                    ]
+                    (neighbor, strength) for neighbor, strength in self.adjacency_list[conn_to_remove.from_concept]
                     if neighbor != conn_to_remove.to_concept
                 ]
-
+            
             if conn_to_remove.to_concept in self.adjacency_list:
                 self.adjacency_list[conn_to_remove.to_concept] = [
-                    (neighbor, strength)
-                    for neighbor, strength in self.adjacency_list[
-                        conn_to_remove.to_concept
-                    ]
+                    (neighbor, strength) for neighbor, strength in self.adjacency_list[conn_to_remove.to_concept]
                     if neighbor != conn_to_remove.from_concept
                 ]
-
+    
     def remove_memory(self, memory_id: str):
         """移除记忆"""
         if memory_id in self.memories:
@@ -226,11 +194,7 @@ class MemoryGraph:
         if concept_id not in self.concepts:
             return False
         # 移除相关连接
-        to_remove = [
-            c.id
-            for c in self.connections
-            if c.from_concept == concept_id or c.to_concept == concept_id
-        ]
+        to_remove = [c.id for c in self.connections if c.from_concept == concept_id or c.to_concept == concept_id]
         for cid in to_remove:
             self.remove_connection(cid)
         # 移除相关记忆
@@ -242,7 +206,7 @@ class MemoryGraph:
             del self.adjacency_list[concept_id]
         del self.concepts[concept_id]
         return True
-
-    def get_neighbors(self, concept_id: str) -> list[tuple[str, float]]:
+    
+    def get_neighbors(self, concept_id: str) -> List[Tuple[str, float]]:
         """获取概念节点的邻居及其连接强度"""
         return self.adjacency_list.get(concept_id, [])
