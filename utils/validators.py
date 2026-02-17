@@ -2,8 +2,9 @@
 工具验证模块
 提供跨层使用的数据验证函数
 """
+
 import re
-from typing import Any, Optional
+from typing import Any
 
 
 def validate_memory_id(memory_id: str) -> bool:
@@ -30,7 +31,9 @@ def validate_group_id(group_id: str) -> bool:
     return True  # 群组ID可以是任意字符串
 
 
-def validate_score(score: Any, min_val: float = 0.0, max_val: float = 1.0) -> Optional[float]:
+def validate_score(
+    score: Any, min_val: float = 0.0, max_val: float = 1.0
+) -> float | None:
     """验证分数范围"""
     try:
         score_float = float(score)
@@ -58,7 +61,7 @@ def sanitize_text(text: str, max_length: int = 10000) -> str:
     if not text or not isinstance(text, str):
         return ""
     # 移除特殊字符但保留中文、英文、数字和基本标点
-    text = re.sub(r'[^\w\u4e00-\u9fff\s，。！？、；：""''【】（）—…]', '', text)
+    text = re.sub(r'[^\w\u4e00-\u9fff\s，。！？、；：""' "【】（）—…]", "", text)
     # 限制长度
     if len(text) > max_length:
         text = text[:max_length]
@@ -68,6 +71,7 @@ def sanitize_text(text: str, max_length: int = 10000) -> str:
 def validate_json_string(json_str: str) -> bool:
     """验证JSON字符串"""
     import json
+
     try:
         json.loads(json_str)
         return True

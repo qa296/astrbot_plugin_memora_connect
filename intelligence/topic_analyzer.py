@@ -2,33 +2,35 @@
 基于话题的统一LLM调用分析器
 通过积累消息后一次性LLM调用完成话题分析、记忆生成和印象提取
 """
+
 import json
 import re
 import time
-from typing import Dict, List, Optional
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
-from collections import defaultdict
 
 try:
     from astrbot.api import logger
 except ImportError:
     import logging
+
     logger = logging.getLogger(__name__)
 
 
 @dataclass
 class Session:
     """会话数据类"""
+
     session_id: str
     topic: str
-    messages: List[Dict] = field(default_factory=list)
+    messages: list[dict] = field(default_factory=list)
     status: str = "ongoing"  # "ongoing" | "completed"
-    keywords: List[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
     subtext: str = ""
     emotion: str = ""
-    participants: List[str] = field(default_factory=list)
-    summary: Optional[str] = None
+    participants: list[str] = field(default_factory=list)
+    summary: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
     last_active: datetime = field(default_factory=datetime.now)
 
@@ -43,16 +45,16 @@ class TopicAnalyzer:
         self.memory_system = memory_system
 
         # 消息缓冲区：{group_id: [messages]}
-        self._message_buffers: Dict[str, List[Dict]] = defaultdict(list)
+        self._message_buffers: dict[str, list[dict]] = defaultdict(list)
 
         # 上次分析时间：{group_id: timestamp}
-        self._last_analysis_time: Dict[str, float] = defaultdict(float)
+        self._last_analysis_time: dict[str, float] = defaultdict(float)
 
         # 活跃会话：{group_id: {session_id: Session}}
-        self._active_sessions: Dict[str, Dict[str, Session]] = defaultdict(dict)
+        self._active_sessions: dict[str, dict[str, Session]] = defaultdict(dict)
 
         # 已完成会话摘要：{group_id: [Session]}
-        self._completed_sessions: Dict[str, List[Session]] = defaultdict(list)
+        self._completed_sessions: dict[str, list[Session]] = defaultdict(list)
 
         # 会话ID计数器
         self._session_counter: int = 0
@@ -80,7 +82,9 @@ class TopicAnalyzer:
         self._session_counter += 1
         return f"session_{self._session_counter:04d}"
 
-    async def add_message(self, message: str, sender_id: str, sender_name: str, group_id: str):
+    async def add_message(
+        self, message: str, sender_id: str, sender_name: str, group_id: str
+    ):
         """
         添加消息到缓冲区，检查是否需要触发分析
 
@@ -95,7 +99,7 @@ class TopicAnalyzer:
             "sender_id": sender_id,
             "sender_name": sender_name,
             "timestamp": time.time(),
-            "time_str": datetime.now().strftime("%m-%d %H:%M")
+            "time_str": datetime.now().strftime("%m-%d %H:%M"),
         }
         self._message_buffers[group_id].append(msg)
 
@@ -139,13 +143,15 @@ class TopicAnalyzer:
             if not provider:
                 logger.warning("LLM提供商不可用，跳过话题分析")
                 # 把消息放回缓冲区
-                self._message_buffers[group_id] = messages + self._message_buffers[group_id]
+                self._message_buffers[group_id] = (
+                    messages + self._message_buffers[group_id]
+                )
                 return
 
             response = await provider.text_chat(
                 prompt=prompt,
                 contexts=[],
-                system_prompt="你是一个对话分析助手，负责将对话消息分配到不同的话题会话中，并提取记忆和印象。只返回JSON格式。"
+                system_prompt="你是一个对话分析助手，负责将对话消息分配到不同的话题会话中，并提取记忆和印象。只返回JSON格式。",
             )
 
             raw_text = (getattr(response, "completion_text", "") or "").strip()
@@ -167,7 +173,7 @@ class TopicAnalyzer:
             # 把消息放回缓冲区
             self._message_buffers[group_id] = messages + self._message_buffers[group_id]
 
-    def _build_prompt(self, messages: List[Dict], group_id: str) -> str:
+    def _build_prompt(self, messages: list[dict], group_id: str) -> str:
         """构建LLM分析的完整prompt"""
         parts = []
 
@@ -189,15 +195,19 @@ class TopicAnalyzer:
                 parts.append(f"关键词: {', '.join(session.keywords)}")
                 parts.append("消息:")
                 for m in session.messages:
-                    parts.append(f"  [{m.get('time_str', '')}] {m.get('sender_name', '未知')}: {m.get('content', '')}")
+                    parts.append(
+                        f"  [{m.get('time_str', '')}] {m.get('sender_name', '未知')}: {m.get('content', '')}"
+                    )
 
         # 3. 最近完成会话摘要
         completed = self._completed_sessions.get(group_id, [])
         if completed:
-            recent = completed[-self.max_completed_sessions:]
+            recent = completed[-self.max_completed_sessions :]
             parts.append("\n最近完成会话摘要:")
             for session in recent:
-                parts.append(f"- 会话 {session.session_id}: {session.topic} - {session.summary or '无摘要'}")
+                parts.append(
+                    f"- 会话 {session.session_id}: {session.topic} - {session.summary or '无摘要'}"
+                )
 
         # 4. 任务要求
         parts.append("""
@@ -253,23 +263,30 @@ class TopicAnalyzer:
 """)
         return "\n".join(parts)
 
-    def _parse_response(self, raw_text: str) -> Optional[Dict]:
+    def _parse_response(self, raw_text: str) -> dict | None:
         """解析LLM返回的JSON"""
         try:
             # 清理中文标点
             cleaned = raw_text
-            for old, new in [('\u201c', '"'), ('\u201d', '"'), ('\u2018', "'"), ('\u2019', "'"), ('\uff0c', ','), ('\uff1a', ':')]:
+            for old, new in [
+                ("\u201c", '"'),
+                ("\u201d", '"'),
+                ("\u2018", "'"),
+                ("\u2019", "'"),
+                ("\uff0c", ","),
+                ("\uff1a", ":"),
+            ]:
                 cleaned = cleaned.replace(old, new)
 
             # 提取JSON
-            match = re.search(r'\{[\s\S]*\}', cleaned)
+            match = re.search(r"\{[\s\S]*\}", cleaned)
             if not match:
                 return None
 
             json_str = match.group(0)
             # 修复常见格式问题
-            json_str = re.sub(r',\s*}', '}', json_str)
-            json_str = re.sub(r',\s*]', ']', json_str)
+            json_str = re.sub(r",\s*}", "}", json_str)
+            json_str = re.sub(r",\s*]", "]", json_str)
 
             data = json.loads(json_str)
             if "sessions" not in data or not isinstance(data["sessions"], list):
@@ -280,7 +297,7 @@ class TopicAnalyzer:
             logger.debug(f"JSON解析失败: {e}")
             return None
 
-    async def _process_result(self, result: Dict, messages: List[Dict], group_id: str):
+    async def _process_result(self, result: dict, messages: list[dict], group_id: str):
         """处理LLM分析结果，更新会话状态并生成衍生产物"""
         sessions_data = result.get("sessions", [])
 
@@ -306,7 +323,9 @@ class TopicAnalyzer:
                         new_msgs.append(messages[idx])
 
                 # 判断是延续已有会话还是新建
-                is_new = session_id.startswith("new_") or session_id not in self._active_sessions.get(group_id, {})
+                is_new = session_id.startswith(
+                    "new_"
+                ) or session_id not in self._active_sessions.get(group_id, {})
 
                 if is_new:
                     # 创建新会话
@@ -319,8 +338,10 @@ class TopicAnalyzer:
                         keywords=keywords if isinstance(keywords, list) else [keywords],
                         subtext=subtext,
                         emotion=emotion,
-                        participants=participants if isinstance(participants, list) else [participants],
-                        summary=str(summary) if summary else None
+                        participants=participants
+                        if isinstance(participants, list)
+                        else [participants],
+                        summary=str(summary) if summary else None,
                     )
                     self._active_sessions[group_id][real_id] = session
                     logger.info(f"创建新会话: {real_id}, 话题: {topic}")
@@ -331,20 +352,41 @@ class TopicAnalyzer:
                     session.last_active = datetime.now()
                     session.status = status
                     if keywords:
-                        session.keywords = list(set(session.keywords + (keywords if isinstance(keywords, list) else [keywords])))
+                        session.keywords = list(
+                            set(
+                                session.keywords
+                                + (
+                                    keywords
+                                    if isinstance(keywords, list)
+                                    else [keywords]
+                                )
+                            )
+                        )
                     if subtext:
                         session.subtext = subtext
                     if emotion:
                         session.emotion = emotion
                     if participants:
-                        new_p = participants if isinstance(participants, list) else [participants]
+                        new_p = (
+                            participants
+                            if isinstance(participants, list)
+                            else [participants]
+                        )
                         session.participants = list(set(session.participants + new_p))
                     if summary:
                         session.summary = str(summary)
                     logger.debug(f"更新会话: {session_id}, 话题: {topic}")
 
                 # 生成衍生产物
-                await self._generate_products(s_data, session if not is_new else self._active_sessions[group_id].get(real_id if is_new else session_id), group_id)
+                await self._generate_products(
+                    s_data,
+                    session
+                    if not is_new
+                    else self._active_sessions[group_id].get(
+                        real_id if is_new else session_id
+                    ),
+                    group_id,
+                )
 
                 # 如果会话已完成，移到已完成列表
                 if status == "completed":
@@ -355,7 +397,9 @@ class TopicAnalyzer:
                         # 限制已完成会话数量
                         max_count = self.max_completed_sessions * 2
                         if len(self._completed_sessions[group_id]) > max_count:
-                            self._completed_sessions[group_id] = self._completed_sessions[group_id][-max_count:]
+                            self._completed_sessions[group_id] = (
+                                self._completed_sessions[group_id][-max_count:]
+                            )
                         logger.info(f"会话完成: {sid}, 话题: {topic}")
 
             except Exception as e:
@@ -365,7 +409,7 @@ class TopicAnalyzer:
         # 保存记忆状态
         await self.memory_system._queue_save_memory_state(group_id)
 
-    async def _generate_products(self, s_data: Dict, session: Session, group_id: str):
+    async def _generate_products(self, s_data: dict, session: Session, group_id: str):
         """生成衍生产物：记忆和印象"""
         if not session:
             return
@@ -383,9 +427,13 @@ class TopicAnalyzer:
                 confidence = float(memory_data.get("confidence", 0.7))
 
                 if content:
-                    theme = ", ".join(session.keywords) if session.keywords else session.topic
+                    theme = (
+                        ", ".join(session.keywords)
+                        if session.keywords
+                        else session.topic
+                    )
                     # 清理主题中的特殊字符
-                    theme = re.sub(r'[^\w\u4e00-\u9fff,，\s]', '', theme)
+                    theme = re.sub(r"[^\w\u4e00-\u9fff,，\s]", "", theme)
 
                     concept_id = self.memory_system.memory_graph.add_concept(theme)
                     self.memory_system.memory_graph.add_memory(
@@ -397,7 +445,7 @@ class TopicAnalyzer:
                         emotion=m_emotion,
                         tags=tags,
                         strength=max(0.0, min(1.0, confidence)),
-                        group_id=group_id
+                        group_id=group_id,
                     )
                     logger.debug(f"生成记忆: {content[:30]}...")
             except Exception as e:
@@ -429,26 +477,28 @@ class TopicAnalyzer:
 
     # --- 公开查询接口 ---
 
-    def get_active_sessions(self, group_id: str) -> List[Dict]:
+    def get_active_sessions(self, group_id: str) -> list[dict]:
         """获取所有活跃会话"""
         sessions = self._active_sessions.get(group_id, {})
         result = []
         for session in sessions.values():
-            result.append({
-                "session_id": session.session_id,
-                "topic": session.topic,
-                "status": session.status,
-                "keywords": session.keywords,
-                "subtext": session.subtext,
-                "emotion": session.emotion,
-                "participants": session.participants,
-                "message_count": len(session.messages),
-                "created_at": session.created_at.isoformat(),
-                "last_active": session.last_active.isoformat()
-            })
+            result.append(
+                {
+                    "session_id": session.session_id,
+                    "topic": session.topic,
+                    "status": session.status,
+                    "keywords": session.keywords,
+                    "subtext": session.subtext,
+                    "emotion": session.emotion,
+                    "participants": session.participants,
+                    "message_count": len(session.messages),
+                    "created_at": session.created_at.isoformat(),
+                    "last_active": session.last_active.isoformat(),
+                }
+            )
         return result
 
-    def get_completed_sessions(self, group_id: str) -> List[Dict]:
+    def get_completed_sessions(self, group_id: str) -> list[dict]:
         """获取已完成会话"""
         sessions = self._completed_sessions.get(group_id, [])
         return [
@@ -457,12 +507,12 @@ class TopicAnalyzer:
                 "topic": s.topic,
                 "summary": s.summary,
                 "keywords": s.keywords,
-                "message_count": len(s.messages)
+                "message_count": len(s.messages),
             }
-            for s in sessions[-self.max_completed_sessions:]
+            for s in sessions[-self.max_completed_sessions :]
         ]
 
-    def get_statistics(self, group_id: str) -> Dict:
+    def get_statistics(self, group_id: str) -> dict:
         """获取统计信息"""
         active = self._active_sessions.get(group_id, {})
         completed = self._completed_sessions.get(group_id, [])
@@ -471,5 +521,6 @@ class TopicAnalyzer:
             "active_sessions": len(active),
             "completed_sessions": len(completed),
             "buffered_messages": buffered,
-            "total_messages": sum(len(s.messages) for s in active.values()) + sum(len(s.messages) for s in completed)
+            "total_messages": sum(len(s.messages) for s in active.values())
+            + sum(len(s.messages) for s in completed),
         }
