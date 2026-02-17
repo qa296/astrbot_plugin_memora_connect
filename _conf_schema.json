@@ -127,6 +127,12 @@
     "hint": "积累到此数量的消息后触发话题分析",
     "default": 12
   },
+  "enable_persona_injection_in_memory_generation": {
+    "description": "启用记忆生成人格注入",
+    "type": "bool",
+    "hint": "是否在话题分析/记忆生成阶段注入当前会话人格设定",
+    "default": true
+  },
   "recent_completed_sessions_count": {
     "description": "保留的已完成会话数量",
     "type": "int",

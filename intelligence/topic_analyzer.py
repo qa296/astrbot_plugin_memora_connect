@@ -83,7 +83,12 @@ class TopicAnalyzer:
         return f"session_{self._session_counter:04d}"
 
     async def add_message(
-        self, message: str, sender_id: str, sender_name: str, group_id: str
+        self,
+        message: str,
+        sender_id: str,
+        sender_name: str,
+        group_id: str,
+        umo: str | None = None,
     ):
         """
         添加消息到缓冲区，检查是否需要触发分析
@@ -100,6 +105,7 @@ class TopicAnalyzer:
             "sender_name": sender_name,
             "timestamp": time.time(),
             "time_str": datetime.now().strftime("%m-%d %H:%M"),
+            "umo": umo,
         }
         self._message_buffers[group_id].append(msg)
 
@@ -134,8 +140,24 @@ class TopicAnalyzer:
         self._message_buffers[group_id] = []
         self._last_analysis_time[group_id] = time.time()
 
-        # 构建LLM输入
-        prompt = self._build_prompt(messages, group_id)
+        # 构建LLM输入（支持人格注入）
+        latest_umo = None
+        for msg in reversed(messages):
+            latest_umo = msg.get("umo")
+            if latest_umo:
+                break
+        persona_injection = ""
+        try:
+            persona_injection = (
+                await self.memory_system.build_memory_generation_persona_injection(
+                    latest_umo
+                )
+            )
+        except Exception:
+            persona_injection = ""
+        prompt = self._build_prompt(
+            messages, group_id, persona_injection=persona_injection
+        )
 
         # 调用LLM
         try:
@@ -148,10 +170,14 @@ class TopicAnalyzer:
                 )
                 return
 
+            system_prompt = "你是一个对话分析助手，负责将对话消息分配到不同的话题会话中，并提取记忆和印象。只返回JSON格式。"
+            if persona_injection:
+                system_prompt = f"{system_prompt}\n\n{persona_injection}"
+
             response = await provider.text_chat(
                 prompt=prompt,
                 contexts=[],
-                system_prompt="你是一个对话分析助手，负责将对话消息分配到不同的话题会话中，并提取记忆和印象。只返回JSON格式。",
+                system_prompt=system_prompt,
             )
 
             raw_text = (getattr(response, "completion_text", "") or "").strip()
@@ -173,7 +199,9 @@ class TopicAnalyzer:
             # 把消息放回缓冲区
             self._message_buffers[group_id] = messages + self._message_buffers[group_id]
 
-    def _build_prompt(self, messages: list[dict], group_id: str) -> str:
+    def _build_prompt(
+        self, messages: list[dict], group_id: str, persona_injection: str = ""
+    ) -> str:
         """构建LLM分析的完整prompt"""
         parts = []
 
@@ -208,6 +236,10 @@ class TopicAnalyzer:
                 parts.append(
                     f"- 会话 {session.session_id}: {session.topic} - {session.summary or '无摘要'}"
                 )
+
+        if persona_injection:
+            parts.append("\n记忆生成的人格约束:")
+            parts.append(persona_injection)
 
         # 4. 任务要求
         parts.append("""
