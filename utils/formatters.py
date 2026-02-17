@@ -2,9 +2,10 @@
 工具格式化模块
 提供跨层使用的数据格式化函数
 """
+
 import json
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any
 
 
 def format_timestamp(timestamp: float) -> str:
@@ -16,7 +17,7 @@ def format_timestamp(timestamp: float) -> str:
         return "未知时间"
 
 
-def format_memory_summary(memory: Dict[str, Any], max_length: int = 100) -> str:
+def format_memory_summary(memory: dict[str, Any], max_length: int = 100) -> str:
     """格式化记忆摘要"""
     content = memory.get("content", "")
     if len(content) > max_length:
@@ -32,7 +33,9 @@ def format_score(score: float, decimals: int = 2) -> str:
         return "0.00"
 
 
-def format_list_as_string(items: List[Any], separator: str = ", ", max_items: int = 10) -> str:
+def format_list_as_string(
+    items: list[Any], separator: str = ", ", max_items: int = 10
+) -> str:
     """格式化列表为字符串"""
     if not items:
         return ""
@@ -47,20 +50,40 @@ def truncate_text(text: str, max_length: int = 200, suffix: str = "...") -> str:
     """截断文本"""
     if not text or len(text) <= max_length:
         return text
-    return text[:max_length - len(suffix)] + suffix
+    return text[: max_length - len(suffix)] + suffix
 
 
 def escape_markdown(text: str) -> str:
     """转义Markdown特殊字符"""
     if not text:
         return ""
-    special_chars = ['\\', '*', '_', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    special_chars = [
+        "\\",
+        "*",
+        "_",
+        "[",
+        "]",
+        "(",
+        ")",
+        "~",
+        "`",
+        ">",
+        "#",
+        "+",
+        "-",
+        "=",
+        "|",
+        "{",
+        "}",
+        ".",
+        "!",
+    ]
     for char in special_chars:
-        text = text.replace(char, f'\\{char}')
+        text = text.replace(char, f"\\{char}")
     return text
 
 
-def format_dict_pretty(data: Dict[str, Any], indent: int = 2) -> str:
+def format_dict_pretty(data: dict[str, Any], indent: int = 2) -> str:
     """美化格式化字典"""
     try:
         return json.dumps(data, ensure_ascii=False, indent=indent)
