@@ -480,9 +480,7 @@ class MemoraConnectPlugin(Star):
             # === 新增：清理主动能力升级模块 ===
             try:
                 if self.event_bus:
-                    logger.info("关闭事件总线...")
                     await shutdown_event_bus()
-                    logger.info("✓ 事件总线已关闭")
             except Exception as bus_e:
                 logger.warning(f"关闭事件总线失败: {bus_e}")
 
