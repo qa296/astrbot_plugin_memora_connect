@@ -59,7 +59,6 @@ class TopicAnalyzer:
         # 会话ID计数器
         self._session_counter: int = 0
 
-        logger.info("TopicAnalyzer 已初始化")
 
     def _get_config_value(self, key: str, default):
         """从配置中获取值"""

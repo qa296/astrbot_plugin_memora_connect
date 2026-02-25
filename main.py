@@ -115,19 +115,15 @@ class MemoraConnectPlugin(Star):
 
             # 初始化新增模块
             try:
-                logger.info("初始化主动能力升级模块...")
 
                 # 1. 初始化事件总线
                 self.event_bus = await initialize_event_bus()
-                logger.info("✓ 事件总线已启动")
 
                 # 2. 初始化话题分析器
                 self.topic_analyzer = TopicAnalyzer(self.memory_system)
-                logger.info("✓ 话题分析器已初始化")
 
                 # 3. 初始化用户画像系统
                 self.user_profiling = UserProfilingSystem(self.memory_system)
-                logger.info("✓ 用户画像系统已初始化")
 
                 # 注入组件到记忆系统
                 self.memory_system.set_components(
@@ -136,7 +132,6 @@ class MemoraConnectPlugin(Star):
 
                 # 4. 初始化时间维度记忆系统
                 self.temporal_memory = TemporalMemorySystem(self.memory_system)
-                logger.info("✓ 时间维度记忆系统已初始化")
 
                 # 5. 初始化API网关
                 self.api_gateway = MemoryAPIGateway(
@@ -145,9 +140,7 @@ class MemoraConnectPlugin(Star):
                     self.user_profiling,
                     self.temporal_memory,
                 )
-                logger.info("✓ API网关已初始化")
 
-                logger.info("主动能力升级模块初始化完成！")
             except Exception as upgrade_e:
                 logger.error(f"主动能力升级模块初始化失败: {upgrade_e}", exc_info=True)
 
