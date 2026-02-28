@@ -887,13 +887,114 @@ class MemorySystem:
                     sender_name = str(nick()) or sender_id
             except Exception:
                 pass
+            umo = getattr(event, "unified_msg_origin", None)
 
             await self.topic_analyzer.add_message(
-                message, sender_id, sender_name, group_id
+                message, sender_id, sender_name, group_id, umo=umo
             )
 
         except Exception as e:
             self._debug_log(f"优化消息处理失败: {e}", "error")
+
+    async def resolve_memory_generation_persona(
+        self, umo: str | None
+    ) -> dict[str, Any]:
+        """解析记忆生成阶段应使用的人格设定信息。"""
+        result = {"source": "", "persona_id": "", "prompt": ""}
+
+        if not self.memory_config.get(
+            "enable_persona_injection_in_memory_generation", True
+        ):
+            return result
+
+        try:
+            context = getattr(self, "context", None)
+            if not context:
+                return result
+
+            persona_manager = getattr(context, "persona_manager", None)
+            if not persona_manager:
+                return result
+
+            # 1) 优先读取当前会话绑定的人格
+            persona_id = ""
+            conversation_manager = getattr(context, "conversation_manager", None)
+            if umo and conversation_manager:
+                curr_cid = await conversation_manager.get_curr_conversation_id(umo)
+                if curr_cid:
+                    conversation = await conversation_manager.get_conversation(
+                        umo, curr_cid
+                    )
+                    persona_id = str(getattr(conversation, "persona_id", "") or "").strip()
+
+            if persona_id:
+                get_persona = getattr(persona_manager, "get_persona", None)
+                if get_persona:
+                    persona = get_persona(persona_id)
+                    if asyncio.iscoroutine(persona):
+                        persona = await persona
+                    prompt = str(getattr(persona, "system_prompt", "") or "").strip()
+                    if prompt:
+                        result.update(
+                            {
+                                "source": "conversation_persona",
+                                "persona_id": persona_id,
+                                "prompt": prompt,
+                            }
+                        )
+                        return result
+
+            # 2) 回退默认人格(v3)
+            get_default = getattr(persona_manager, "get_default_persona_v3", None)
+            if get_default:
+                default_persona = get_default(umo=umo)
+                if asyncio.iscoroutine(default_persona):
+                    default_persona = await default_persona
+                prompt = ""
+                persona_name = ""
+                if isinstance(default_persona, dict):
+                    prompt = str(default_persona.get("prompt", "") or "").strip()
+                    persona_name = str(default_persona.get("name", "") or "").strip()
+                else:
+                    prompt = str(getattr(default_persona, "prompt", "") or "").strip()
+                    persona_name = str(
+                        getattr(default_persona, "name", "") or ""
+                    ).strip()
+                if prompt:
+                    result.update(
+                        {
+                            "source": "default_persona",
+                            "persona_id": persona_name,
+                            "prompt": prompt,
+                        }
+                    )
+
+        except Exception as e:
+            self._debug_log(f"解析记忆生成人格失败: {e}", "warning")
+
+        return result
+
+    async def build_memory_generation_persona_injection(
+        self, umo: str | None, max_chars: int = 1600
+    ) -> str:
+        """构建记忆生成阶段的人格注入文本。"""
+        try:
+            persona_data = await self.resolve_memory_generation_persona(umo)
+            prompt = str(persona_data.get("prompt", "") or "").strip()
+            if not prompt:
+                return ""
+
+            if len(prompt) > max_chars:
+                prompt = f"{prompt[:max_chars].rstrip()}..."
+
+            return (
+                "人格设定\n"
+                f"{prompt}\n"
+                "请在记忆提取与描述风格上遵循该人格设定，但必须严格基于对话事实，不得编造。"
+            )
+        except Exception as e:
+            self._debug_log(f"构建记忆生成人格注入文本失败: {e}", "warning")
+            return ""
 
     async def _fallback_impression_extraction(
         self, conversation_history: list[dict[str, Any]], group_id: str

@@ -157,7 +157,6 @@ class MemoryAPIGateway:
         self._is_healthy = True
         self._last_health_check = time.time()
 
-        logger.info("记忆系统API网关已初始化")
 
     def _check_cache(self, key: str) -> Any | None:
         """检查L1缓存"""

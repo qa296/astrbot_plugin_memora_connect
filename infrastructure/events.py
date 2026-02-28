@@ -85,7 +85,6 @@ class MemoryEventBus:
         self._processor_task: asyncio.Task | None = None
         self._running = False
 
-        logger.info("记忆事件总线已初始化")
 
     def subscribe(self, event_type: MemoryEventType, callback: Callable) -> bool:
         """
@@ -231,7 +230,6 @@ class MemoryEventBus:
 
         self._running = True
         self._processor_task = asyncio.create_task(self._event_processor_loop())
-        logger.info("记忆事件总线处理器已启动")
 
     async def stop(self):
         """停止事件处理器"""

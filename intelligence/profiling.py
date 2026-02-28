@@ -124,7 +124,6 @@ class UserProfilingSystem:
         # 初始化数据库表
         self._init_database()
 
-        logger.info("用户画像系统已初始化")
 
     def _init_database(self):
         """初始化数据库表"""
@@ -169,7 +168,6 @@ class UserProfilingSystem:
             conn.commit()
             conn.close()
 
-            logger.info("用户画像数据库表初始化完成")
 
         except Exception as e:
             logger.error(f"初始化用户画像数据库失败: {e}", exc_info=True)

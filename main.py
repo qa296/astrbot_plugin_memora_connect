@@ -35,7 +35,7 @@ from .web.server import MemoryWebServer
     "astrbot_plugin_memora_connect",
     "qa296",
     "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。",
-    "0.2.6",
+    "0.3.1",
     "https://github.com/qa296/astrbot_plugin_memora_connect",
 )
 class MemoraConnectPlugin(Star):
@@ -115,19 +115,15 @@ class MemoraConnectPlugin(Star):
 
             # 初始化新增模块
             try:
-                logger.info("初始化主动能力升级模块...")
 
                 # 1. 初始化事件总线
                 self.event_bus = await initialize_event_bus()
-                logger.info("✓ 事件总线已启动")
 
                 # 2. 初始化话题分析器
                 self.topic_analyzer = TopicAnalyzer(self.memory_system)
-                logger.info("✓ 话题分析器已初始化")
 
                 # 3. 初始化用户画像系统
                 self.user_profiling = UserProfilingSystem(self.memory_system)
-                logger.info("✓ 用户画像系统已初始化")
 
                 # 注入组件到记忆系统
                 self.memory_system.set_components(
@@ -136,7 +132,6 @@ class MemoraConnectPlugin(Star):
 
                 # 4. 初始化时间维度记忆系统
                 self.temporal_memory = TemporalMemorySystem(self.memory_system)
-                logger.info("✓ 时间维度记忆系统已初始化")
 
                 # 5. 初始化API网关
                 self.api_gateway = MemoryAPIGateway(
@@ -145,9 +140,7 @@ class MemoraConnectPlugin(Star):
                     self.user_profiling,
                     self.temporal_memory,
                 )
-                logger.info("✓ API网关已初始化")
 
-                logger.info("主动能力升级模块初始化完成！")
             except Exception as upgrade_e:
                 logger.error(f"主动能力升级模块初始化失败: {upgrade_e}", exc_info=True)
 
@@ -487,9 +480,7 @@ class MemoraConnectPlugin(Star):
             # === 新增：清理主动能力升级模块 ===
             try:
                 if self.event_bus:
-                    logger.info("关闭事件总线...")
                     await shutdown_event_bus()
-                    logger.info("✓ 事件总线已关闭")
             except Exception as bus_e:
                 logger.warning(f"关闭事件总线失败: {bus_e}")
 

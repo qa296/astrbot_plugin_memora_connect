@@ -3,7 +3,7 @@
 <div align="center">
 
 ![AstrBot Memora Connect](https://img.shields.io/badge/AstrBot-Memora%20Connect-blue?style=for-the-badge&logo=robot&logoColor=white)
-![Version](https://img.shields.io/badge/version-v0.2.3-green?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-v0.3.1-green?style=for-the-badge)
 
 **模仿人类记忆方式的智能记忆插件**
 
@@ -166,6 +166,14 @@ cp -r astrbot_plugin_memora_connect /path/to/astrbot/plugins/
 - 定期执行记忆整理和合并
 - 自动遗忘不活跃的记忆
 - 优化记忆图结构
+
+## ⚙️ 配置说明
+
+### 人格注入配置
+
+- `enable_persona_injection_in_memory_generation`（默认：`true`）
+  - 作用：在话题分析/记忆生成阶段注入人格设定，使生成记忆更贴合当前人格。
+  - 优先级：会话绑定人格 `persona_id` > 默认人格（`get_default_persona_v3`）> 不注入。
 
 ---
 

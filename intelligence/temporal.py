@@ -63,7 +63,6 @@ class TemporalMemorySystem:
         # 启动定时任务
         self._start_daily_scan_task()
 
-        logger.info("时间维度记忆系统已初始化")
 
     def _init_database(self):
         """初始化数据库表"""
@@ -100,7 +99,6 @@ class TemporalMemorySystem:
             conn.commit()
             conn.close()
 
-            logger.info("时间维度记忆数据库表初始化完成")
 
         except Exception as e:
             logger.error(f"初始化时间维度记忆数据库失败: {e}", exc_info=True)
@@ -123,7 +121,6 @@ class TemporalMemorySystem:
 
         # 创建任务
         asyncio.create_task(daily_scan_loop())
-        logger.info("每日扫描任务已启动")
 
     async def _wait_until_midnight(self):
         """等待到凌晨3点"""
