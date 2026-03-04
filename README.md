@@ -70,37 +70,6 @@ AstrBot Memora Connect 是一个为 AstrBot 设计的高级记忆插件，通过
 
 ---
 
-## 🚀 安装指南
-
-
-### 🔧 插件安装
-
-1. **下载插件**
-```bash
-git clone https://github.com/qa296/astrbot_plugin_memora_connect.git
-cd astrbot_plugin_memora_connect
-```
-
-2. **放置插件目录**
-```bash
-# 将插件目录复制到 AstrBot 的插件目录
-cp -r astrbot_plugin_memora_connect /path/to/astrbot/plugins/
-```
-
-3. **启用插件**
-```bash
-# 在 AstrBot 配置中启用插件
-# 或通过管理界面启用 Memora Connect 插件
-```
-
-4. **验证安装**
-```bash
-# 启动 AstrBot 并检查插件是否正常加载
-# 查看日志确认插件初始化成功
-```
-
----
-
 ## 🎮 使用指南
 
 ### 💬 基本命令
@@ -166,18 +135,6 @@ cp -r astrbot_plugin_memora_connect /path/to/astrbot/plugins/
 - 定期执行记忆整理和合并
 - 自动遗忘不活跃的记忆
 - 优化记忆图结构
-
-## ⚙️ 配置说明
-
-### 人格注入配置
-
-- `enable_persona_injection_in_memory_generation`（默认：`true`）
-  - 作用：在话题分析/记忆生成阶段注入人格设定，使生成记忆更贴合当前人格。
-  - 优先级：会话绑定人格 `persona_id` > 默认人格（`get_default_persona_v3`）> 不注入。
-
----
-
-<div align="center">
 
 **⭐ 如果这个项目对您有帮助，请考虑给我们一个 Star！**
 
