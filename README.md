@@ -139,3 +139,7 @@ AstrBot Memora Connect 是一个为 AstrBot 设计的高级记忆插件，通过
 ![Star History](https://img.shields.io/github/stars/qa296/astrbot_plugin_memora_connect?style=social)
 
 </div>
+
+## QQ群
+因为作者并不经常看issue，所以可以通过QQ群来提醒我！
+群号：1098607348
