@@ -571,13 +571,14 @@ class MemoraConnectPlugin(Star):
     async def add_memory_api(
         self,
         content: str,
-        theme: str,
+        theme: str = "",
         group_id: str = "",
         details: str = "",
         participants: str = "",
         location: str = "",
         emotion: str = "",
         tags: str = "",
+        elements: str = "",
     ) -> str | None:
         """【API】添加一条记忆"""
         if not self._initialized or not self.memory_system.memory_system_enabled:
@@ -585,24 +586,65 @@ class MemoraConnectPlugin(Star):
             return None
 
         try:
-            # 切换到正确的群聊上下文
             if self.memory_system.memory_config.get("enable_group_isolation", True):
                 self.memory_system.memory_graph = MemoryGraph()
                 self.memory_system.load_memory_state(group_id)
 
-            concept_id = self.memory_system.memory_graph.add_concept(theme)
             memory_id = self.memory_system.memory_graph.add_memory(
                 content=content,
-                concept_id=concept_id,
                 details=details,
-                participants=participants,
-                location=location,
                 emotion=emotion,
-                tags=tags,
                 group_id=group_id,
             )
 
-            # 异步保存
+            if elements:
+                try:
+                    import json
+                    elem_list = json.loads(elements) if isinstance(elements, str) else elements
+                    if isinstance(elem_list, list):
+                        for elem in elem_list:
+                            if isinstance(elem, dict):
+                                name = str(elem.get("name", "")).strip()
+                                category = str(elem.get("category", "trait")).strip()
+                                role = str(elem.get("role", "")).strip()
+                                if name:
+                                    eid = self.memory_system.memory_graph.get_or_create_element(
+                                        name, category, group_id
+                                    )
+                                    self.memory_system.memory_graph.link_memory(eid, memory_id, role)
+                        self.memory_system.memory_graph.auto_connect_cooccurring_elements(memory_id)
+                except Exception:
+                    pass
+
+            if not elements and (participants or location or tags):
+                if participants:
+                    for p in participants.replace("，", ",").split(","):
+                        p = p.strip()
+                        if p:
+                            eid = self.memory_system.memory_graph.get_or_create_element(p, "person", group_id)
+                            self.memory_system.memory_graph.link_memory(eid, memory_id, "subject")
+                if location:
+                    for loc in location.replace("，", ",").split(","):
+                        loc = loc.strip()
+                        if loc:
+                            eid = self.memory_system.memory_graph.get_or_create_element(loc, "place", group_id)
+                            self.memory_system.memory_graph.link_memory(eid, memory_id, "scene")
+                if tags:
+                    for tag in tags.replace("，", ",").split(","):
+                        tag = tag.strip()
+                        if tag:
+                            eid = self.memory_system.memory_graph.get_or_create_element(tag, "trait", group_id)
+                            self.memory_system.memory_graph.link_memory(eid, memory_id, "attribute")
+                self.memory_system.memory_graph.auto_connect_cooccurring_elements(memory_id)
+
+            if not elements and not participants and not location and not tags and theme:
+                for kw in theme.replace("，", ",").split(","):
+                    kw = kw.strip()
+                    if kw:
+                        eid = self.memory_system.memory_graph.get_or_create_element(kw, "trait", group_id)
+                        self.memory_system.memory_graph.link_memory(eid, memory_id, "")
+                self.memory_system.memory_graph.auto_connect_cooccurring_elements(memory_id)
+
             await self.memory_system._queue_save_memory_state(group_id)
 
             logger.info(f"通过API添加记忆成功: {memory_id}")
@@ -709,79 +751,54 @@ class MemoraConnectPlugin(Star):
         event: AstrMessageEvent,
         content: str,
         theme: str = None,
-        topic: str = None,
+        elements: str = "",
         details: str = "",
-        participants: str = "",
-        location: str = "",
         emotion: str = "",
-        tags: str = "",
         allow_forget: str = None,
         confidence: str = "0.7",
+        participants: str = "",
+        location: str = "",
+        tags: str = "",
     ) -> MessageEventResult:
         """通过LLM调用创建记忆(必须传入完整参数！！！)
 
         Args:
             content(string): 需要记录的完整对话内容
-            theme(string): 核心关键词，用逗号分隔
-            topic(string): 该记忆所属的主题或关键词（向后兼容）
+            theme(string): 核心关键词，用逗号分隔（向后兼容，优先使用elements）
+            elements(string): 记忆元素JSON数组，格式如 [{"name":"张三","category":"person","role":"subject"}]，category可选: person/object/place/action/trait
             details(string): 具体细节和背景信息
-            participants(string): 涉及的人物，用逗号分隔
-            location(string): 相关场景或地点
             emotion(string): 情感色彩
-            tags(string): 分类标签
             allow_forget(string): 是否允许遗忘
             confidence(number): 置信度，0-1之间的数值
+            participants(string): 涉及的人物，用逗号分隔（向后兼容）
+            location(string): 相关场景或地点（向后兼容）
+            tags(string): 分类标签（向后兼容）
         """
         try:
-            # 向后兼容性处理：如果提供了topic但没有theme，使用topic作为theme
-            actual_theme = theme or topic
-            if not actual_theme:
-                logger.warning("创建记忆失败：主题为空")
-                return "创建记忆失败：主题为空"
-            # 参数验证和清理
             if not content:
                 logger.warning("创建记忆失败：内容为空")
                 return "创建记忆失败：内容为空"
-            # 清理特殊字符
-            import re
 
-            actual_theme = re.sub(r"[^\w\u4e00-\u9fff,，]", "", str(actual_theme))
-            details = str(details).strip()
-            participants = str(participants).strip()
-            location = str(location).strip()
-            emotion = str(emotion).strip()
-            tags = str(tags).strip()
             parsed_allow_forget = self.memory_system._parse_allow_forget_value(
                 allow_forget, None
             )
             if allow_forget is not None and parsed_allow_forget is None:
-                logger.warning("创建记忆失败：allow_forget参数无效")
                 return "创建记忆失败：allow_forget参数无效"
             initial_allow_forget = (
                 parsed_allow_forget if parsed_allow_forget is not None else True
             )
 
-            # 将confidence从字符串转换为浮点数
             try:
                 confidence_float = max(0.0, min(1.0, float(confidence)))
             except (ValueError, TypeError):
-                logger.warning(
-                    f"无法将confidence '{confidence}' 转换为浮点数，使用默认值0.7"
-                )
                 confidence_float = 0.7
 
-            # 创建概念
             group_id = self._load_group_context_for_event(event)
-            concept_id = self.memory_system.memory_graph.add_concept(actual_theme)
+            base_strength = 1.0 * confidence_float
 
-            # 根据置信度调整记忆强度
-            base_strength = 1.0
-            adjusted_strength = base_strength * confidence_float
-
-            # 创建丰富记忆
             resolved_allow_forget = await self.memory_system.resolve_allow_forget(
                 content=content,
-                theme=actual_theme,
+                theme=theme or "",
                 details=details,
                 participants=participants,
                 location=location,
@@ -789,23 +806,64 @@ class MemoraConnectPlugin(Star):
                 tags=tags,
                 initial_allow_forget=initial_allow_forget,
             )
+
             memory_id = self.memory_system.memory_graph.add_memory(
                 content=content,
-                concept_id=concept_id,
                 details=details,
-                participants=participants,
-                location=location,
                 emotion=emotion,
-                tags=tags,
-                strength=adjusted_strength,
+                strength=base_strength,
                 allow_forget=resolved_allow_forget,
                 group_id=group_id,
             )
 
+            element_linked = False
+
+            if elements:
+                try:
+                    import json
+                    elem_list = json.loads(elements) if isinstance(elements, str) else elements
+                    if isinstance(elem_list, list):
+                        for elem in elem_list:
+                            if isinstance(elem, dict):
+                                name = str(elem.get("name", "")).strip()
+                                category = str(elem.get("category", "trait")).strip()
+                                role = str(elem.get("role", "")).strip()
+                                if name:
+                                    from .core.models import CATEGORIES
+                                    if category not in CATEGORIES:
+                                        category = "trait"
+                                    eid = self.memory_system.memory_graph.get_or_create_element(
+                                        name, category, group_id
+                                    )
+                                    self.memory_system.memory_graph.link_memory(eid, memory_id, role)
+                                    element_linked = True
+                        if element_linked:
+                            self.memory_system.memory_graph.auto_connect_cooccurring_elements(memory_id)
+                except Exception:
+                    pass
+
+            if not element_linked:
+                actual_theme = theme or ""
+                fallback_parts = []
+                if participants:
+                    fallback_parts.extend(p.strip() for p in participants.replace("，", ",").split(",") if p.strip())
+                if location:
+                    fallback_parts.extend(l.strip() for l in location.replace("，", ",").split(",") if l.strip())
+                if tags:
+                    fallback_parts.extend(t.strip() for t in tags.replace("，", ",").split(",") if t.strip())
+                if actual_theme:
+                    fallback_parts.extend(k.strip() for k in actual_theme.replace("，", ",").split(",") if k.strip())
+
+                for kw in fallback_parts:
+                    eid = self.memory_system.memory_graph.get_or_create_element(kw, "trait", group_id)
+                    self.memory_system.memory_graph.link_memory(eid, memory_id, "")
+                if fallback_parts:
+                    self.memory_system.memory_graph.auto_connect_cooccurring_elements(memory_id)
+
             await self.memory_system._queue_save_memory_state(group_id)
 
             logger.info(
-                f"LLM工具创建丰富记忆：{actual_theme} -> {content} (置信度: {confidence})"
+                f"LLM工具创建记忆：{content[:30]} (置信度: {confidence})"
             )
 
             return f"记忆创建成功,内容为:{content}"

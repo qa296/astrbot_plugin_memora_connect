@@ -673,8 +673,8 @@ class EmbeddingCacheManager:
                     {
                         "memory_id": memory_id,
                         "content": memory.content,
-                        "concept_id": memory.concept_id,
-                        "group_id": getattr(memory, "group_id", ""),  # 确保传递group_id
+                        "concept_id": getattr(memory, "concept_id", ""),
+                        "group_id": getattr(memory, "group_id", ""),
                     }
                 )
 

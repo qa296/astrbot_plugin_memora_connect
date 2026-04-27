@@ -204,7 +204,6 @@ class TopicAnalyzer:
         """构建LLM分析的完整prompt"""
         parts = []
 
-        # 1. 新消息（带序号）
         parts.append("新消息:")
         for i, msg in enumerate(messages):
             sender = msg.get("sender_name", "未知")
@@ -212,7 +211,6 @@ class TopicAnalyzer:
             time_str = msg.get("time_str", "")
             parts.append(f"[{i}] [{time_str}] {sender}: {content}")
 
-        # 2. 未完成会话
         active = self._active_sessions.get(group_id, {})
         if active:
             parts.append("\n未完成会话（完整消息历史）:")
@@ -226,7 +224,6 @@ class TopicAnalyzer:
                         f"  [{m.get('time_str', '')}] {m.get('sender_name', '未知')}: {m.get('content', '')}"
                     )
 
-        # 3. 最近完成会话摘要
         completed = self._completed_sessions.get(group_id, [])
         if completed:
             recent = completed[-self.max_completed_sessions :]
@@ -236,11 +233,18 @@ class TopicAnalyzer:
                     f"- 会话 {session.session_id}: {session.topic} - {session.summary or '无摘要'}"
                 )
 
+        existing = self.memory_system.memory_graph.get_all_element_names_by_category(group_id)
+        if any(existing.values()):
+            from ..core.models import CATEGORY_NAMES
+            parts.append("\n已有记忆元素（优先复用已有名称，不要创建重复）：")
+            for cat, names in existing.items():
+                if names:
+                    parts.append(f"  {CATEGORY_NAMES.get(cat, cat)}：{'、'.join(names)}")
+
         if persona_injection:
             parts.append("\n记忆生成的人格约束:")
             parts.append(persona_injection)
 
-        # 4. 任务要求
         parts.append("""
 请分析以上新消息，将其分配到合适的会话中。
 
@@ -250,8 +254,9 @@ class TopicAnalyzer:
 3. 分析每个会话的言外之意（subtext）
 4. 判断会话状态：ongoing（进行中）或 completed（已结束）
 5. 为每个会话生成记忆内容
-6. 如果涉及对人物的评价或互动，生成印象
-7. 对completed的会话生成摘要
+6. 从对话中提取记忆元素，类型只能是：person(人物)、object(物品)、place(场所)、action(行为)、trait(特征)
+7. 如果涉及对人物的评价或互动，生成印象
+8. 对completed的会话生成摘要
 
 返回JSON格式：
 {
@@ -269,12 +274,12 @@ class TopicAnalyzer:
       "memory": {
         "content": "记忆核心内容",
         "details": "详细信息，包含言外之意分析",
-        "participants": "参与者",
-        "location": "地点",
         "emotion": "情感",
-        "tags": "标签",
         "confidence": 0.8
       },
+      "elements": [
+        {"name": "元素名", "category": "person|object|place|action|trait", "role": "subject|object|scene|action|attribute"}
+      ],
       "impression": {
         "person_name": "人物名称",
         "summary": "印象摘要",
@@ -286,6 +291,8 @@ class TopicAnalyzer:
 }
 
 注意：
+- elements字段必须为每个会话生成，提取对话中涉及的人、物品、地点、行为、特征
+- 优先使用已有记忆元素列表中的名称，避免创建重复
 - impression字段可选，仅在涉及对人物评价时生成
 - memory字段必须为每个会话生成
 - new_message_indices中的数字对应新消息的序号
@@ -445,36 +452,22 @@ class TopicAnalyzer:
         if not session:
             return
 
-        # 1. 生成记忆
         memory_data = s_data.get("memory")
+        elements_data = s_data.get("elements", [])
+        memory_id = None
+
         if memory_data and isinstance(memory_data, dict):
             try:
                 content = str(memory_data.get("content", "")).strip()
                 details = str(memory_data.get("details", "")).strip()
-                m_participants = str(memory_data.get("participants", "")).strip()
-                location = str(memory_data.get("location", "")).strip()
                 m_emotion = str(memory_data.get("emotion", "")).strip()
-                tags = str(memory_data.get("tags", "")).strip()
                 confidence = float(memory_data.get("confidence", 0.7))
 
                 if content:
-                    theme = (
-                        ", ".join(session.keywords)
-                        if session.keywords
-                        else session.topic
-                    )
-                    # 清理主题中的特殊字符
-                    theme = re.sub(r"[^\w\u4e00-\u9fff,，\s]", "", theme)
-
-                    concept_id = self.memory_system.memory_graph.add_concept(theme)
-                    self.memory_system.memory_graph.add_memory(
+                    memory_id = self.memory_system.memory_graph.add_memory(
                         content=content,
-                        concept_id=concept_id,
                         details=details,
-                        participants=m_participants,
-                        location=location,
                         emotion=m_emotion,
-                        tags=tags,
                         strength=max(0.0, min(1.0, confidence)),
                         group_id=group_id,
                     )
@@ -482,7 +475,30 @@ class TopicAnalyzer:
             except Exception as e:
                 logger.error(f"生成记忆失败: {e}", exc_info=True)
 
-        # 2. 生成印象
+        if elements_data and isinstance(elements_data, list) and memory_id:
+            try:
+                element_ids = []
+                for elem in elements_data:
+                    if not isinstance(elem, dict):
+                        continue
+                    name = str(elem.get("name", "")).strip()
+                    category = str(elem.get("category", "")).strip()
+                    role = str(elem.get("role", "")).strip()
+                    if not name or not category:
+                        continue
+                    from ..core.models import CATEGORIES
+                    if category not in CATEGORIES:
+                        category = "trait"
+                    eid = self.memory_system.memory_graph.get_or_create_element(
+                        name, category, group_id
+                    )
+                    self.memory_system.memory_graph.link_memory(eid, memory_id, role)
+                    element_ids.append(eid)
+
+                self.memory_system.memory_graph.auto_connect_cooccurring_elements(memory_id)
+            except Exception as e:
+                logger.error(f"提取元素失败: {e}", exc_info=True)
+
         impression_data = s_data.get("impression")
         if impression_data and isinstance(impression_data, dict):
             try:
