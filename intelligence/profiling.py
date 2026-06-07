@@ -202,12 +202,18 @@ class UserProfilingSystem:
             memory_graph = self.memory_system.memory_graph
 
             # 1. 计算互动频度
-            user_memories = [
-                m
-                for m in memory_graph.memories.values()
-                if user_id in (m.participants or "")
-                and (not group_id or getattr(m, "group_id", "") == group_id)
-            ]
+            # 通过 person 类型元素找到与用户相关的记忆
+            user_memories = []
+            for memory in memory_graph.memories.values():
+                if group_id and getattr(memory, "group_id", "") != group_id:
+                    continue
+
+                mem_elements = memory_graph.get_memory_elements(memory.id)
+                for elem, role in mem_elements:
+                    if elem.category == "person" and role == "subject":
+                        if user_id in elem.name or elem.name in user_id:
+                            user_memories.append(memory)
+                            break
 
             if user_memories:
                 score.total_interactions = len(user_memories)
@@ -331,7 +337,7 @@ class UserProfilingSystem:
     ) -> list[tuple[str, float]]:
         """
         提取用户兴趣偏好
-        基于用户与概念节点的共现关系
+        基于用户与元素节点的共现关系
 
         Args:
             user_id: 用户ID
@@ -339,10 +345,9 @@ class UserProfilingSystem:
             top_k: 返回TOP K个兴趣
 
         Returns:
-            List[Tuple[concept_name, weight]]: [(概念名, 权重分数)]
+            List[Tuple[element_name, weight]]: [(元素名, 权重分数)]
         """
         try:
-            # 检查缓存
             cache_key = (user_id, group_id)
             if cache_key in self._interest_cache:
                 cached_interests = self._interest_cache[cache_key]
@@ -351,52 +356,38 @@ class UserProfilingSystem:
                 )
                 return [(i.concept_name, i.weight) for i in sorted_interests[:top_k]]
 
-            # 从记忆图谱中统计
             memory_graph = self.memory_system.memory_graph
-
-            # 统计用户参与的概念
-            concept_counter = defaultdict(int)
+            element_counter: dict = defaultdict(int)
 
             for memory in memory_graph.memories.values():
-                # 检查群组和参与者
                 if group_id and getattr(memory, "group_id", "") != group_id:
                     continue
 
-                if user_id not in (memory.participants or ""):
-                    continue
+                mem_elements = memory_graph.get_memory_elements(memory.id)
+                for elem, role in mem_elements:
+                    if role in ("subject", "object") and elem.category in ("object", "action", "trait"):
+                        element_counter[(elem.id, elem.name, elem.category)] += 1
 
-                # 统计概念
-                concept_id = memory.concept_id
-                if concept_id and concept_id in memory_graph.concepts:
-                    concept_counter[concept_id] += 1
-
-            if not concept_counter:
+            if not element_counter:
                 return []
 
-            # 计算权重
-            total_interactions = sum(concept_counter.values())
+            total_interactions = sum(element_counter.values())
             interests = []
 
-            for concept_id, count in concept_counter.items():
-                concept = memory_graph.concepts[concept_id]
+            for (elem_id, elem_name, elem_category), count in element_counter.items():
                 weight = count / total_interactions
-
                 interest = UserInterest(
-                    concept_id=concept_id,
-                    concept_name=concept.name,
+                    concept_id=elem_id,
+                    concept_name=f"{elem_name}({elem_category})",
                     weight=weight,
                     interaction_count=count,
                     last_interacted=datetime.now(),
                 )
                 interests.append(interest)
 
-            # 缓存
             self._interest_cache[cache_key] = interests
-
-            # 持久化到数据库
             await self._save_interests_to_db(user_id, group_id, interests)
 
-            # 排序并返回
             sorted_interests = sorted(interests, key=lambda x: x.weight, reverse=True)
             return [(i.concept_name, i.weight) for i in sorted_interests[:top_k]]
 

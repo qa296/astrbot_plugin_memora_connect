@@ -12,7 +12,7 @@ class EnhancedMemoryDisplay:
         self.memory_system = memory_system
 
     def _get_element_info(self, memory) -> tuple[str, list[str], list[str]]:
-        """获取记忆的元素信息，返回 (concept_name, element_names, element_details)"""
+        """获取记忆的元素信息，返回 (first_element_name, element_names, element_details)"""
         graph = self.memory_system.memory_graph
         mem_elements = graph.get_memory_elements(memory.id)
         if mem_elements:
@@ -25,17 +25,7 @@ class EnhancedMemoryDisplay:
                     detail_parts.append(e.name)
             return mem_elements[0][0].name if mem_elements else "", names, detail_parts
 
-        concept_name = ""
-        concept = graph.concepts.get(getattr(memory, "concept_id", ""))
-        if concept:
-            concept_name = concept.name
-
-        legacy_names = []
-        for field in [getattr(memory, "participants", ""), getattr(memory, "location", ""), getattr(memory, "tags", "")]:
-            if field:
-                legacy_names.extend(p.strip() for p in str(field).replace("，", ",").split(",") if p.strip())
-
-        return concept_name, legacy_names, legacy_names
+        return "", [], []
 
     def format_detailed_memory(self, memory, concept=None) -> str:
         try:
@@ -89,10 +79,6 @@ class EnhancedMemoryDisplay:
             for i, memory in enumerate(memories, 1):
                 concept_name, element_names, _ = self._get_element_info(memory)
                 display_name = concept_name or ""
-                if not display_name and concepts:
-                    concept = concepts.get(getattr(memory, "concept_id", ""))
-                    if concept:
-                        display_name = concept.name
 
                 parts.append(f"{i}. **{display_name}**: {memory.content}")
 
@@ -182,7 +168,6 @@ class EnhancedMemoryDisplay:
 
             total_memories = len(graph.memories)
             total_elements = len(getattr(graph, "elements", {}))
-            total_concepts = len(graph.concepts)
             total_connections = len(graph.connections)
 
             avg_strength = sum(m.strength for m in graph.memories.values()) / total_memories
@@ -201,19 +186,18 @@ class EnhancedMemoryDisplay:
 
             top_elements = sorted(element_counts.items(), key=lambda x: x[1], reverse=True)
 
-            concept_counts: dict[str, int] = {}
-            for memory in graph.memories.values():
-                concept = graph.concepts.get(getattr(memory, "concept_id", ""))
-                if concept:
-                    concept_counts[concept.name] = concept_counts.get(concept.name, 0) + 1
-
-            top_concepts = sorted(concept_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+            # 统计热门元素（按关联记忆数排序）
+            element_memory_count: dict[str, int] = {}
+            for em in graph.element_memories:
+                elem = graph.elements.get(em.element_id)
+                if elem:
+                    element_memory_count[elem.name] = element_memory_count.get(elem.name, 0) + 1
+            top_element_names = sorted(element_memory_count.items(), key=lambda x: x[1], reverse=True)[:5]
 
             parts = [
                 "记忆库统计",
                 f"总记忆数: {total_memories}",
                 f"总元素数: {total_elements}",
-                f"总概念数: {total_concepts}",
                 f"总连接数: {total_connections}",
                 f"平均记忆强度: {avg_strength:.2f}",
                 f"最近7天新增: {len(recent_memories)}条记忆",
@@ -224,10 +208,10 @@ class EnhancedMemoryDisplay:
                 for cat, count in top_elements:
                     parts.append(f"   {cat}: {count}个")
 
-            if top_concepts:
-                parts.append("\n热门概念:")
-                for concept, count in top_concepts:
-                    parts.append(f"   {concept}: {count}条记忆")
+            if top_element_names:
+                parts.append("\n热门元素:")
+                for name, count in top_element_names:
+                    parts.append(f"   {name}: {count}条关联记忆")
 
             return "\n".join(parts)
 
