@@ -191,15 +191,19 @@ class MemoryGraphVisualizer:
 
         has_elements = bool(getattr(graph, "elements", {}))
 
+        if not has_elements or not graph.concepts:
+            return await self._prepare_fallback_graph_data(
+                graph, max_nodes, max_edges, edge_strength_threshold, group_id
+            )
+
         if has_elements:
             return await self._prepare_element_graph_data(
                 graph, max_nodes, max_edges, edge_strength_threshold, group_id
             )
 
-        if not graph.concepts:
-            return await self._prepare_fallback_graph_data(
-                graph, max_nodes, max_edges, edge_strength_threshold, group_id
-            )
+        # 旧概念路径（仅旧数据库且无elements时走到这里）
+        # ⚠️ Memory 和 Connection 已不再有 concept_id/from_concept 字段
+        # 降级到 fallback，不做旧路径关联查询
 
         concepts = list(graph.concepts.values())
         memories = list(graph.memories.values())

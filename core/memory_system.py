@@ -2129,6 +2129,10 @@ class MemorySystem:
 
     async def consolidate_memories(self):
         """记忆整理机制 - 智能合并相似记忆"""
+        if not self.memory_graph.concepts:
+            # Element 体系下暂不做旧式 consolidation（按元素分组合并待后续实现）
+            return
+
         consolidation_count = 0
 
         for concept in list(self.memory_graph.concepts.values()):

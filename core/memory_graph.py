@@ -217,10 +217,6 @@ class MemoryGraph:
         strength: float = 1.0,
         allow_forget: bool = True,
         group_id: str = "",
-        concept_id: str = "",
-        participants: str = "",
-        location: str = "",
-        tags: str = "",
     ) -> str:
         if memory_id is None:
             memory_id = f"memory_{int(time.time() * 1000)}"

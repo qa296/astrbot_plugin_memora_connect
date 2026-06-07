@@ -402,28 +402,40 @@ class MemoryWebServer:
     async def api_create_memory(self, request: web.Request):
         body = await request.json()
         group_id = (body.get("group_id") or "").strip()
-        concept_id = (body.get("concept_id") or "").strip()
-        concept_name = (body.get("concept_name") or "").strip()
+        element_name = (body.get("concept_name") or body.get("element_name") or "").strip()
         content = (body.get("content") or "").strip()
         if not content:
             return web.json_response({"error": "content required"}, status=400)
         await self._load_group(group_id)
-        if not concept_id:
-            # 若没有传 id，使用名称新建/获取
-            if not concept_name:
-                return web.json_response({"error": "concept_id or concept_name required"}, status=400)
-            concept_id = self.ms.memory_graph.add_concept(concept_name)
         mem_id = self.ms.memory_graph.add_memory(
             content=content,
-            concept_id=concept_id,
             details=(body.get("details") or ""),
-            participants=(body.get("participants") or ""),
-            location=(body.get("location") or ""),
             emotion=(body.get("emotion") or ""),
-            tags=(body.get("tags") or ""),
             strength=float(body.get("strength") or 1.0),
             group_id=group_id,
         )
+
+        # 如果有元素名称，创建/获取对应的 Element 并关联
+        if element_name:
+            from ..core.models import CATEGORIES
+            category = body.get("category", "trait")
+            if category not in CATEGORIES:
+                category = "trait"
+            eid = self.ms.memory_graph.get_or_create_element(
+                element_name, category, group_id
+            )
+            self.ms.memory_graph.link_memory(eid, mem_id, "")
+
+        # 兼容旧字段：将旧 participants/location/tags 转为 trait 元素关联
+        for old_field in ["participants", "location", "tags"]:
+            val = (body.get(old_field) or "").strip()
+            if val:
+                for kw in val.replace("，", ",").split(","):
+                    kw = kw.strip()
+                    if kw:
+                        eid = self.ms.memory_graph.get_or_create_element(kw, "trait", group_id)
+                        self.ms.memory_graph.link_memory(eid, mem_id, "")
+
         await self.ms._queue_save_memory_state(group_id)
         return web.json_response({"id": mem_id})
 
