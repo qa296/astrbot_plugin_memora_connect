@@ -191,129 +191,14 @@ class MemoryGraphVisualizer:
 
         has_elements = bool(getattr(graph, "elements", {}))
 
-        if not has_elements or not graph.concepts:
-            return await self._prepare_fallback_graph_data(
-                graph, max_nodes, max_edges, edge_strength_threshold, group_id
-            )
-
         if has_elements:
             return await self._prepare_element_graph_data(
                 graph, max_nodes, max_edges, edge_strength_threshold, group_id
             )
 
-        # 旧概念路径（仅旧数据库且无elements时走到这里）
-        # ⚠️ Memory 和 Connection 已不再有 concept_id/from_concept 字段
-        # 降级到 fallback，不做旧路径关联查询
-
-        concepts = list(graph.concepts.values())
-        memories = list(graph.memories.values())
-        connections = list(graph.connections)
-
-        if group_id and self.ms.memory_config.get("enable_group_isolation", True):
-            filtered_memory_ids = set()
-            for memory in memories:
-                memory_group_id = getattr(memory, "group_id", "")
-                if memory_group_id:
-                    if memory_group_id == group_id:
-                        filtered_memory_ids.add(memory.id)
-                else:
-                    if (
-                        hasattr(memory, "content")
-                        and memory.content
-                        and memory.content.startswith("Imprint:")
-                    ):
-                        if f"Imprint:{group_id}:" in memory.content:
-                            filtered_memory_ids.add(memory.id)
-                    else:
-                        filtered_memory_ids.add(memory.id)
-
-            filtered_concept_ids = set()
-            for memory_id in filtered_memory_ids:
-                memory = graph.memories.get(memory_id)
-                if memory:
-                    filtered_concept_ids.add(memory.concept_id)
-
-            concepts = [c for c in concepts if c.id in filtered_concept_ids]
-            connections = [
-                conn
-                for conn in connections
-                if conn.from_concept in filtered_concept_ids
-                and conn.to_concept in filtered_concept_ids
-            ]
-            memories = [m for m in memories if m.id in filtered_memory_ids]
-
-        concept_stats: dict[str, dict[str, float]] = {}
-        for cid in graph.concepts.keys():
-            concept_stats[cid] = {"count": 0, "sum_strength": 0.0, "max_strength": 0.0}
-
-        for m in memories:
-            stat = concept_stats.get(m.concept_id)
-            if stat is None:
-                continue
-            stat["count"] += 1
-            stat["sum_strength"] += float(m.strength or 0.0)
-            stat["max_strength"] = max(stat["max_strength"], float(m.strength or 0.0))
-
-        for cid, s in concept_stats.items():
-            cnt = max(1, int(s["count"]))
-            s["avg_strength"] = s["sum_strength"] / cnt if cnt > 0 else 0.0
-
-        ranked_concepts = sorted(
-            concepts,
-            key=lambda c: (
-                concept_stats.get(c.id, {}).get("count", 0),
-                concept_stats.get(c.id, {}).get("avg_strength", 0.0),
-            ),
-            reverse=True,
+        return await self._prepare_fallback_graph_data(
+            graph, max_nodes, max_edges, edge_strength_threshold, group_id
         )
-        selected_concepts: list[Any] = ranked_concepts[:max_nodes]
-        selected_ids = set(c.id for c in selected_concepts)
-
-        filtered_edges: list[Any] = []
-        for conn in connections:
-            if conn.strength is None:
-                continue
-            if conn.strength < edge_strength_threshold:
-                continue
-            if (conn.from_concept in selected_ids) and (
-                conn.to_concept in selected_ids
-            ):
-                filtered_edges.append(conn)
-
-        filtered_edges.sort(key=lambda e: float(e.strength or 0.0), reverse=True)
-        filtered_edges = filtered_edges[:max_edges]
-
-        nodes_data = []
-        for c in selected_concepts:
-            stat = concept_stats.get(
-                c.id, {"count": 0, "avg_strength": 0.0, "max_strength": 0.0}
-            )
-            nodes_data.append(
-                {
-                    "id": c.id,
-                    "name": c.name,
-                    "count": stat["count"],
-                    "avg_strength": stat["avg_strength"],
-                    "max_strength": stat["max_strength"],
-                }
-            )
-
-        edges_data = []
-        for e in filtered_edges:
-            edges_data.append(
-                {
-                    "from_concept": e.from_concept,
-                    "to_concept": e.to_concept,
-                    "strength": float(e.strength or 0.0),
-                }
-            )
-
-        return {
-            "nodes": nodes_data,
-            "edges": edges_data,
-            "group_id": group_id,
-            "error": None,
-        }
 
     async def _prepare_element_graph_data(
         self,
@@ -388,8 +273,8 @@ class MemoryGraphVisualizer:
         edges_data = []
         for e in filtered_edges:
             edges_data.append({
-                "from_concept": e.from_element,
-                "to_concept": e.to_element,
+                "from_element": e.from_element,
+                "to_element": e.to_element,
                 "strength": float(e.strength or 0.0),
             })
 
@@ -450,8 +335,8 @@ class MemoryGraphVisualizer:
                 if overlap:
                     strength = 0.5 + 0.1 * len(overlap)
                     edges_data.append({
-                        "from_concept": m1.id,
-                        "to_concept": m2.id,
+                        "from_element": m1.id,
+                        "to_element": m2.id,
                         "strength": min(1.0, strength),
                     })
 
@@ -499,7 +384,9 @@ class MemoryGraphVisualizer:
         for edge in edges_data:
             # 使用连接强度作为 weight, 强度越大, spring_layout 越倾向拉近节点
             G.add_edge(
-                edge["from_concept"], edge["to_concept"], weight=edge["strength"]
+                edge.get("from_element", edge.get("from_concept")),
+                edge.get("to_element", edge.get("to_concept")),
+                weight=edge["strength"],
             )
 
         # 5) 节点可视参数计算(大小/颜色)
