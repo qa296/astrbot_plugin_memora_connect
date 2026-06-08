@@ -659,8 +659,8 @@ const Graph = {
     const edges = data.edges.map(e => ({ 
       data: { 
         id: e.id, 
-        source: e.from_concept, 
-        target: e.to_concept, 
+        source: e.from_element, 
+        target: e.to_element, 
         weight: e.strength.toFixed(2),
         rawStrength: e.strength
       } 
@@ -801,7 +801,7 @@ const UI = {
         <div>${m.content}</div>
         <div class="flex-row">
             <span class="tag">强度: ${m.strength.toFixed(2)}</span>
-            <span class="tag">CID: ${m.concept_id.substring(0,6)}</span>
+            <span class="tag">EID: ${(m.element_id || "").substring(0,6)}</span>
         </div>
       `;
       div.onclick = () => {
@@ -841,7 +841,7 @@ const UI = {
     // Fetch memories for concept
     let mems = [];
     try {
-        const res = await API.get(`/api/memories?group_id=${encodeURIComponent(Store.group)}&concept_id=${id}`);
+        const res = await API.get(`/api/memories?group_id=${encodeURIComponent(Store.group)}&element_id=${id}`);
         mems = res.memories || [];
     } catch(e) {}
 
@@ -854,12 +854,12 @@ const UI = {
             <label class="section-title">记忆列表 (${mems.length})</label>
             <div class="list-group mt-2">
                 ${mems.map(m => `
-                    <div class="card p-2 text-sm" onclick="UI.showMemoryPanel({id:'${m.id}', content:'${m.content.replace(/'/g,"\\'").replace(/\n/g," ")}', strength:${m.strength}, details:'${(m.details||"").replace(/'/g,"\\'")}', concept_id:'${id}'}, true)">
+                    <div class="card p-2 text-sm" onclick="UI.showMemoryPanel({id:'${m.id}', content:'${m.content.replace(/'/g,"\\'").replace(/\n/g," ")}', strength:${m.strength}, details:'${(m.details||"").replace(/'/g,"\\'")}', element_id:'${id}'}, true)">
                         ${m.content}
                     </div>
                 `).join('')}
             </div>
-            <button class="mt-2 full-width secondary" onclick="UI.showMemoryPanel({concept_id:'${id}'}, false)">+ 添加记忆</button>
+            <button class="mt-2 full-width secondary" onclick="UI.showMemoryPanel({element_id:'${id}'}, false)">+ 添加记忆</button>
         </div>
       </div>
     `;
@@ -892,16 +892,10 @@ const UI = {
                 </div>
             </div>
             
-            <label>参与者</label>
-            <input type="text" id="memParticipants" value="${memory.participants || ''}">
+            <label>元素ID</label>
+            <input type="text" id="memElementId" value="${memory.element_id || ''}">
             
-            <label>地点</label>
-            <input type="text" id="memLocation" value="${memory.location || ''}">
-            
-            <label>标签</label>
-            <input type="text" id="memTags" value="${memory.tags || ''}">
-            
-            <input type="hidden" id="memConceptId" value="${memory.concept_id}">
+            <input type="hidden" id="memElementIdHidden" value="${memory.element_id || ''}">
         </div>
       `;
       
@@ -1011,7 +1005,7 @@ const UI = {
     if (type === 'node') {
       html = `
         <div class="context-menu-item" onclick="UI.showConceptPanel('${id}', '${Graph.cy.getElementById(id).data('name')}')"><i class="fa-solid fa-eye"></i> 详情</div>
-        <div class="context-menu-item" onclick="UI.showMemoryPanel({concept_id:'${id}'}, false)"><i class="fa-solid fa-plus"></i> 添加记忆</div>
+        <div class="context-menu-item" onclick="UI.showMemoryPanel({element_id:'${id}'}, false)"><i class="fa-solid fa-plus"></i> 添加记忆</div>
         <div class="context-menu-item" onclick="UI.showCreateConnectionPanel('${id}')"><i class="fa-solid fa-link"></i> 连接到...</div>
         <div class="context-menu-item" onclick="App.deleteConcept('${id}')" style="color:var(--danger-color)"><i class="fa-solid fa-trash"></i> 删除</div>
       `;
@@ -1066,13 +1060,10 @@ const App = {
   async createMemory() {
     const body = {
         group_id: Store.group,
-        concept_id: document.getElementById('memConceptId').value,
+        element_id: document.getElementById('memElementId').value,
         content: document.getElementById('memContent').value,
         details: document.getElementById('memDetails').value,
-        participants: document.getElementById('memParticipants').value,
-        tags: document.getElementById('memTags').value,
         emotion: document.getElementById('memEmotion').value,
-        location: document.getElementById('memLocation').value,
         strength: parseFloat(document.getElementById('memStrength').value)
     };
     if(!body.content) return;
@@ -1084,13 +1075,10 @@ const App = {
   async updateMemory(id) {
       const body = {
         group_id: Store.group,
-        concept_id: document.getElementById('memConceptId').value,
+        element_id: document.getElementById('memElementId').value,
         content: document.getElementById('memContent').value,
         details: document.getElementById('memDetails').value,
-        participants: document.getElementById('memParticipants').value,
-        tags: document.getElementById('memTags').value,
         emotion: document.getElementById('memEmotion').value,
-        location: document.getElementById('memLocation').value,
         strength: parseFloat(document.getElementById('memStrength').value)
       };
       await API.put(`/api/memories/${id}`, body);
@@ -1126,8 +1114,8 @@ const App = {
       
       await API.post('/api/connections', {
           group_id: Store.group,
-          from_concept: fromId,
-          to_concept: toId,
+          from_element: fromId,
+          to_element: toId,
           strength: strength
       });
       Store.loadAll();

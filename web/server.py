@@ -153,9 +153,11 @@ class MemoryWebServer:
         try:
             cur = conn.cursor()
             cur.execute('''
-                CREATE TABLE IF NOT EXISTS concepts (
+                CREATE TABLE IF NOT EXISTS elements (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    group_id TEXT DEFAULT '',
                     created_at REAL,
                     last_accessed REAL,
                     access_count INTEGER DEFAULT 0
@@ -164,36 +166,38 @@ class MemoryWebServer:
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS memories (
                     id TEXT PRIMARY KEY,
-                    concept_id TEXT NOT NULL,
                     content TEXT NOT NULL,
                     details TEXT DEFAULT '',
-                    participants TEXT DEFAULT '',
-                    location TEXT DEFAULT '',
                     emotion TEXT DEFAULT '',
-                    tags TEXT DEFAULT '',
                     created_at REAL,
                     last_accessed REAL,
                     access_count INTEGER DEFAULT 0,
                     strength REAL DEFAULT 1.0,
-                    group_id TEXT DEFAULT '',
-                    FOREIGN KEY (concept_id) REFERENCES concepts (id)
+                    allow_forget INTEGER DEFAULT 1,
+                    group_id TEXT DEFAULT ''
+                )
+            ''')
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS element_memories (
+                    element_id TEXT NOT NULL,
+                    memory_id TEXT NOT NULL,
+                    role TEXT DEFAULT '',
+                    PRIMARY KEY (element_id, memory_id)
                 )
             ''')
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS connections (
                     id TEXT PRIMARY KEY,
-                    from_concept TEXT NOT NULL,
-                    to_concept TEXT NOT NULL,
+                    from_element TEXT NOT NULL,
+                    to_element TEXT NOT NULL,
                     strength REAL DEFAULT 1.0,
-                    last_strengthened REAL,
-                    FOREIGN KEY (from_concept) REFERENCES concepts (id),
-                    FOREIGN KEY (to_concept) REFERENCES concepts (id)
+                    last_strengthened REAL
                 )
             ''')
-
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_elements_group ON elements(group_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_memories_group_id ON memories(group_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_memories_concept_group ON memories(concept_id, group_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_memories_created_group ON memories(created_at, group_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_em_element ON element_memories(element_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_em_memory ON element_memories(memory_id)")
             conn.commit()
         except Exception as e:
             try:
@@ -292,62 +296,67 @@ class MemoryWebServer:
 
     async def api_concepts(self, request: web.Request):
         group_id = request.query.get("group_id", "")
-        if group_id:
-            rows = self._query_all(
-                "SELECT DISTINCT c.id, c.name FROM concepts c JOIN memories m ON m.concept_id=c.id WHERE m.group_id=?",
-                (group_id,),
-            )
-        else:
-            rows = self._query_all(
-                "SELECT DISTINCT c.id, c.name FROM concepts c JOIN memories m ON m.concept_id=c.id WHERE (m.group_id='' OR m.group_id IS NULL)"
-            )
-        concepts = [{"id": r[0], "name": r[1]} for r in rows]
-        return web.json_response({"concepts": concepts})
+        await self._load_group(group_id)
+        elements = []
+        for elem in self.ms.memory_graph.elements.values():
+            if group_id and elem.group_id != group_id:
+                continue
+            elements.append({
+                "id": elem.id,
+                "name": elem.name,
+                "category": elem.category,
+                "access_count": elem.access_count,
+            })
+        elements.sort(key=lambda e: (e["category"], e["name"]))
+        return web.json_response({"concepts": elements})
 
     async def api_create_concept(self, request: web.Request):
         body = await request.json()
         name = (body.get("name") or "").strip()
         group_id = (body.get("group_id") or "").strip()
+        category = (body.get("category") or "trait").strip()
         if not name:
             return web.json_response({"error": "name required"}, status=400)
-        # 通过内存图创建，便于后续操作
+        from ..core.models import CATEGORIES
+        if category not in CATEGORIES:
+            category = "trait"
         await self._load_group(group_id)
-        cid = self.ms.memory_graph.add_concept(name)
+        eid = self.ms.memory_graph.get_or_create_element(name, category, group_id)
         await self.ms._queue_save_memory_state(group_id)
-        return web.json_response({"id": cid, "name": name})
+        return web.json_response({"id": eid, "name": name, "category": category})
 
     async def api_update_concept(self, request: web.Request):
-        concept_id = request.match_info.get("concept_id")
+        element_id = request.match_info.get("concept_id")
         body = await request.json()
         new_name = (body.get("name") or "").strip()
         group_id = (body.get("group_id") or "").strip()
         if not new_name:
             return web.json_response({"error": "name required"}, status=400)
         await self._load_group(group_id)
-        if concept_id in self.ms.memory_graph.concepts:
-            self.ms.memory_graph.concepts[concept_id].name = new_name
+        elem = self.ms.memory_graph.elements.get(element_id)
+        if elem:
+            elem.name = new_name
             await self.ms._queue_save_memory_state(group_id)
             return web.json_response({"ok": True})
-        return web.json_response({"error": "concept not found"}, status=404)
+        return web.json_response({"error": "element not found"}, status=404)
 
     async def api_delete_concept(self, request: web.Request):
-        concept_id = request.match_info.get("concept_id")
+        element_id = request.match_info.get("concept_id")
         group_id = request.query.get("group_id", "")
         await self._load_group(group_id)
-        if concept_id in self.ms.memory_graph.concepts:
-            self.ms.memory_graph.remove_concept(concept_id)
+        if element_id in self.ms.memory_graph.elements:
+            self.ms.memory_graph.remove_element(element_id)
             await self.ms._queue_save_memory_state(group_id)
             return web.json_response({"ok": True})
         return web.json_response({"error": "not found"}, status=404)
 
     async def api_memories(self, request: web.Request):
         group_id = request.query.get("group_id", "")
-        concept_id = request.query.get("concept_id")
+        element_id = request.query.get("concept_id") or request.query.get("element_id")
         q = request.query.get("q")
         person = request.query.get("person")
 
         if person:
-            # 人物印象
             try:
                 summary = self.ms.get_person_impression_summary(group_id, person)
                 memories = self.ms.get_person_impression_memories(group_id, person, limit=50)
@@ -355,49 +364,41 @@ class MemoryWebServer:
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)
 
+        await self._load_group(group_id)
         if q:
-            # 搜索
-            await self._load_group(group_id)
             mems = await self.ms.recall_memories_full(q)
             if mems:
                 await self.ms._queue_save_memory_state(group_id)
-            data = [m.__dict__ for m in mems]
-            return web.json_response({"memories": data})
-
-        # 按组/概念列出
-        if concept_id:
-            rows = self._query_all(
-                "SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories WHERE concept_id=? AND (group_id=? OR (?='' AND (group_id='' OR group_id IS NULL))) ORDER BY last_accessed DESC",
-                (concept_id, group_id, group_id),
-            )
+        elif element_id:
+            mems = self.ms.memory_graph.get_element_memories(element_id)
         else:
-            if group_id:
-                rows = self._query_all(
-                    "SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories WHERE group_id=? ORDER BY last_accessed DESC",
-                    (group_id,),
-                )
-            else:
-                rows = self._query_all(
-                    "SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories WHERE group_id='' OR group_id IS NULL ORDER BY last_accessed DESC"
-                )
-        memories = [
-            {
-                "id": r[0],
-                "concept_id": r[1],
-                "content": r[2],
-                "details": r[3] or "",
-                "participants": r[4] or "",
-                "location": r[5] or "",
-                "emotion": r[6] or "",
-                "tags": r[7] or "",
-                "created_at": r[8],
-                "last_accessed": r[9],
-                "access_count": r[10],
-                "strength": r[11],
-            }
-            for r in rows
-        ]
-        return web.json_response({"memories": memories})
+            mems = list(self.ms.memory_graph.memories.values())
+
+        data = []
+        for m in mems:
+            if group_id and getattr(m, "group_id", "") != group_id:
+                continue
+            if not group_id and getattr(m, "group_id", ""):
+                continue
+            elements = [
+                {"id": e.id, "name": e.name, "category": e.category, "role": role}
+                for e, role in self.ms.memory_graph.get_memory_elements(m.id)
+            ]
+            data.append({
+                "id": m.id,
+                "content": m.content,
+                "details": m.details or "",
+                "emotion": m.emotion or "",
+                "created_at": m.created_at,
+                "last_accessed": m.last_accessed,
+                "access_count": m.access_count,
+                "strength": m.strength,
+                "allow_forget": bool(getattr(m, "allow_forget", True)),
+                "group_id": getattr(m, "group_id", ""),
+                "elements": elements,
+                "element_id": elements[0]["id"] if elements else "",
+            })
+        return web.json_response({"memories": data})
 
     async def api_create_memory(self, request: web.Request):
         body = await request.json()
@@ -448,12 +449,8 @@ class MemoryWebServer:
             memory_id,
             content=body.get("content"),
             details=body.get("details"),
-            participants=body.get("participants"),
-            location=body.get("location"),
             emotion=body.get("emotion"),
-            tags=body.get("tags"),
             strength=float(body.get("strength")) if body.get("strength") is not None else None,
-            concept_id=body.get("concept_id"),
         )
         if not ok:
             return web.json_response({"error": "not found"}, status=404)
@@ -472,36 +469,36 @@ class MemoryWebServer:
 
     async def api_connections(self, request: web.Request):
         group_id = request.query.get("group_id", "")
-        # 仅返回当前 group 的概念之间的连接
-        if group_id:
-            concept_rows = self._query_all("SELECT DISTINCT concept_id FROM memories WHERE group_id=?", (group_id,))
-        else:
-            concept_rows = self._query_all("SELECT DISTINCT concept_id FROM memories WHERE group_id='' OR group_id IS NULL")
-        cids = {r[0] for r in concept_rows}
-        rows = self._query_all("SELECT id, from_concept, to_concept, strength, last_strengthened FROM connections")
-        result = [
-            {
-                "id": r[0],
-                "from_concept": r[1],
-                "to_concept": r[2],
-                "strength": r[3],
-                "last_strengthened": r[4],
-            }
-            for r in rows
-            if r[1] in cids and r[2] in cids
-        ]
+        await self._load_group(group_id)
+        valid_ids = {
+            e.id for e in self.ms.memory_graph.elements.values()
+            if not group_id or e.group_id == group_id
+        }
+        result = []
+        for conn in self.ms.memory_graph.connections:
+            if valid_ids and (conn.from_element not in valid_ids or conn.to_element not in valid_ids):
+                continue
+            result.append({
+                "id": conn.id,
+                "from_element": conn.from_element,
+                "to_element": conn.to_element,
+                "from_concept": conn.from_element,  # 前端兼容字段
+                "to_concept": conn.to_element,
+                "strength": conn.strength,
+                "last_strengthened": conn.last_strengthened,
+            })
         return web.json_response({"connections": result})
 
     async def api_create_connection(self, request: web.Request):
         body = await request.json()
         group_id = (body.get("group_id") or "").strip()
-        from_c = body.get("from_concept")
-        to_c = body.get("to_concept")
+        from_e = body.get("from_element") or body.get("from_concept")
+        to_e = body.get("to_element") or body.get("to_concept")
         strength = float(body.get("strength") or 1.0)
-        if not from_c or not to_c:
-            return web.json_response({"error": "from_concept and to_concept required"}, status=400)
+        if not from_e or not to_e:
+            return web.json_response({"error": "from_element and to_element required"}, status=400)
         await self._load_group(group_id)
-        cid = self.ms.memory_graph.add_connection(str(from_c), str(to_c), strength=strength)
+        cid = self.ms.memory_graph.add_connection(str(from_e), str(to_e), strength=strength)
         await self.ms._queue_save_memory_state(group_id)
         return web.json_response({"id": cid})
 
@@ -537,16 +534,14 @@ class MemoryWebServer:
                 return web.json_response({"summary": summary, "memories": memories})
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)
-        # 列出当前群的所有 Imprint 概念
-        if group_id:
-            like_prefix = f"Imprint:{group_id}:"
-        else:
-            like_prefix = "Imprint::"  # 私聊/全局
-        rows = self._query_all("SELECT id, name FROM concepts WHERE name LIKE ?", (f"{like_prefix}%",))
+        await self._load_group(group_id)
         people = []
-        for r in rows:
-            name = r[1].split(":")[-1]
-            people.append({"concept_id": r[0], "name": name})
+        for elem in self.ms.memory_graph.elements.values():
+            if elem.category != "person":
+                continue
+            if group_id and elem.group_id != group_id:
+                continue
+            people.append({"element_id": elem.id, "name": elem.name})
         return web.json_response({"people": people})
 
     async def api_create_impression(self, request: web.Request):
