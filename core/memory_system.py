@@ -954,10 +954,10 @@ class MemorySystem:
             old_memories = cursor.fetchall()
             for mem_data in old_memories:
                 memory_id = mem_data[0]
-                concept_id = mem_data[1] if len(mem_data) > 14 else ""
-                participants = mem_data[4] if len(mem_data) > 14 else ""
-                location = mem_data[5] if len(mem_data) > 14 else ""
-                tags = mem_data[7] if len(mem_data) > 14 else ""
+                concept_id = mem_data[1]
+                participants = mem_data[4]
+                location = mem_data[5]
+                tags = mem_data[7]
 
                 elem_ids = concept_to_elements.get(concept_id, [])
 
@@ -1004,6 +1004,30 @@ class MemorySystem:
                             )
                         cursor.execute(
                             "INSERT OR IGNORE INTO element_memories (element_id, memory_id, role) VALUES (?, ?, 'scene')",
+                            (eid, memory_id),
+                        )
+
+                if tags:
+                    for tag in tags.replace("，", ",").split(","):
+                        tag = tag.strip()
+                        if not tag:
+                            continue
+                        category = self._infer_category(tag)
+                        cursor.execute(
+                            "SELECT id FROM elements WHERE name = ? AND category = ?",
+                            (tag, category),
+                        )
+                        existing = cursor.fetchone()
+                        if existing:
+                            eid = existing[0]
+                        else:
+                            eid = f"elem_{int(time.time() * 1000)}_{hash(tag) % 10000}"
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO elements (id, name, category, group_id, created_at, last_accessed, access_count) VALUES (?, ?, ?, '', ?, ?, 0)",
+                                (eid, tag, category, time.time(), time.time()),
+                            )
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO element_memories (element_id, memory_id, role) VALUES (?, ?, 'tag')",
                             (eid, memory_id),
                         )
 
