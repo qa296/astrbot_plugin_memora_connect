@@ -1346,6 +1346,70 @@ def test_topic_analyzer_builds_prompts_parses_results_and_generates_products():
     asyncio.run(_exercise_topic_analyzer())
 
 
+async def _exercise_topic_analyzer_force_complete():
+    """会话达到 max_session_rounds 仍被LLM标记为 ongoing 时，应被系统强制完成。"""
+    result_json = """
+    {
+      "sessions": [
+        {
+          "session_id": "new_1",
+          "topic": "Never ending chat",
+          "new_message_indices": [0, 1],
+          "status": "ongoing",
+          "keywords": "tea",
+          "subtext": "friendly",
+          "emotion": "calm",
+          "participants": "Alice",
+          "summary": null,
+          "memory": {
+            "content": "Alice keeps talking",
+            "details": "endless",
+            "emotion": "calm",
+            "confidence": 0.8
+          },
+          "elements": [],
+          "impression": null
+        }
+      ]
+    }
+    """
+    memory_system = _AnalyzerMemorySystem(result_json)
+    analyzer = topic_analyzer_module.TopicAnalyzer(memory_system)
+    # 把强制总结轮次压到1，第一轮分析后就应触发强制完成
+    memory_system.memory_config["max_session_rounds"] = 1
+
+    await analyzer.add_message("hello", "u1", "Alice", "group-force")
+    await analyzer.add_message("more tea?", "u1", "Alice", "group-force")
+
+    # 会话被LLM标记为 ongoing，但因达到轮次上限应被强制移入 completed
+    assert analyzer.get_active_sessions("group-force") == []
+    completed = analyzer.get_completed_sessions("group-force")
+    assert len(completed) == 1
+    assert completed[0]["topic"] == "Never ending chat"
+    # 轮次跟踪已随会话一并清理
+    assert "session_0001" not in analyzer._session_rounds.get("group-force", {})
+
+    # 把限制设为0等于关闭，会话应保持 ongoing
+    memory_system_off = _AnalyzerMemorySystem(result_json)
+    analyzer_off = topic_analyzer_module.TopicAnalyzer(memory_system_off)
+    memory_system_off.memory_config["max_session_rounds"] = 0
+    await analyzer_off.add_message("hello", "u1", "Alice", "group-off")
+    await analyzer_off.add_message("more tea?", "u1", "Alice", "group-off")
+    assert len(analyzer_off.get_active_sessions("group-off")) == 1
+    assert analyzer_off.get_completed_sessions("group-off") == []
+
+    # prompt 在开启限制时应包含轮次提示
+    prompt = analyzer._build_prompt(
+        [{"sender_name": "Alice", "content": "tea", "time_str": "now"}],
+        "group-force",
+    )
+    assert "硬性轮次上限" in prompt
+
+
+def test_topic_analyzer_force_completes_overspent_sessions():
+    asyncio.run(_exercise_topic_analyzer_force_complete())
+
+
 async def _exercise_gateway_decorators_and_error_paths():
     monitor = gateway_module.PerformanceMonitor()
     for i in range(101):

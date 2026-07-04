@@ -59,6 +59,10 @@ class TopicAnalyzer:
         # 会话ID计数器
         self._session_counter: int = 0
 
+        # 会话轮次跟踪：{group_id: {session_id: round_count}}
+        # 每轮分析时，仍为 ongoing 的会话轮次 +1，超限则强制完成
+        self._session_rounds: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
 
     def _get_config_value(self, key: str, default):
         """从配置中获取值"""
@@ -76,6 +80,11 @@ class TopicAnalyzer:
     @property
     def max_completed_sessions(self) -> int:
         return self._get_config_value("recent_completed_sessions_count", 5)
+
+    @property
+    def max_session_rounds(self) -> int:
+        """会话强制总结轮次：达到该轮次后强制完成，0 表示不限制"""
+        return int(self._get_config_value("max_session_rounds", 5))
 
     def _next_session_id(self) -> str:
         self._session_counter += 1
@@ -245,7 +254,17 @@ class TopicAnalyzer:
             parts.append("\n记忆生成的人格约束:")
             parts.append(persona_injection)
 
-        parts.append("""
+        max_rounds = self.max_session_rounds
+        round_hint = ""
+        if max_rounds > 0:
+            round_hint = (
+                f"\n注意：会话存在硬性轮次上限（{max_rounds}轮），"
+                "达到上限仍未结束的会话将被系统强制总结完成。"
+                "请在临近上限或话题自然收束时主动将status标为completed并生成summary。"
+            )
+
+        parts.append(
+            """
 请分析以上新消息，将其分配到合适的会话中。
 
 要求：
@@ -256,7 +275,9 @@ class TopicAnalyzer:
 5. 为每个会话生成记忆内容
 6. 从对话中提取记忆元素，类型只能是：person(人物)、object(物品)、place(场所)、action(行为)、trait(特征)
 7. 如果涉及对人物的评价或互动，生成印象
-8. 对completed的会话生成摘要
+8. 对completed的会话生成摘要"""
+            + round_hint
+            + """
 
 返回JSON格式：
 {
@@ -298,7 +319,8 @@ class TopicAnalyzer:
 - new_message_indices中的数字对应新消息的序号
 - 每条新消息必须被分配到某个会话中
 - 只返回JSON，不要其他内容
-""")
+"""
+        )
         return "\n".join(parts)
 
     def _parse_response(self, raw_text: str) -> dict | None:
@@ -338,6 +360,9 @@ class TopicAnalyzer:
     async def _process_result(self, result: dict, messages: list[dict], group_id: str):
         """处理LLM分析结果，更新会话状态并生成衍生产物"""
         sessions_data = result.get("sessions", [])
+
+        # 记录本轮被LLM显式处理过的会话ID（用于区分"被延续"与"未被提及"）
+        touched_session_ids: set[str] = set()
 
         for s_data in sessions_data:
             try:
@@ -382,6 +407,9 @@ class TopicAnalyzer:
                         summary=str(summary) if summary else None,
                     )
                     self._active_sessions[group_id][real_id] = session
+                    # 新建会话本轮即计入1轮
+                    self._session_rounds[group_id][real_id] = 1
+                    touched_session_ids.add(real_id)
                     logger.info(f"创建新会话: {real_id}, 话题: {topic}")
                 else:
                     # 延续已有会话
@@ -413,6 +441,9 @@ class TopicAnalyzer:
                         session.participants = list(set(session.participants + new_p))
                     if summary:
                         session.summary = str(summary)
+                    # 延续会话轮次 +1
+                    self._session_rounds[group_id][session_id] += 1
+                    touched_session_ids.add(session_id)
                     logger.debug(f"更新会话: {session_id}, 话题: {topic}")
 
                 # 生成衍生产物
@@ -431,6 +462,7 @@ class TopicAnalyzer:
                     sid = real_id if is_new else session_id
                     completed_session = self._active_sessions[group_id].pop(sid, None)
                     if completed_session:
+                        self._session_rounds[group_id].pop(sid, None)
                         self._completed_sessions[group_id].append(completed_session)
                         # 限制已完成会话数量
                         max_count = self.max_completed_sessions * 2
@@ -444,8 +476,58 @@ class TopicAnalyzer:
                 logger.error(f"处理会话数据失败: {e}", exc_info=True)
                 continue
 
+        # 强制总结：未被LLM标记为completed、且已达轮次上限的会话强制完成
+        await self._force_complete_overspent_sessions(group_id, touched_session_ids)
+
         # 保存记忆状态
         await self.memory_system._queue_save_memory_state(group_id)
+
+    async def _force_complete_overspent_sessions(
+        self, group_id: str, touched_session_ids: set[str]
+    ):
+        """对达到轮次上限仍未完成的会话强制标记为completed并补生成摘要。
+
+        Args:
+            group_id: 群组/会话ID
+            touched_session_ids: 本轮被LLM显式处理过的会话ID集合，
+                这些会话的轮次已经在 _process_result 主循环中累加。
+        """
+        limit = self.max_session_rounds
+        if limit <= 0:
+            return
+
+        active = self._active_sessions.get(group_id, {})
+        # 复制key，避免迭代时修改
+        for sid in list(active.keys()):
+            rounds = self._session_rounds[group_id].get(sid, 0)
+            if rounds < limit:
+                continue
+
+            session = active.get(sid)
+            if not session:
+                self._session_rounds[group_id].pop(sid, None)
+                continue
+
+            if session.status != "completed":
+                session.status = "completed"
+                if not session.summary:
+                    session.summary = (
+                        f"会话已达强制总结轮次({limit}轮)，自动完成。"
+                        f"话题：{session.topic}"
+                    )
+                logger.info(
+                    f"会话强制完成: {sid}, 话题: {session.topic}, 轮次: {rounds}"
+                )
+
+            completed_session = active.pop(sid, None)
+            if completed_session:
+                self._session_rounds[group_id].pop(sid, None)
+                self._completed_sessions[group_id].append(completed_session)
+                max_count = self.max_completed_sessions * 2
+                if len(self._completed_sessions[group_id]) > max_count:
+                    self._completed_sessions[group_id] = (
+                        self._completed_sessions[group_id][-max_count:]
+                    )
 
     async def _generate_products(self, s_data: dict, session: Session, group_id: str):
         """生成衍生产物：记忆和印象"""

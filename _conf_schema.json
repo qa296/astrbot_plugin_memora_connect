@@ -91,6 +91,12 @@
     "hint": "是否在话题分析/记忆生成阶段注入当前会话人格设定",
     "default": true
   },
+  "max_session_rounds": {
+    "description": "会话强制总结轮次",
+    "type": "int",
+    "hint": "会话经历多少轮分析后强制完成（防止模型一直标ongoing不总结），0=不限制",
+    "default": 5
+  },
   "exclude_keywords": {
     "description": "排除关键词列表",
     "type": "list",
