@@ -100,7 +100,7 @@ class EnhancedMemoryRecall:
                 return []
 
             # 检查当前回忆模式，如果不是embedding模式，直接返回空列表
-            if self.memory_system.memory_config["recall_mode"] not in ["embedding"]:
+            if self.memory_system.memory_config.get("recall_mode", "simple") not in ["embedding"]:
                 logger.debug("语义召回跳过：当前不是embedding模式")
                 return []
 

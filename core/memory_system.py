@@ -1405,18 +1405,18 @@ class MemorySystem:
         while True:
             try:
                 consolidation_interval = (
-                    self.memory_config["consolidation_interval_hours"] * 3600
+                    self.memory_config.get("consolidation_interval_hours", 24) * 3600
                 )
                 await asyncio.sleep(consolidation_interval)  # 按配置间隔检查
 
                 maintenance_actions = []
 
                 # 处理默认数据库（私有对话）
-                if self.memory_config["enable_forgetting"]:
+                if self.memory_config.get("enable_forgetting", True):
                     await self.forget_memories()
                     maintenance_actions.append("遗忘")
 
-                if self.memory_config["enable_consolidation"]:
+                if self.memory_config.get("enable_consolidation", False):
                     await self.consolidate_memories()
                     maintenance_actions.append("整理")
 
@@ -1443,10 +1443,10 @@ class MemorySystem:
                             self.load_memory_state(group_id)
 
                             # 执行群聊的维护操作
-                            if self.memory_config["enable_forgetting"]:
+                            if self.memory_config.get("enable_forgetting", True):
                                 await self.forget_memories()
 
-                            if self.memory_config["enable_consolidation"]:
+                            if self.memory_config.get("enable_consolidation", False):
                                 await self.consolidate_memories()
 
                             # 保存群聊数据库
@@ -1472,7 +1472,7 @@ class MemorySystem:
     async def forget_memories(self):
         """遗忘机制"""
         current_time = time.time()
-        forget_threshold = self.memory_config["forget_threshold_days"] * 24 * 3600
+        forget_threshold = self.memory_config.get("forget_threshold_days", 30) * 24 * 3600
 
         # 降低连接强度
         connections_to_remove = []
@@ -1528,11 +1528,11 @@ class MemorySystem:
             "concepts": len(self.memory_graph.concepts),
             "memories": len(self.memory_graph.memories),
             "connections": len(self.memory_graph.connections),
-            "recall_mode": self.memory_config["recall_mode"],
-            "llm_provider": self.memory_config["llm_provider"],
-            "embedding_provider": self.memory_config["embedding_provider"],
-            "enable_forgetting": self.memory_config["enable_forgetting"],
-            "enable_consolidation": self.memory_config["enable_consolidation"],
+            "recall_mode": self.memory_config.get("recall_mode", "simple"),
+            "llm_provider": self.memory_config.get("llm_provider", ""),
+            "embedding_provider": self.memory_config.get("embedding_provider", ""),
+            "enable_forgetting": self.memory_config.get("enable_forgetting", True),
+            "enable_consolidation": self.memory_config.get("enable_consolidation", False),
         }
 
     def _parse_allow_forget_value(
@@ -1668,7 +1668,7 @@ class MemorySystem:
             return self._embedding_provider_cache
 
         try:
-            provider_id = self.memory_config["embedding_provider"]
+            provider_id = self.memory_config.get("embedding_provider", "")
 
             # 获取所有已注册的嵌入提供商
             if hasattr(self.context, "get_all_embedding_providers"):
@@ -1728,7 +1728,7 @@ class MemorySystem:
         self._embedding_in_progress = True
         try:
             # 检查当前回忆模式，如果不是embedding模式，直接返回空列表，避免不必要的嵌入计算
-            if self.memory_config["recall_mode"] not in ["embedding"]:
+            if self.memory_config.get("recall_mode", "simple") not in ["embedding"]:
                 return []
 
             # 如果启用了嵌入向量缓存，尝试从缓存获取
