@@ -280,7 +280,7 @@ class MemoryWebServer:
         return web.json_response({"groups": groups})
 
     async def api_graph(self, request: web.Request):
-        from .memory.visualization import MemoryGraphVisualizer
+        from ..memory.visualization import MemoryGraphVisualizer
         group_id = request.query.get("group_id", "")
         layout = request.query.get("layout", "auto")
         try:
