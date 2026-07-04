@@ -54,8 +54,12 @@ LLM 也会自动调用 `create_memory`、`recall_memory`、`adjust_impression` �
 
 ---
 
-<div align="center">
+**⭐ 如果这个项目对您有帮助，请考虑给我们一个 Star！**
 
-**[GitHub](https://github.com/qa296/astrbot_plugin_memora_connect)** · 如有帮助请给 ⭐
+![Star History](https://img.shields.io/github/stars/qa296/astrbot_plugin_memora_connect?style=social)
 
 </div>
+
+## QQ群
+因为作者并不经常看issue，所以可以通过QQ群来提醒我！
+群号：1098607348
