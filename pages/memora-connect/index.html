@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Memora Connect</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="./style.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <script src="https://unpkg.com/cytoscape@3.26.0/dist/cytoscape.min.js"></script>
 </head>
@@ -16,7 +16,7 @@
         <div class="brand-icon"></div>
         <span>Memora Connect</span>
       </div>
-      
+
       <div class="search-bar">
         <i class="fa-solid fa-search search-icon"></i>
         <input type="text" id="globalSearch" placeholder="搜索记忆、概念、人物...">
@@ -25,7 +25,6 @@
       <div class="header-controls">
         <select id="groupSelect" style="width: 150px;"></select>
         <button id="refreshBtn" class="icon-btn"><i class="fa-solid fa-sync"></i></button>
-        <button id="settingsBtn" class="icon-btn"><i class="fa-solid fa-cog"></i></button>
       </div>
     </header>
 
@@ -63,7 +62,7 @@
     <!-- Main Content -->
     <main class="app-main">
       <div id="graph"></div>
-      
+
       <!-- Context Menu -->
       <div id="contextMenu" class="context-menu"></div>
     </main>
@@ -83,15 +82,6 @@
     </div>
   </div>
 
-  <!-- Settings Modal (hidden by default, maybe reuse panel or create modal) -->
-  <dialog id="settingsDialog" style="padding: 20px; border-radius: 12px; border: 1px solid #ccc;">
-    <h3>设置</h3>
-    <label>访问令牌: <input type="password" id="tokenInput" class="full-width mt-2"></label>
-    <div class="mt-2 flex-row" style="justify-content: flex-end;">
-      <button id="saveSettingsBtn">保存</button>
-    </div>
-  </dialog>
-
-  <script src="/static/app.js"></script>
+  <script src="./app.js"></script>
 </body>
 </html>

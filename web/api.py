@@ -1,147 +1,94 @@
-import os
-import json
-import asyncio
-import sqlite3
-from typing import Any, Dict, List, Optional
+"""
+Memora Connect Plugin Page 后端 API。
 
-try:
-    from aiohttp import web
-except Exception:  # pragma: no cover
-    web = None
+通过 AstrBot Dashboard 的 Plugin Pages 机制暴露记忆管理 REST API。
+前端位于 pages/memora-connect/，使用 window.AstrBotPluginPage bridge SDK 调用，
+鉴权由 Dashboard 接管，无需插件自管 token/CORS/端口。
+"""
+
+import sqlite3
+from typing import Any, List
 
 try:
     from astrbot.api import logger
-except Exception:  # pragma: no cover
+    from astrbot.api.star import Context
+except ImportError:  # 测试环境降级
     import logging
+
     logger = logging.getLogger(__name__)
+    Context = None
+
+try:
+    from quart import jsonify, request
+except ImportError:  # pragma: no cover - AstrBot 运行时一定有 quart
+    jsonify = None
+    request = None
 
 from ..infrastructure.resources import resource_manager
-from .assets import DEFAULT_INDEX_HTML, DEFAULT_STYLE_CSS, DEFAULT_APP_JS
+
+PLUGIN_NAME = "astrbot_plugin_memora_connect"
 
 
-class MemoryWebServer:
+class MemoryWebAPI:
+    """注册到 AstrBot Dashboard 的 Plugin Page 后端 API。
+
+    所有路由以 ``/<PLUGIN_NAME>/`` 为前缀，Dashboard 会把
+    ``/api/plug/<PLUGIN_NAME>/<endpoint>`` 转发到对应 handler。
+    bridge SDK 的 ``apiGet``/``apiPost`` 只支持 GET/POST，
+    因此 PUT/DELETE 操作统一改写为 POST，动作编码进路径
+    （如 ``concepts/delete``、``memories/update``）。
     """
-    轻量级 Web 服务，用于浏览与管理记忆图谱。
-    提供 REST API + 简单静态页面。可通过配置启用/关闭与端口设置。
-    """
 
-    def __init__(self, memory_system: Any, host: str = "127.0.0.1", port: int = 8350, access_token: str = "") -> None:
-        if web is None:
-            raise RuntimeError("aiohttp 不可用，无法启动 Web 服务")
+    def __init__(self, memory_system: Any, context: "Context") -> None:
         self.ms = memory_system
-        self.host = host
-        self.port = int(port)
-        self.access_token = access_token or ""
+        self.context = context
 
-        self._app = web.Application(middlewares=[self._cors_middleware, self._auth_middleware])
-        self._runner: Optional[web.AppRunner] = None
-        self._site: Optional[web.BaseSite] = None
+    # ------------------------------------------------------------------
+    # 注册
+    # ------------------------------------------------------------------
+    def register(self) -> None:
+        """向 Dashboard 注册全部 Web API 路由。"""
+        c = self.context
+        prefix = f"/{PLUGIN_NAME}"
 
-        self._setup_routes()
+        # 状态与图
+        c.register_web_api(f"{prefix}/status", self.api_status, ["GET"], "记忆系统状态")
+        c.register_web_api(f"{prefix}/groups", self.api_groups, ["GET"], "分组列表")
+        c.register_web_api(f"{prefix}/graph", self.api_graph, ["GET"], "记忆图谱数据")
 
-    # ---------------------- lifecycle ----------------------
-    async def start(self):
-        self._ensure_db_schema()
-        self._runner = web.AppRunner(self._app)
-        await self._runner.setup()
-        self._site = web.TCPSite(self._runner, self.host, self.port)
-        await self._site.start()
-        logger.info(f"Memora Web 已启动: http://{self.host}:{self.port}")
+        # 概念/元素
+        c.register_web_api(f"{prefix}/concepts", self.api_concepts, ["GET"], "概念列表")
+        c.register_web_api(f"{prefix}/concepts/create", self.api_create_concept, ["POST"], "创建概念")
+        c.register_web_api(f"{prefix}/concepts/update", self.api_update_concept, ["POST"], "更新概念")
+        c.register_web_api(f"{prefix}/concepts/delete", self.api_delete_concept, ["POST"], "删除概念")
 
-    async def stop(self):
-        try:
-            if self._runner:
-                await self._runner.cleanup()
-                logger.info("Memora Web 已停止")
-        finally:
-            self._runner = None
-            self._site = None
+        # 记忆
+        c.register_web_api(f"{prefix}/memories", self.api_memories, ["GET"], "记忆列表/搜索")
+        c.register_web_api(f"{prefix}/memories/create", self.api_create_memory, ["POST"], "创建记忆")
+        c.register_web_api(f"{prefix}/memories/update", self.api_update_memory, ["POST"], "更新记忆")
+        c.register_web_api(f"{prefix}/memories/delete", self.api_delete_memory, ["POST"], "删除记忆")
 
-    # ---------------------- middlewares ----------------------
-    @web.middleware
-    async def _cors_middleware(self, request: web.Request, handler):
-        if request.method == "OPTIONS":
-            resp = web.Response(status=204)
-        else:
-            resp = await handler(request)
-        # CORS headers
-        resp.headers["Access-Control-Allow-Origin"] = request.headers.get("Origin", "*")
-        resp.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "*, X-Requested-With, Content-Type, Authorization, x-access-token"
-        resp.headers["Access-Control-Allow-Credentials"] = "true"
-        return resp
+        # 连接
+        c.register_web_api(f"{prefix}/connections", self.api_connections, ["GET"], "连接列表")
+        c.register_web_api(f"{prefix}/connections/create", self.api_create_connection, ["POST"], "创建连接")
+        c.register_web_api(f"{prefix}/connections/update", self.api_update_connection, ["POST"], "更新连接")
+        c.register_web_api(f"{prefix}/connections/delete", self.api_delete_connection, ["POST"], "删除连接")
 
-    @web.middleware
-    async def _auth_middleware(self, request: web.Request, handler):
-        # 如果设置了访问令牌，仅保护 /api 前缀
-        if self.access_token and request.path.startswith("/api/"):
-            token = request.headers.get("x-access-token") or request.query.get("token")
-            if token != self.access_token:
-                return web.json_response({"error": "unauthorized"}, status=401)
-        return await handler(request)
+        # 印象
+        c.register_web_api(f"{prefix}/impressions", self.api_impressions, ["GET"], "印象列表")
+        c.register_web_api(f"{prefix}/impressions/create", self.api_create_impression, ["POST"], "创建印象")
+        c.register_web_api(f"{prefix}/impressions/adjust", self.api_adjust_impression, ["POST"], "调整好感度")
 
-    # ---------------------- routes ----------------------
-    def _setup_routes(self) -> None:
-        # API
-        self._app.add_routes([
-            web.get("/api/status", self.api_status),
-            web.get("/api/groups", self.api_groups),
-            web.get("/api/graph", self.api_graph),
+        logger.info("Memora Plugin Page API 已注册到 Dashboard")
 
-            web.get("/api/concepts", self.api_concepts),
-            web.post("/api/concepts", self.api_create_concept),
-            web.put("/api/concepts/{concept_id}", self.api_update_concept),
-            web.delete("/api/concepts/{concept_id}", self.api_delete_concept),
-
-            web.get("/api/memories", self.api_memories),
-            web.post("/api/memories", self.api_create_memory),
-            web.put("/api/memories/{memory_id}", self.api_update_memory),
-            web.delete("/api/memories/{memory_id}", self.api_delete_memory),
-
-            web.get("/api/connections", self.api_connections),
-            web.post("/api/connections", self.api_create_connection),
-            web.put("/api/connections/{conn_id}", self.api_update_connection),
-            web.delete("/api/connections/{conn_id}", self.api_delete_connection),
-
-            web.get("/api/impressions", self.api_impressions),
-            web.post("/api/impressions", self.api_create_impression),
-            web.put("/api/impressions/{person}/score", self.api_update_impression_score),
-        ])
-
-        # 静态文件
-        static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui")
-        self._static_dir = static_dir
-        if not os.path.exists(static_dir):
-            os.makedirs(static_dir, exist_ok=True)
-        # 确保在缺失前端文件时自动写入一份默认的 Web 资源
-        self._ensure_default_static_files()
-        self._app.router.add_get("/", self.handle_index)
-        self._app.router.add_static("/static/", static_dir, show_index=True)
-
-    # ---------------------- helpers ----------------------
-    def _ensure_default_static_files(self) -> None:
-        """在 webui 目录缺失前端文件时，自动写入一份内置的默认页面与脚本。"""
-        try:
-            index_path = os.path.join(self._static_dir, "index.html")
-            if not os.path.exists(index_path):
-                with open(index_path, "w", encoding="utf-8") as f:
-                    f.write(DEFAULT_INDEX_HTML)
-
-            style_path = os.path.join(self._static_dir, "style.css")
-            if not os.path.exists(style_path):
-                with open(style_path, "w", encoding="utf-8") as f:
-                    f.write(DEFAULT_STYLE_CSS)
-
-            app_path = os.path.join(self._static_dir, "app.js")
-            if not os.path.exists(app_path):
-                with open(app_path, "w", encoding="utf-8") as f:
-                    f.write(DEFAULT_APP_JS)
-        except Exception as e:
-            logger.warning(f"初始化 Memora Web 静态文件失败: {e}")
-
+    # ------------------------------------------------------------------
+    # 辅助方法（从 web/server.py 迁移，不依赖 aiohttp）
+    # ------------------------------------------------------------------
     async def _load_group(self, group_id: str) -> None:
-        # 在当前对象上加载/切换内存图数据
-        # 注意：此操作会替换内存中的图，和并发消息处理存在竞争，简单版本忽略。
+        """在当前对象上加载/切换内存图数据。
+
+        注意：此操作会替换内存中的图，和并发消息处理存在竞争，简单版本忽略。
+        """
         try:
             self.ms.memory_graph = self.ms.memory_graph.__class__()
             self.ms.load_memory_state(group_id or "")
@@ -254,48 +201,46 @@ class MemoryWebServer:
         finally:
             resource_manager.release_db_connection(self.ms.db_path, conn)
 
-    # ---------------------- handlers ----------------------
-    async def handle_index(self, request: web.Request):
-        index_path = os.path.join(self._static_dir, "index.html")
-        if os.path.exists(index_path):
-            return web.FileResponse(index_path)
-        return web.Response(text="Memora Web", content_type="text/plain")
-
-    async def api_status(self, request: web.Request):
-        cfg = self.ms.memory_config or {}
-        web_cfg = cfg.get("web_ui", {})
-        return web.json_response({
+    # ------------------------------------------------------------------
+    # 状态与图
+    # ------------------------------------------------------------------
+    async def api_status(self):
+        return jsonify({
             "memory_enabled": bool(getattr(self.ms, "memory_system_enabled", True)),
             "db_path": self.ms.db_path,
-            "web_enabled": bool(web_cfg.get("enabled", False)),
-            "host": request.host,
+            "web_enabled": True,
         })
 
-    async def api_groups(self, request: web.Request):
+    async def api_groups(self):
         rows = self._query_all("SELECT DISTINCT group_id FROM memories WHERE group_id IS NOT NULL")
         groups = sorted({(r[0] or "") for r in rows})
-        # 确保包含默认组(私聊/全局)
         if "" not in groups:
             groups = [""] + list(groups)
-        return web.json_response({"groups": groups})
+        return jsonify({"groups": groups})
 
-    async def api_graph(self, request: web.Request):
+    async def api_graph(self):
         from ..memory.visualization import MemoryGraphVisualizer
-        group_id = request.query.get("group_id", "")
-        layout = request.query.get("layout", "auto")
+        group_id = request.args.get("group_id", "")
         try:
-            # 直接复用可视化的数据准备逻辑
             viz = MemoryGraphVisualizer(self.ms)
-            data = await viz._prepare_graph_data(max_nodes=200, max_edges=800, edge_strength_threshold=0.01, group_id=group_id)
+            data = await viz._prepare_graph_data(
+                max_nodes=200,
+                max_edges=800,
+                edge_strength_threshold=0.01,
+                group_id=group_id,
+            )
             if data.get("error"):
-                return web.json_response({"error": data["error"]}, status=400)
-            return web.json_response(data)
+                return jsonify({"error": data["error"]}), 400
+            return jsonify(data)
         except Exception as e:
             logger.error(f"获取图数据失败: {e}")
-            return web.json_response({"error": str(e)}, status=500)
+            return jsonify({"error": str(e)}), 500
 
-    async def api_concepts(self, request: web.Request):
-        group_id = request.query.get("group_id", "")
+    # ------------------------------------------------------------------
+    # 概念/元素
+    # ------------------------------------------------------------------
+    async def api_concepts(self):
+        group_id = request.args.get("group_id", "")
         await self._load_group(group_id)
         elements = []
         for elem in self.ms.memory_graph.elements.values():
@@ -308,61 +253,65 @@ class MemoryWebServer:
                 "access_count": elem.access_count,
             })
         elements.sort(key=lambda e: (e["category"], e["name"]))
-        return web.json_response({"concepts": elements})
+        return jsonify({"concepts": elements})
 
-    async def api_create_concept(self, request: web.Request):
-        body = await request.json()
+    async def api_create_concept(self):
+        body = await request.get_json()
         name = (body.get("name") or "").strip()
         group_id = (body.get("group_id") or "").strip()
         category = (body.get("category") or "trait").strip()
         if not name:
-            return web.json_response({"error": "name required"}, status=400)
+            return jsonify({"error": "name required"}), 400
         from ..core.models import CATEGORIES
         if category not in CATEGORIES:
             category = "trait"
         await self._load_group(group_id)
         eid = self.ms.memory_graph.get_or_create_element(name, category, group_id)
         await self.ms._queue_save_memory_state(group_id)
-        return web.json_response({"id": eid, "name": name, "category": category})
+        return jsonify({"id": eid, "name": name, "category": category})
 
-    async def api_update_concept(self, request: web.Request):
-        element_id = request.match_info.get("concept_id")
-        body = await request.json()
+    async def api_update_concept(self):
+        body = await request.get_json()
+        element_id = body.get("id")
         new_name = (body.get("name") or "").strip()
         group_id = (body.get("group_id") or "").strip()
         if not new_name:
-            return web.json_response({"error": "name required"}, status=400)
+            return jsonify({"error": "name required"}), 400
         await self._load_group(group_id)
         elem = self.ms.memory_graph.elements.get(element_id)
         if elem:
             elem.name = new_name
             await self.ms._queue_save_memory_state(group_id)
-            return web.json_response({"ok": True})
-        return web.json_response({"error": "element not found"}, status=404)
+            return jsonify({"ok": True})
+        return jsonify({"error": "element not found"}), 404
 
-    async def api_delete_concept(self, request: web.Request):
-        element_id = request.match_info.get("concept_id")
-        group_id = request.query.get("group_id", "")
+    async def api_delete_concept(self):
+        body = await request.get_json()
+        element_id = body.get("id")
+        group_id = (body.get("group_id") or "").strip()
         await self._load_group(group_id)
         if element_id in self.ms.memory_graph.elements:
             self.ms.memory_graph.remove_element(element_id)
             await self.ms._queue_save_memory_state(group_id)
-            return web.json_response({"ok": True})
-        return web.json_response({"error": "not found"}, status=404)
+            return jsonify({"ok": True})
+        return jsonify({"error": "not found"}), 404
 
-    async def api_memories(self, request: web.Request):
-        group_id = request.query.get("group_id", "")
-        element_id = request.query.get("concept_id") or request.query.get("element_id")
-        q = request.query.get("q")
-        person = request.query.get("person")
+    # ------------------------------------------------------------------
+    # 记忆
+    # ------------------------------------------------------------------
+    async def api_memories(self):
+        group_id = request.args.get("group_id", "")
+        element_id = request.args.get("element_id") or request.args.get("concept_id")
+        q = request.args.get("q")
+        person = request.args.get("person")
 
         if person:
             try:
                 summary = self.ms.get_person_impression_summary(group_id, person)
                 memories = self.ms.get_person_impression_memories(group_id, person, limit=50)
-                return web.json_response({"summary": summary, "memories": memories})
+                return jsonify({"summary": summary, "memories": memories})
             except Exception as e:
-                return web.json_response({"error": str(e)}, status=500)
+                return jsonify({"error": str(e)}), 500
 
         await self._load_group(group_id)
         if q:
@@ -398,15 +347,15 @@ class MemoryWebServer:
                 "elements": elements,
                 "element_id": elements[0]["id"] if elements else "",
             })
-        return web.json_response({"memories": data})
+        return jsonify({"memories": data})
 
-    async def api_create_memory(self, request: web.Request):
-        body = await request.json()
+    async def api_create_memory(self):
+        body = await request.get_json()
         group_id = (body.get("group_id") or "").strip()
         element_name = (body.get("concept_name") or body.get("element_name") or "").strip()
         content = (body.get("content") or "").strip()
         if not content:
-            return web.json_response({"error": "content required"}, status=400)
+            return jsonify({"error": "content required"}), 400
         await self._load_group(group_id)
         mem_id = self.ms.memory_graph.add_memory(
             content=content,
@@ -438,11 +387,11 @@ class MemoryWebServer:
                         self.ms.memory_graph.link_memory(eid, mem_id, "")
 
         await self.ms._queue_save_memory_state(group_id)
-        return web.json_response({"id": mem_id})
+        return jsonify({"id": mem_id})
 
-    async def api_update_memory(self, request: web.Request):
-        memory_id = request.match_info.get("memory_id")
-        body = await request.json()
+    async def api_update_memory(self):
+        body = await request.get_json()
+        memory_id = body.get("id")
         group_id = (body.get("group_id") or "").strip()
         await self._load_group(group_id)
         ok = self.ms.memory_graph.update_memory(
@@ -453,22 +402,26 @@ class MemoryWebServer:
             strength=float(body.get("strength")) if body.get("strength") is not None else None,
         )
         if not ok:
-            return web.json_response({"error": "not found"}, status=404)
+            return jsonify({"error": "not found"}), 404
         await self.ms._queue_save_memory_state(group_id)
-        return web.json_response({"ok": True})
+        return jsonify({"ok": True})
 
-    async def api_delete_memory(self, request: web.Request):
-        memory_id = request.match_info.get("memory_id")
-        group_id = request.query.get("group_id", "")
+    async def api_delete_memory(self):
+        body = await request.get_json()
+        memory_id = body.get("id")
+        group_id = (body.get("group_id") or "").strip()
         await self._load_group(group_id)
         ok = await self.ms.delete_memory_by_id(memory_id, group_id)
         if ok:
             await self.ms._queue_save_memory_state(group_id)
-            return web.json_response({"ok": True})
-        return web.json_response({"error": "not found"}, status=404)
+            return jsonify({"ok": True})
+        return jsonify({"error": "not found"}), 404
 
-    async def api_connections(self, request: web.Request):
-        group_id = request.query.get("group_id", "")
+    # ------------------------------------------------------------------
+    # 连接
+    # ------------------------------------------------------------------
+    async def api_connections(self):
+        group_id = request.args.get("group_id", "")
         await self._load_group(group_id)
         valid_ids = {
             e.id for e in self.ms.memory_graph.elements.values()
@@ -487,53 +440,57 @@ class MemoryWebServer:
                 "strength": conn.strength,
                 "last_strengthened": conn.last_strengthened,
             })
-        return web.json_response({"connections": result})
+        return jsonify({"connections": result})
 
-    async def api_create_connection(self, request: web.Request):
-        body = await request.json()
+    async def api_create_connection(self):
+        body = await request.get_json()
         group_id = (body.get("group_id") or "").strip()
         from_e = body.get("from_element") or body.get("from_concept")
         to_e = body.get("to_element") or body.get("to_concept")
         strength = float(body.get("strength") or 1.0)
         if not from_e or not to_e:
-            return web.json_response({"error": "from_element and to_element required"}, status=400)
+            return jsonify({"error": "from_element and to_element required"}), 400
         await self._load_group(group_id)
         cid = self.ms.memory_graph.add_connection(str(from_e), str(to_e), strength=strength)
         await self.ms._queue_save_memory_state(group_id)
-        return web.json_response({"id": cid})
+        return jsonify({"id": cid})
 
-    async def api_update_connection(self, request: web.Request):
-        conn_id = request.match_info.get("conn_id")
-        body = await request.json()
+    async def api_update_connection(self):
+        body = await request.get_json()
+        conn_id = body.get("id")
         group_id = (body.get("group_id") or "").strip()
         strength = body.get("strength")
         if strength is None:
-            return web.json_response({"error": "strength required"}, status=400)
+            return jsonify({"error": "strength required"}), 400
         await self._load_group(group_id)
         ok = self.ms.memory_graph.set_connection_strength(conn_id, float(strength))
         if not ok:
-            return web.json_response({"error": "not found"}, status=404)
+            return jsonify({"error": "not found"}), 404
         await self.ms._queue_save_memory_state(group_id)
-        return web.json_response({"ok": True})
+        return jsonify({"ok": True})
 
-    async def api_delete_connection(self, request: web.Request):
-        conn_id = request.match_info.get("conn_id")
-        group_id = request.query.get("group_id", "")
+    async def api_delete_connection(self):
+        body = await request.get_json()
+        conn_id = body.get("id")
+        group_id = (body.get("group_id") or "").strip()
         await self._load_group(group_id)
         self.ms.memory_graph.remove_connection(conn_id)
         await self.ms._queue_save_memory_state(group_id)
-        return web.json_response({"ok": True})
+        return jsonify({"ok": True})
 
-    async def api_impressions(self, request: web.Request):
-        group_id = request.query.get("group_id", "")
-        person = request.query.get("person")
+    # ------------------------------------------------------------------
+    # 印象
+    # ------------------------------------------------------------------
+    async def api_impressions(self):
+        group_id = request.args.get("group_id", "")
+        person = request.args.get("person")
         if person:
             try:
                 summary = self.ms.get_person_impression_summary(group_id, person)
                 memories = self.ms.get_person_impression_memories(group_id, person, limit=50)
-                return web.json_response({"summary": summary, "memories": memories})
+                return jsonify({"summary": summary, "memories": memories})
             except Exception as e:
-                return web.json_response({"error": str(e)}, status=500)
+                return jsonify({"error": str(e)}), 500
         await self._load_group(group_id)
         people = []
         for elem in self.ms.memory_graph.elements.values():
@@ -542,33 +499,33 @@ class MemoryWebServer:
             if group_id and elem.group_id != group_id:
                 continue
             people.append({"element_id": elem.id, "name": elem.name})
-        return web.json_response({"people": people})
+        return jsonify({"people": people})
 
-    async def api_create_impression(self, request: web.Request):
-        body = await request.json()
+    async def api_create_impression(self):
+        body = await request.get_json()
         group_id = (body.get("group_id") or "").strip()
         person = (body.get("person") or "").strip()
         summary = (body.get("summary") or "").strip()
         score = body.get("score")
         details = (body.get("details") or "").strip()
         if not person or not summary:
-            return web.json_response({"error": "person and summary required"}, status=400)
+            return jsonify({"error": "person and summary required"}), 400
         try:
             score_val = float(score) if score is not None else None
         except Exception:
             score_val = None
         _id = self.ms.record_person_impression(group_id, person, summary, score_val, details)
         await self.ms._queue_save_memory_state(group_id)
-        return web.json_response({"id": _id, "ok": True})
+        return jsonify({"id": _id, "ok": True})
 
-    async def api_update_impression_score(self, request: web.Request):
-        body = await request.json()
+    async def api_adjust_impression(self):
+        body = await request.get_json()
         group_id = (body.get("group_id") or "").strip()
-        person = request.match_info.get("person")
+        person = body.get("person")
         delta = body.get("delta")
         try:
             new_score = self.ms.adjust_impression_score(group_id, person, float(delta))
             await self.ms._queue_save_memory_state(group_id)
-            return web.json_response({"score": new_score})
+            return jsonify({"score": new_score})
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=400)
+            return jsonify({"error": str(e)}), 400

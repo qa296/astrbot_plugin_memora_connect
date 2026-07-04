@@ -1,514 +1,45 @@
-"""默认的 Memora Web 前端静态资源。
 
-当插件在打包或部署时遗漏了 webui 目录中的文件时，
-web_server 会使用这里的内容在运行目录下自动生成
-index.html、style.css 和 app.js，以保证 Web 管理界面可用。
-"""
-
-DEFAULT_INDEX_HTML = r"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Memora Connect</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-  <script src="https://unpkg.com/cytoscape@3.26.0/dist/cytoscape.min.js"></script>
-</head>
-<body>
-  <div class="app-container">
-    <!-- Header -->
-    <header class="app-header">
-      <div class="brand">
-        <div class="brand-icon"></div>
-        <span>Memora Connect</span>
-      </div>
-      
-      <div class="search-bar">
-        <i class="fa-solid fa-search search-icon"></i>
-        <input type="text" id="globalSearch" placeholder="搜索记忆、概念、人物...">
-      </div>
-
-      <div class="header-controls">
-        <select id="groupSelect" style="width: 150px;"></select>
-        <button id="refreshBtn" class="icon-btn"><i class="fa-solid fa-sync"></i></button>
-        <button id="settingsBtn" class="icon-btn"><i class="fa-solid fa-cog"></i></button>
-      </div>
-    </header>
-
-    <!-- Sidebar -->
-    <aside class="app-sidebar">
-      <div class="tabs">
-        <button class="tab-btn active" data-tab="concepts">概念</button>
-        <button class="tab-btn" data-tab="memories">记忆</button>
-        <button class="tab-btn" data-tab="impressions">印象</button>
-      </div>
-
-      <!-- Concepts Tab -->
-      <div id="tab-concepts" class="tab-content">
-        <div class="flex-row mb-2">
-          <input type="text" id="newConceptName" placeholder="新概念名称" class="full-width">
-          <button id="addConceptBtn" class="icon-btn"><i class="fa-solid fa-plus"></i></button>
-        </div>
-        <div class="list-group" id="conceptList"></div>
-      </div>
-
-      <!-- Memories Tab -->
-      <div id="tab-memories" class="tab-content hidden">
-        <div class="list-group" id="memoryListSidebar"></div>
-      </div>
-
-      <!-- Impressions Tab -->
-      <div id="tab-impressions" class="tab-content hidden">
-        <div class="flex-row mb-2">
-           <button id="addImpressionBtn" class="full-width"><i class="fa-solid fa-plus"></i> 新建印象</button>
-        </div>
-        <div class="list-group" id="impressionList"></div>
-      </div>
-    </aside>
-
-    <!-- Main Content -->
-    <main class="app-main">
-      <div id="graph"></div>
-      
-      <!-- Context Menu -->
-      <div id="contextMenu" class="context-menu"></div>
-    </main>
-  </div>
-
-  <!-- Floating Panel (Details / Edit) -->
-  <div id="sidePanel" class="floating-panel">
-    <div class="panel-header">
-      <span id="panelTitle">详情</span>
-      <button id="closePanelBtn" class="icon-btn" style="width: 24px; height: 24px;"><i class="fa-solid fa-times"></i></button>
-    </div>
-    <div class="panel-content" id="panelContent">
-      <!-- Dynamic Content -->
-    </div>
-    <div class="panel-footer flex-row space-between" id="panelFooter">
-      <!-- Dynamic Actions -->
-    </div>
-  </div>
-
-  <!-- Settings Modal (hidden by default, maybe reuse panel or create modal) -->
-  <dialog id="settingsDialog" style="padding: 20px; border-radius: 12px; border: 1px solid #ccc;">
-    <h3>设置</h3>
-    <label>访问令牌: <input type="password" id="tokenInput" class="full-width mt-2"></label>
-    <div class="mt-2 flex-row" style="justify-content: flex-end;">
-      <button id="saveSettingsBtn">保存</button>
-    </div>
-  </dialog>
-
-  <script src="/static/app.js"></script>
-</body>
-</html>
-"""
-
-DEFAULT_STYLE_CSS = r""":root {
-  --glass-bg: rgba(255, 255, 255, 0.65);
-  --glass-border: rgba(255, 255, 255, 0.4);
-  --glass-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.10);
-  --primary-color: #007aff;
-  --text-color: #1c1c1e;
-  --secondary-text: #8e8e93;
-  --danger-color: #ff3b30;
-  --success-color: #34c759;
-  --bg-gradient: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-  --sidebar-width: 300px;
-  --header-height: 60px;
-  --radius-lg: 24px;
-  --radius-md: 16px;
-  --radius-sm: 10px;
-  --font-stack: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+/* AstrBot Plugin Page Bridge — 使用异步等待避免竞态条件 */
+function getBridge() {
+  return window.AstrBotPluginPage;
 }
 
-* {
-  box-sizing: border-box;
-  -webkit-tap-highlight-color: transparent;
+async function waitForBridge(maxRetries = 20, interval = 100) {
+  for (let i = 0; i < maxRetries; i++) {
+    const b = getBridge();
+    if (b && typeof b.apiGet === 'function' && typeof b.ready === 'function') {
+      return b;
+    }
+    await new Promise(r => setTimeout(r, interval));
+  }
+  throw new Error("AstrBotPluginPage bridge not available after " + (maxRetries * interval) + "ms");
 }
 
-body {
-  font-family: var(--font-stack);
-  margin: 0;
-  padding: 0;
-  background: #eef2f5; /* Fallback */
-  background: var(--bg-gradient);
-  color: var(--text-color);
-  height: 100vh;
-  overflow: hidden;
-  font-size: 14px;
+let _bridge = null;
+let _bridgeReady = false;
+
+async function ensureBridge() {
+  if (_bridgeReady) return _bridge;
+  _bridge = await waitForBridge();
+  _bridgeReady = true;
+  return _bridge;
 }
 
-/* Layout */
-.app-container {
-  display: grid;
-  grid-template-columns: var(--sidebar-width) 1fr;
-  grid-template-rows: var(--header-height) 1fr;
-  height: 100vh;
-  width: 100vw;
-}
-
-/* Header */
-.app-header {
-  grid-column: 1 / -1;
-  background: var(--glass-bg);
-  backdrop-filter: saturate(180%) blur(20px);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
-  border-bottom: 1px solid var(--glass-border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 24px;
-  z-index: 100;
-}
-
-.brand {
-  font-weight: 600;
-  font-size: 18px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.brand-icon {
-  width: 24px;
-  height: 24px;
-  background: var(--primary-color);
-  border-radius: 8px;
-}
-
-.header-controls {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-}
-
-/* Sidebar */
-.app-sidebar {
-  grid-row: 2;
-  background: rgba(255, 255, 255, 0.5);
-  backdrop-filter: saturate(180%) blur(20px);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
-  border-right: 1px solid var(--glass-border);
-  overflow-y: auto;
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  z-index: 90;
-}
-
-/* Main Content (Graph) */
-.app-main {
-  grid-column: 2;
-  grid-row: 2;
-  position: relative;
-  overflow: hidden;
-}
-
-#graph {
-  width: 100%;
-  height: 100%;
-  background: transparent;
-}
-
-/* UI Components */
-.card {
-  background: rgba(255, 255, 255, 0.7);
-  border-radius: var(--radius-md);
-  padding: 16px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-  border: 1px solid rgba(255,255,255,0.5);
-}
-
-.section-title {
-  font-size: 13px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--secondary-text);
-  margin-bottom: 12px;
-  font-weight: 600;
-}
-
-/* Inputs & Buttons */
-input, select, textarea {
-  width: 100%;
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(0,0,0,0.1);
-  background: rgba(255,255,255,0.8);
-  font-family: inherit;
-  font-size: 14px;
-  transition: all 0.2s;
-  outline: none;
-}
-
-input:focus, select:focus, textarea:focus {
-  border-color: var(--primary-color);
-  background: #fff;
-  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.2);
-}
-
-button {
-  background: var(--primary-color);
-  color: white;
-  border: none;
-  padding: 10px 16px;
-  border-radius: var(--radius-sm);
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-button:hover {
-  filter: brightness(1.1);
-  transform: translateY(-1px);
-}
-
-button:active {
-  transform: translateY(0);
-}
-
-button.secondary {
-  background: rgba(0,0,0,0.05);
-  color: var(--text-color);
-}
-
-button.danger {
-  background: var(--danger-color);
-}
-
-button.icon-btn {
-  padding: 8px;
-  border-radius: 50%;
-  width: 36px;
-  height: 36px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(255,255,255,0.5);
-}
-
-/* Lists */
-.list-group {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.list-item {
-  background: rgba(255,255,255,0.6);
-  padding: 10px;
-  border-radius: var(--radius-sm);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  cursor: pointer;
-  transition: background 0.2s;
-  border: 1px solid transparent;
-}
-
-.list-item:hover {
-  background: rgba(255,255,255,0.9);
-  border-color: rgba(0,0,0,0.05);
-}
-
-.list-item.active {
-  background: white;
-  border-color: var(--primary-color);
-  box-shadow: 0 2px 8px rgba(0, 122, 255, 0.15);
-}
-
-/* Floating Panels / Modals */
-.floating-panel {
-  position: absolute;
-  top: 20px;
-  right: 20px;
-  width: 320px;
-  max-height: calc(100% - 40px);
-  background: rgba(255, 255, 255, 0.85);
-  backdrop-filter: saturate(180%) blur(25px);
-  -webkit-backdrop-filter: saturate(180%) blur(25px);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--glass-shadow);
-  border: 1px solid var(--glass-border);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  transition: transform 0.3s cubic-bezier(0.19, 1, 0.22, 1), opacity 0.3s ease;
-  z-index: 50;
-  transform: translateX(350px);
-  opacity: 0;
-  pointer-events: none;
-}
-
-.floating-panel.visible {
-  transform: translateX(0);
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.panel-header {
-  padding: 16px 20px;
-  border-bottom: 1px solid rgba(0,0,0,0.05);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-weight: 600;
-  font-size: 16px;
-}
-
-.panel-content {
-  padding: 20px;
-  overflow-y: auto;
-  flex: 1;
-}
-
-.panel-footer {
-  padding: 16px 20px;
-  border-top: 1px solid rgba(0,0,0,0.05);
-  background: rgba(255,255,255,0.3);
-}
-
-/* Context Menu */
-.context-menu {
-  position: absolute;
-  background: rgba(255, 255, 255, 0.9);
-  backdrop-filter: blur(20px);
-  border-radius: 12px;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.15);
-  padding: 6px;
-  min-width: 160px;
-  z-index: 200;
-  display: none;
-  border: 1px solid rgba(255,255,255,0.5);
-}
-
-.context-menu-item {
-  padding: 8px 12px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 13px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.context-menu-item:hover {
-  background: var(--primary-color);
-  color: white;
-}
-
-/* Scrollbar */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: rgba(0,0,0,0.1);
-  border-radius: 3px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(0,0,0,0.2);
-}
-
-/* Utilities */
-.hidden { display: none !important; }
-.flex-row { display: flex; gap: 8px; align-items: center; }
-.flex-col { display: flex; flex-direction: column; gap: 8px; }
-.space-between { justify-content: space-between; }
-.text-sm { font-size: 12px; color: var(--secondary-text); }
-.mt-2 { margin-top: 8px; }
-.mb-2 { margin-bottom: 8px; }
-.p-2 { padding: 8px; }
-.full-width { width: 100%; }
-
-/* Search Bar */
-.search-bar {
-  position: relative;
-  width: 300px;
-}
-.search-bar input {
-  padding-left: 36px;
-  border-radius: 20px;
-  background: rgba(0,0,0,0.05);
-  border: none;
-}
-.search-icon {
-  position: absolute;
-  left: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  opacity: 0.5;
-}
-
-/* Tags */
-.tag {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 12px;
-  background: rgba(0, 122, 255, 0.1);
-  color: var(--primary-color);
-  font-size: 11px;
-  margin-right: 4px;
-}
-
-/* Tabs */
-.tabs {
-  display: flex;
-  gap: 4px;
-  padding: 4px;
-  background: rgba(0,0,0,0.05);
-  border-radius: 12px;
-  margin-bottom: 16px;
-}
-
-.tab-btn {
-  flex: 1;
-  background: transparent;
-  color: var(--secondary-text);
-  padding: 6px;
-  font-size: 12px;
-  border-radius: 8px;
-}
-
-.tab-btn.active {
-  background: white;
-  color: var(--text-color);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-}
-"""
-
-DEFAULT_APP_JS = r"""
-/* API Service */
+/* API Service — 通过 bridge SDK 调用后端，鉴权由 Dashboard 接管 */
 const API = {
-  headers() {
-    const h = { "Content-Type": "application/json" };
-    if (Store.token) h["x-access-token"] = Store.token;
-    return h;
+  async get(endpoint, params = {}) {
+    const b = await ensureBridge();
+    return b.apiGet(endpoint, params);
   },
-
-  async request(method, url, body = null) {
-    const opts = { method, headers: this.headers() };
-    if (body) opts.body = JSON.stringify(body);
-    const res = await fetch(url, opts);
-    if (!res.ok) throw new Error(await res.text());
-    return res.json();
+  async post(endpoint, body = {}) {
+    const b = await ensureBridge();
+    return b.apiPost(endpoint, body);
   },
-
-  get(url) { return this.request('GET', url); },
-  post(url, body) { return this.request('POST', url, body); },
-  put(url, body) { return this.request('PUT', url, body); },
-  delete(url) { return this.request('DELETE', url); },
 };
 
 /* State Management */
 const Store = {
   group: "",
-  token: localStorage.getItem('memora_token') || "",
   concepts: [],
   memories: [],
   impressions: [],
@@ -522,36 +53,34 @@ const Store = {
   },
 
   async loadGroups() {
-    const data = await API.get('/api/groups');
+    const data = await API.get('groups');
     UI.renderGroups(data.groups);
   },
 
   async loadAll() {
-    const pGroupId = encodeURIComponent(this.group);
-    
     // Load Graph
     try {
-      this.graphData = await API.get(`/api/graph?group_id=${pGroupId}`);
+      this.graphData = await API.get('graph', { group_id: this.group });
       Graph.render(this.graphData);
     } catch (e) { console.error("Graph load failed", e); }
 
     // Load Concepts
     try {
-      const cData = await API.get(`/api/concepts?group_id=${pGroupId}`);
+      const cData = await API.get('concepts', { group_id: this.group });
       this.concepts = cData.concepts || [];
       UI.renderConcepts(this.concepts);
     } catch (e) { console.error("Concepts load failed", e); }
 
     // Load Memories (Recent)
     try {
-      const mData = await API.get(`/api/memories?group_id=${pGroupId}`);
+      const mData = await API.get('memories', { group_id: this.group });
       this.memories = mData.memories || [];
       UI.renderMemories(this.memories);
     } catch (e) { console.error("Memories load failed", e); }
 
     // Load Impressions
     try {
-      const iData = await API.get(`/api/impressions?group_id=${pGroupId}`);
+      const iData = await API.get('impressions', { group_id: this.group });
       this.impressions = iData.people || [];
       UI.renderImpressions(this.impressions);
     } catch (e) { console.error("Impressions load failed", e); }
@@ -578,8 +107,6 @@ const Graph = {
             'background-color': '#fff',
             'border-width': 2,
             'border-color': '#007aff',
-            'width': 'label',
-            'height': 'label',
             'padding': '10px',
             'text-wrap': 'wrap',
             'text-max-width': '100px',
@@ -644,7 +171,7 @@ const Graph = {
     this.cy.on('cxttap', 'node', e => {
       UI.showContextMenu(e.originalEvent.clientX, e.originalEvent.clientY, 'node', e.target.id());
     });
-    
+
     this.cy.on('cxttap', e => {
       if(e.target === this.cy) {
         UI.showContextMenu(e.originalEvent.clientX, e.originalEvent.clientY, 'bg');
@@ -653,24 +180,24 @@ const Graph = {
   },
 
   render(data) {
-    const nodes = data.nodes.map(n => ({ 
-      data: { id: n.id, name: n.name, label: `${n.name}\n(${n.count})` } 
+    const nodes = data.nodes.map(n => ({
+      data: { id: n.id, name: n.name, label: `${n.name}\n(${n.count})` }
     }));
-    const edges = data.edges.map(e => ({ 
-      data: { 
-        id: e.id, 
-        source: e.from_element, 
-        target: e.to_element, 
+    const edges = data.edges.map(e => ({
+      data: {
+        id: e.id,
+        source: e.from_element,
+        target: e.to_element,
         weight: e.strength.toFixed(2),
         rawStrength: e.strength
-      } 
+      }
     }));
 
     this.cy.elements().remove();
     this.cy.add({ nodes, edges });
     this.cy.layout(this.layoutConfig).run();
   },
-  
+
   center() {
       this.cy.fit();
   }
@@ -707,24 +234,12 @@ const UI = {
     // Close Panel
     document.getElementById('closePanelBtn').addEventListener('click', () => this.hidePanel());
 
-    // Settings
-    document.getElementById('settingsBtn').addEventListener('click', () => {
-      document.getElementById('tokenInput').value = Store.token;
-      document.getElementById('settingsDialog').showModal();
-    });
-    document.getElementById('saveSettingsBtn').addEventListener('click', () => {
-      Store.token = document.getElementById('tokenInput').value.trim();
-      localStorage.setItem('memora_token', Store.token);
-      document.getElementById('settingsDialog').close();
-      Store.loadAll();
-    });
-
     // Global Search
     document.getElementById('globalSearch').addEventListener('keydown', async (e) => {
       if (e.key === 'Enter') {
         const q = e.target.value.trim();
         if (!q) return;
-        const res = await API.get(`/api/memories?group_id=${encodeURIComponent(Store.group)}&q=${encodeURIComponent(q)}`);
+        const res = await API.get('memories', { group_id: Store.group, q });
         // Switch to memory tab and show results
         this.el.tabs.forEach(b => b.classList.remove('active'));
         this.el.tabContents.forEach(c => c.classList.add('hidden'));
@@ -738,14 +253,14 @@ const UI = {
     document.getElementById('addConceptBtn').addEventListener('click', async () => {
       const name = document.getElementById('newConceptName').value.trim();
       if (!name) return;
-      await API.post('/api/concepts', { group_id: Store.group, name });
+      await API.post('concepts/create', { group_id: Store.group, name });
       document.getElementById('newConceptName').value = '';
       Store.loadAll();
     });
-    
+
     // Add Impression
     document.getElementById('addImpressionBtn').addEventListener('click', () => {
-        this.showCreateImpressionPanel();
+      this.showCreateImpressionPanel();
     });
 
     // Refresh
@@ -841,7 +356,7 @@ const UI = {
     // Fetch memories for concept
     let mems = [];
     try {
-        const res = await API.get(`/api/memories?group_id=${encodeURIComponent(Store.group)}&element_id=${id}`);
+        const res = await API.get('memories', { group_id: Store.group, element_id: id });
         mems = res.memories || [];
     } catch(e) {}
 
@@ -871,16 +386,16 @@ const UI = {
 
     this.showPanel('概念详情', content, footer);
   },
-  
+
   showMemoryPanel(memory, isEdit) {
       const content = `
         <div class="flex-col">
             <label>内容</label>
             <textarea id="memContent" rows="3">${memory.content || ''}</textarea>
-            
+
             <label>细节</label>
             <textarea id="memDetails" rows="2">${memory.details || ''}</textarea>
-            
+
             <div class="flex-row">
                 <div class="flex-col full-width">
                     <label>强度 (0-1)</label>
@@ -891,19 +406,19 @@ const UI = {
                     <input type="text" id="memEmotion" value="${memory.emotion || ''}">
                 </div>
             </div>
-            
+
             <label>元素ID</label>
             <input type="text" id="memElementId" value="${memory.element_id || ''}">
-            
+
             <input type="hidden" id="memElementIdHidden" value="${memory.element_id || ''}">
         </div>
       `;
-      
-      const footer = isEdit 
+
+      const footer = isEdit
         ? `<button class="danger" onclick="App.deleteMemory('${memory.id}')">删除</button>
            <button onclick="App.updateMemory('${memory.id}')">更新</button>`
         : `<button onclick="App.createMemory()">创建</button>`;
-      
+
       this.showPanel(isEdit ? '编辑记忆' : '新建记忆', content, footer);
   },
 
@@ -924,16 +439,16 @@ const UI = {
 
     this.showPanel('连接详情', content, footer);
   },
-  
+
   async showImpressionDetailPanel(person) {
       let data = {};
       try {
-          data = await API.get(`/api/impressions?group_id=${encodeURIComponent(Store.group)}&person=${encodeURIComponent(person)}`);
+          data = await API.get('impressions', { group_id: Store.group, person });
       } catch(e) {}
-      
+
       const summary = data.summary || {};
       const memories = data.memories || [];
-      
+
       const content = `
          <div class="flex-col">
              <h3>${summary.name || person}</h3>
@@ -942,12 +457,12 @@ const UI = {
                  <div>${summary.summary || '无摘要'}</div>
                  <div class="mt-2 text-sm">好感度: ${summary.score !== null ? summary.score.toFixed(2) : 'N/A'}</div>
              </div>
-             
+
              <div class="flex-row mt-2">
                  <input type="number" id="impDelta" placeholder="好感度变化" step="0.1">
                  <button class="small" onclick="App.adjustImpression('${person}')">调整</button>
              </div>
-             
+
              <label class="section-title mt-2">相关记忆</label>
              <div class="list-group">
                  ${memories.map(m => `
@@ -958,10 +473,10 @@ const UI = {
              </div>
          </div>
       `;
-      
+
       this.showPanel('印象详情', content, '');
   },
-  
+
   showCreateImpressionPanel() {
       const content = `
         <div class="flex-col">
@@ -978,7 +493,7 @@ const UI = {
       const footer = `<button onclick="App.createImpression()">创建</button>`;
       this.showPanel('新建印象', content, footer);
   },
-  
+
   showCreateConnectionPanel(fromId) {
        const content = `
         <div class="flex-col">
@@ -1000,7 +515,7 @@ const UI = {
     this.el.contextMenu.style.left = `${x}px`;
     this.el.contextMenu.style.top = `${y}px`;
     this.el.contextMenu.style.display = 'block';
-    
+
     let html = '';
     if (type === 'node') {
       html = `
@@ -1017,7 +532,7 @@ const UI = {
         <div class="context-menu-item" onclick="Store.loadAll()"><i class="fa-solid fa-sync"></i> 刷新</div>
       `;
     }
-    
+
     this.el.contextMenu.innerHTML = html;
   },
 
@@ -1032,7 +547,7 @@ const App = {
     UI.init();
     Graph.init();
     await Store.init();
-    
+
     // Global click to close context menu
     document.addEventListener('click', (e) => {
         if (!e.target.closest('.context-menu')) {
@@ -1045,14 +560,14 @@ const App = {
   async updateConcept(id) {
     const name = document.getElementById('editConceptName').value.trim();
     if (!name) return;
-    await API.put(`/api/concepts/${id}`, { group_id: Store.group, name });
+    await API.post('concepts/update', { id, group_id: Store.group, name });
     Store.loadAll();
     UI.hidePanel();
   },
 
   async deleteConcept(id) {
     if(!confirm('确定要删除该概念及其所有记忆吗？')) return;
-    await API.delete(`/api/concepts/${id}?group_id=${encodeURIComponent(Store.group)}`);
+    await API.post('concepts/delete', { id, group_id: Store.group });
     Store.loadAll();
     UI.hidePanel();
   },
@@ -1067,13 +582,14 @@ const App = {
         strength: parseFloat(document.getElementById('memStrength').value)
     };
     if(!body.content) return;
-    await API.post('/api/memories', body);
+    await API.post('memories/create', body);
     Store.loadAll();
     UI.hidePanel(); // Or refresh panel
   },
 
   async updateMemory(id) {
       const body = {
+        id,
         group_id: Store.group,
         element_id: document.getElementById('memElementId').value,
         content: document.getElementById('memContent').value,
@@ -1081,38 +597,38 @@ const App = {
         emotion: document.getElementById('memEmotion').value,
         strength: parseFloat(document.getElementById('memStrength').value)
       };
-      await API.put(`/api/memories/${id}`, body);
+      await API.post('memories/update', body);
       Store.loadAll();
       UI.hidePanel();
   },
 
   async deleteMemory(id) {
       if(!confirm('删除记忆？')) return;
-      await API.delete(`/api/memories/${id}?group_id=${encodeURIComponent(Store.group)}`);
+      await API.post('memories/delete', { id, group_id: Store.group });
       Store.loadAll();
       UI.hidePanel();
   },
-  
+
   async updateConnection(id) {
       const s = parseFloat(document.getElementById('connStrength').value);
-      await API.put(`/api/connections/${id}`, { group_id: Store.group, strength: s });
+      await API.post('connections/update', { id, group_id: Store.group, strength: s });
       Store.loadAll();
       UI.hidePanel();
   },
-  
+
   async deleteConnection(id) {
       if(!confirm('断开连接？')) return;
-      await API.delete(`/api/connections/${id}?group_id=${encodeURIComponent(Store.group)}`);
+      await API.post('connections/delete', { id, group_id: Store.group });
       Store.loadAll();
       UI.hidePanel();
   },
-  
+
   async createConnection(fromId) {
       const toId = document.getElementById('connToId').value.trim();
       const strength = parseFloat(document.getElementById('newConnStrength').value);
       if(!toId) return;
-      
-      await API.post('/api/connections', {
+
+      await API.post('connections/create', {
           group_id: Store.group,
           from_element: fromId,
           to_element: toId,
@@ -1121,7 +637,7 @@ const App = {
       Store.loadAll();
       UI.hidePanel();
   },
-  
+
   async createImpression() {
       const body = {
           group_id: Store.group,
@@ -1131,25 +647,32 @@ const App = {
           details: document.getElementById('impDetails').value.trim()
       };
       if(!body.person) return;
-      await API.post('/api/impressions', body);
+      await API.post('impressions/create', body);
       Store.loadAll();
       UI.hidePanel();
   },
-  
+
   async adjustImpression(person) {
       const delta = parseFloat(document.getElementById('impDelta').value);
       if(isNaN(delta)) return;
-      await API.put(`/api/impressions/${encodeURIComponent(person)}/score`, {
+      await API.post('impressions/adjust', {
           group_id: Store.group,
-          delta: delta
+          person,
+          delta
       });
       UI.showImpressionDetailPanel(person); // Reload panel
   }
 };
 
-/* Start */
-document.addEventListener('DOMContentLoaded', () => {
-    App.init();
+/* Start — 等待 bridge 就绪后初始化 */
+document.addEventListener('DOMContentLoaded', async () => {
+    try {
+        const b = await ensureBridge();
+        await b.ready();
+    } catch (e) {
+        console.error("AstrBotPluginPage bridge ready failed:", e);
+    }
+    await App.init();
 });
 
 // Expose for onclick handlers
@@ -1157,4 +680,3 @@ window.UI = UI;
 window.App = App;
 window.Store = Store;
 window.Graph = Graph;
-"""
