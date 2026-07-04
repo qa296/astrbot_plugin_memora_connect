@@ -25,6 +25,18 @@
     "hint": "是否在llm和embedding模式下启用基于知识图谱的联想回忆功能，会智能补充相关记忆",
     "default": true
   },
+  "llm_provider": {
+    "description": "LLM服务提供商",
+    "type": "string",
+    "hint": "选择用于记忆形成的LLM服务提供商，将使用AstrBot配置的对应提供商",
+    "default": "openai"
+  },
+  "embedding_provider": {
+    "description": "嵌入模型服务提供商",
+    "type": "string",
+    "hint": "选择嵌入模型的服务提供商，将使用AstrBot配置的对应提供商",
+    "default": "openai"
+  },
   "forget_threshold_days": {
     "description": "遗忘阈值天数",
     "type": "int",
@@ -37,60 +49,6 @@
     "hint": "多久进行一次记忆整理和合并",
     "default": 24
   },
-  "max_memories_per_topic": {
-    "description": "每个主题最大记忆数",
-    "type": "int",
-    "hint": "单个主题下最多保留多少条记忆",
-    "default": 10
-  },
-  "recall_trigger_probability": {
-    "description": "回忆触发概率",
-    "type": "float",
-    "hint": "对话中触发回忆的概率(0-1)（此选项使用llm）",
-    "default": 0
-  },
-  "enable_forgetting": {
-    "description": "启用遗忘机制",
-    "type": "bool",
-    "hint": "是否启用记忆的遗忘机制",
-    "default": true
-  },
-  "enable_consolidation": {
-    "description": "启用记忆整理",
-    "type": "bool",
-    "hint": "是否启用记忆的整理和合并",
-    "default": true
-  },
-  "bimodal_recall": {
-    "description": "双峰时间回忆",
-    "type": "bool",
-    "hint": "是否启用双峰时间分布的回忆模式",
-    "default": true
-  },
-  "llm_provider": {
-    "description": "LLM服务提供商",
-    "type": "string",
-    "hint": "选择用于记忆形成的LLM服务提供商，将使用AstrBot配置的对应提供商",
-    "default": "openai"
-  },
-  "llm_system_prompt": {
-    "description": "LLM系统提示词",
-    "type": "text",
-    "hint": "用于指导LLM形成记忆的系统提示词",
-    "default": "你是一个记忆总结助手，请将对话内容总结成简洁自然的记忆。"
-  },
-  "embedding_provider": {
-    "description": "嵌入模型服务提供商",
-    "type": "string",
-    "hint": "选择嵌入模型的服务提供商，将使用AstrBot配置的对应提供商",
-    "default": "openai"
-  },
-  "embedding_model": {
-    "description": "嵌入模型名称",
-    "type": "string",
-    "hint": "指定要使用的嵌入模型名称，留空将使用提供商的默认模型",
-    "default": ""
-  },
   "max_injected_memories": {
     "description": "最大注入记忆数",
     "type": "int",
@@ -100,7 +58,7 @@
   "enable_enhanced_memory": {
     "description": "启用增强记忆功能",
     "type": "bool",
-    "hint": "是否启用增强记忆功能，包括增强召回和自动注入相关记忆到LLM上下文（此选项不使用llm）",
+    "hint": "是否启用增强记忆功能，包括增强召回和自动注入相关记忆到LLM上下文",
     "default": true
   },
   "memory_injection_threshold": {
@@ -113,19 +71,19 @@
     "description": "对话历史条数",
     "type": "int",
     "hint": "获取对话历史时的最大条数，影响记忆提取的上下文范围",
-    "default": 20
-  },
-  "topic_trigger_interval_minutes": {
-    "description": "话题分析触发间隔（分钟）",
-    "type": "int",
-    "hint": "距离上次分析超过此时间后自动触发话题分析",
-    "default": 5
+    "default": 24
   },
   "topic_message_threshold": {
     "description": "话题分析消息阈值",
     "type": "int",
     "hint": "积累到此数量的消息后触发话题分析",
-    "default": 12
+    "default": 20
+  },
+  "recent_completed_sessions_count": {
+    "description": "保留的已完成会话数量",
+    "type": "int",
+    "hint": "用于构建LLM上下文的最近已完成会话摘要数量",
+    "default": 5
   },
   "enable_persona_injection_in_memory_generation": {
     "description": "启用记忆生成人格注入",
@@ -133,10 +91,10 @@
     "hint": "是否在话题分析/记忆生成阶段注入当前会话人格设定",
     "default": true
   },
-  "recent_completed_sessions_count": {
-    "description": "保留的已完成会话数量",
+  "max_session_rounds": {
+    "description": "会话强制总结轮次",
     "type": "int",
-    "hint": "用于构建LLM上下文的最近已完成会话摘要数量",
+    "hint": "会话经历多少轮分析后强制完成（防止模型一直标ongoing不总结），0=不限制",
     "default": 5
   },
   "exclude_keywords": {

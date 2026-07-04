@@ -100,7 +100,7 @@ class EnhancedMemoryRecall:
                 return []
 
             # 检查当前回忆模式，如果不是embedding模式，直接返回空列表
-            if self.memory_system.memory_config["recall_mode"] not in ["embedding"]:
+            if self.memory_system.memory_config.get("recall_mode", "simple") not in ["embedding"]:
                 logger.debug("语义召回跳过：当前不是embedding模式")
                 return []
 
@@ -172,28 +172,28 @@ class EnhancedMemoryRecall:
                     )
 
                     if similarity > 0.3:  # 相似度阈值
-                        concept = self.memory_system.memory_graph.concepts.get(
-                            memory.concept_id
-                        )
-                        if concept:
-                            results.append(
-                                MemoryRecallResult(
-                                    memory=memory.content,
-                                    relevance_score=similarity
-                                    * self.recall_strategies["semantic"],
-                                    memory_type="semantic",
-                                    concept_id=memory.concept_id,
-                                    metadata={
-                                        "memory_id": memory.id,
-                                        "concept_name": concept.name,
-                                        "memory_strength": memory.strength,
-                                        "last_accessed": memory.last_accessed,
-                                        "source": "cached_semantic",
-                                        "similarity": similarity,
-                                        "group_id": group_id,
-                                    },
-                                )
+                        mem_elements = self.memory_system.memory_graph.get_memory_elements(memory.id)
+                        first_elem = mem_elements[0][0] if mem_elements else None
+                        elem_id = first_elem.id if first_elem else ""
+                        elem_name = first_elem.name if first_elem else ""
+                        results.append(
+                            MemoryRecallResult(
+                                memory=memory.content,
+                                relevance_score=similarity
+                                * self.recall_strategies["semantic"],
+                                memory_type="semantic",
+                                concept_id=elem_id,
+                                metadata={
+                                    "memory_id": memory.id,
+                                    "concept_name": elem_name,
+                                    "memory_strength": memory.strength,
+                                    "last_accessed": memory.last_accessed,
+                                    "source": "cached_semantic",
+                                    "similarity": similarity,
+                                    "group_id": group_id,
+                                },
                             )
+                        )
 
             logger.debug(f"缓存语义召回完成，找到 {len(results)} 条相关记忆")
             return results
@@ -228,26 +228,26 @@ class EnhancedMemoryRecall:
                 if time_diff < time_window:
                     temporal_score = 1.0 - (time_diff / time_window)
 
-                    concept = self.memory_system.memory_graph.concepts.get(
-                        memory.concept_id
-                    )
-                    if concept:
-                        relevance = temporal_score * self.recall_strategies["temporal"]
-                        results.append(
-                            MemoryRecallResult(
-                                memory=memory.content,
-                                relevance_score=relevance,
-                                memory_type="temporal",
-                                concept_id=memory.concept_id,
-                                metadata={
-                                    "memory_id": memory.id,
-                                    "hours_ago": time_diff / 3600,
-                                    "concept_name": concept.name,
-                                    "memory_strength": memory.strength,
-                                    "group_id": group_id,
-                                },
-                            )
+                    mem_elements = self.memory_system.memory_graph.get_memory_elements(memory.id)
+                    first_elem = mem_elements[0][0] if mem_elements else None
+                    elem_id = first_elem.id if first_elem else ""
+                    elem_name = first_elem.name if first_elem else ""
+                    relevance = temporal_score * self.recall_strategies["temporal"]
+                    results.append(
+                        MemoryRecallResult(
+                            memory=memory.content,
+                            relevance_score=relevance,
+                            memory_type="temporal",
+                            concept_id=elem_id,
+                            metadata={
+                                "memory_id": memory.id,
+                                "hours_ago": time_diff / 3600,
+                                "concept_name": elem_name,
+                                "memory_strength": memory.strength,
+                                "group_id": group_id,
+                            },
                         )
+                    )
 
             return results
 
@@ -282,26 +282,26 @@ class EnhancedMemoryRecall:
             top_memories = filtered_memories[: max(5, len(filtered_memories) // 5)]
 
             for memory in top_memories:
-                concept = self.memory_system.memory_graph.concepts.get(
-                    memory.concept_id
-                )
-                if concept:
-                    relevance = memory.strength * self.recall_strategies["strength"]
-                    results.append(
-                        MemoryRecallResult(
-                            memory=memory.content,
-                            relevance_score=relevance,
-                            memory_type="strength",
-                            concept_id=memory.concept_id,
-                            metadata={
-                                "memory_id": memory.id,
-                                "concept_name": concept.name,
-                                "memory_strength": memory.strength,
-                                "access_count": memory.access_count,
-                                "group_id": group_id,
-                            },
-                        )
+                mem_elements = self.memory_system.memory_graph.get_memory_elements(memory.id)
+                first_elem = mem_elements[0][0] if mem_elements else None
+                elem_id = first_elem.id if first_elem else ""
+                elem_name = first_elem.name if first_elem else ""
+                relevance = memory.strength * self.recall_strategies["strength"]
+                results.append(
+                    MemoryRecallResult(
+                        memory=memory.content,
+                        relevance_score=relevance,
+                        memory_type="strength",
+                        concept_id=elem_id,
+                        metadata={
+                            "memory_id": memory.id,
+                            "concept_name": elem_name,
+                            "memory_strength": memory.strength,
+                            "access_count": memory.access_count,
+                            "group_id": group_id,
+                        },
                     )
+                )
 
             return results
 
@@ -490,9 +490,13 @@ class EnhancedMemoryRecall:
                         pass
 
                 prefix = ""
-                if memory_obj and memory_obj.participants:
-                    if "我" in memory_obj.participants:
-                        prefix = "我记得: "
+                if memory_obj:
+                    # 检查是否有关联元素含 role="subject" 且名称为"我"
+                    mem_elements = self.memory_system.memory_graph.get_memory_elements(memory_obj.id)
+                    for elem, role in mem_elements:
+                        if role == "subject" and elem.name == "我":
+                            prefix = "我记得: "
+                            break
 
                 context_parts.append(f"{i}. {time_str}{prefix}{memory.memory}")
                 if include_ids:
@@ -506,17 +510,19 @@ class EnhancedMemoryRecall:
 
                 if memory_obj:
                     details = getattr(memory_obj, "details", "") or ""
-                    participants = getattr(memory_obj, "participants", "") or ""
-                    location = getattr(memory_obj, "location", "") or ""
                     emotion = getattr(memory_obj, "emotion", "") or ""
-                    tags = getattr(memory_obj, "tags", "") or ""
-                    extra_fields = [
-                        ("细节", details),
-                        ("参与者", participants),
-                        ("地点", location),
-                        ("情感", emotion),
-                        ("标签", tags),
-                    ]
+                    extra_fields = [("细节", details), ("情感", emotion)]
+
+                    # 添加关联元素信息
+                    if mem_elements:
+                        elem_by_role: dict[str, list[str]] = {}
+                        for elem, role in mem_elements:
+                            r = role or "其他"
+                            if r not in elem_by_role:
+                                elem_by_role[r] = []
+                            elem_by_role[r].append(f"{elem.name}({elem.category})")
+                        for role, names in elem_by_role.items():
+                            extra_fields.append((f"元素[{role}]", ", ".join(names)))
                     for label, value in extra_fields:
                         if value:
                             context_parts.append(f"   {label}: {value}")
@@ -548,7 +554,6 @@ class EnhancedMemoryRecall:
             query_lower = query.lower()
 
             for memory in self.memory_system.memory_graph.memories.values():
-                # 群聊隔离过滤
                 memory_group_id = getattr(memory, "group_id", "")
                 if group_id:
                     if memory_group_id != group_id:
@@ -557,14 +562,15 @@ class EnhancedMemoryRecall:
                     if memory_group_id:
                         continue
 
-                concept = self.memory_system.memory_graph.concepts.get(
-                    memory.concept_id
-                )
+                concept_name = ""
+                concept = None
+                mem_elements = self.memory_system.memory_graph.get_memory_elements(memory.id)
+                if mem_elements:
+                    concept_name = ", ".join(e.name for e, _ in mem_elements)
+
                 details = getattr(memory, "details", "") or ""
-                tags = getattr(memory, "tags", "") or ""
-                concept_name = concept.name if concept else ""
                 searchable_text = (
-                    f"{memory.content} {details} {tags} {concept_name}".lower()
+                    f"{memory.content} {details} {concept_name}".lower()
                 )
 
                 # 计算关键词匹配度
@@ -580,17 +586,19 @@ class EnhancedMemoryRecall:
                     relevance = (
                         keyword_score / len(keywords)
                     ) * self.recall_strategies["keyword"]
+                    mem_elements = self.memory_system.memory_graph.get_memory_elements(memory.id)
+                    first_elem_id = mem_elements[0][0].id if mem_elements else ""
                     results.append(
                         MemoryRecallResult(
                             memory=memory.content,
                             relevance_score=relevance,
                             memory_type="keyword",
-                            concept_id=memory.concept_id,
+                            concept_id=first_elem_id,
                             metadata={
                                 "memory_id": memory.id,
                                 "matched_keywords": matched_keywords,
                                 "keyword_total": len(keywords),
-                                "concept_name": concept.name if concept else "",
+                                "concept_name": concept_name,
                                 "memory_strength": memory.strength,
                                 "group_id": group_id,
                             },
@@ -611,70 +619,81 @@ class EnhancedMemoryRecall:
             if not query:
                 return []
 
-            # 找到与查询相关的概念
-            related_concepts = []
+            related_elements = []
             query_lower = query.lower()
 
-            for concept in self.memory_system.memory_graph.concepts.values():
-                if query_lower in concept.name.lower():
-                    related_concepts.append(concept.id)
+            for elem in self.memory_system.memory_graph.elements.values():
+                if query_lower in elem.name.lower():
+                    if not group_id or elem.group_id == group_id:
+                        related_elements.append(elem.id)
 
-            if not related_concepts:
+            if not related_elements:
+                for concept in self.memory_system.memory_graph.concepts.values():
+                    if query_lower in concept.name.lower():
+                        related_elements.append(concept.id)
+
+            if not related_elements:
                 return []
 
             results = []
 
-            # 通过记忆图进行联想
-            for concept_id in related_concepts:
-                # 获取相邻概念
-                neighbors = self.memory_system.memory_graph.get_neighbors(concept_id)
+            for element_id in related_elements:
+                element_memories = self.memory_system.memory_graph.get_element_memories(element_id)
+                filtered_memories = []
+                for memory in element_memories:
+                    memory_group_id = getattr(memory, "group_id", "")
+                    if group_id:
+                        if memory_group_id == group_id:
+                            filtered_memories.append(memory)
+                    elif not group_id:
+                        if not memory_group_id:
+                            filtered_memories.append(memory)
 
+                filtered_memories.sort(key=lambda m: m.strength, reverse=True)
+
+                for memory in filtered_memories[:3]:
+                    relevance = 0.15 * self.recall_strategies["associative"]
+                    results.append(
+                        MemoryRecallResult(
+                            memory=memory.content,
+                            relevance_score=relevance,
+                            memory_type="associative",
+                            concept_id=element_id,
+                            metadata={
+                                "memory_id": memory.id,
+                                "concept_name": "",
+                                "group_id": group_id,
+                            },
+                        )
+                    )
+
+                neighbors = self.memory_system.memory_graph.get_neighbors(element_id)
                 for neighbor_id, strength in neighbors:
-                    if strength > 0.3:  # 连接强度阈值
-                        # 获取相邻概念下的记忆
-                        neighbor_memories = [
-                            m
-                            for m in self.memory_system.memory_graph.memories.values()
-                            if m.concept_id == neighbor_id
-                        ]
-
-                        # 群聊隔离过滤
-                        filtered_memories = []
-                        for memory in neighbor_memories:
-                            memory_group_id = getattr(memory, "group_id", "")
-                            if group_id:
-                                if memory_group_id == group_id:
-                                    filtered_memories.append(memory)
-                            elif not group_id:
-                                if not memory_group_id:
-                                    filtered_memories.append(memory)
-
-                        # 按强度排序，取前2条
-                        filtered_memories.sort(key=lambda m: m.strength, reverse=True)
-
-                        for memory in filtered_memories[:2]:
-                            concept = self.memory_system.memory_graph.concepts.get(
-                                neighbor_id
+                    if strength < 0.3:
+                        continue
+                    neighbor_memories = self.memory_system.memory_graph.get_element_memories(neighbor_id)
+                    for memory in neighbor_memories[:2]:
+                        mem_group_id = getattr(memory, "group_id", "")
+                        if group_id and mem_group_id != group_id:
+                            continue
+                        if not group_id and mem_group_id:
+                            continue
+                        score = strength * 0.1 * self.recall_strategies["associative"]
+                        results.append(
+                            MemoryRecallResult(
+                                memory=memory.content,
+                                relevance_score=score,
+                                memory_type="associative",
+                                concept_id=neighbor_id,
+                                metadata={
+                                    "memory_id": memory.id,
+                                    "original_concept": element_id,
+                                    "connection_strength": strength,
+                                    "concept_name": "",
+                                    "group_id": group_id,
+                                },
                             )
-                            if concept:
-                                relevance = (
-                                    strength * self.recall_strategies["associative"]
-                                )
-                                results.append(
-                                    MemoryRecallResult(
-                                        memory=memory.content,
-                                        relevance_score=relevance,
-                                        memory_type="associative",
-                                        concept_id=neighbor_id,
-                                        metadata={
-                                            "memory_id": memory.id,
-                                            "original_concept": concept_id,
-                                            "connection_strength": strength,
-                                            "concept_name": concept.name,
-                                            "group_id": group_id,
-                                        },
-                                    )
-                                )
+                        )
 
             return results
 

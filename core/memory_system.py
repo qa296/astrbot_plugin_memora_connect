@@ -68,50 +68,6 @@ class MemorySystem:
                 m for m in memories if hasattr(m, "group_id") and m.group_id == group_id
             ]
 
-    @staticmethod
-    def filter_concepts_by_group(
-        concepts: dict[str, "Concept"],
-        memories: dict[str, "Memory"],
-        group_id: str = "",
-    ) -> dict[str, "Concept"]:
-        """
-        根据群聊隔离过滤概念
-
-        Args:
-            concepts: 概念字典
-            memories: 记忆字典（用于判断概念是否属于指定群组）
-            group_id: 群组ID
-
-        Returns:
-            过滤后的概念字典
-        """
-        filtered_concepts = {}
-
-        for concept_id, concept in concepts.items():
-            # 检查该概念下是否有属于指定群组的记忆
-            concept_has_group_memory = False
-            for memory in memories.values():
-                if memory.concept_id == concept_id:
-                    if not group_id and (
-                        not hasattr(memory, "group_id") or not memory.group_id
-                    ):
-                        # 私聊场景：概念有无group_id的记忆
-                        concept_has_group_memory = True
-                        break
-                    elif (
-                        group_id
-                        and hasattr(memory, "group_id")
-                        and memory.group_id == group_id
-                    ):
-                        # 群聊场景：概念有匹配group_id的记忆
-                        concept_has_group_memory = True
-                        break
-
-            if concept_has_group_memory:
-                filtered_concepts[concept_id] = concept
-
-        return filtered_concepts
-
     def __init__(self, context: Context, config=None, data_dir=None):
         self.context = context
 
@@ -461,7 +417,6 @@ class MemorySystem:
         """从数据库加载记忆状态"""
         import os
 
-        # 获取对应的数据库路径
         db_path = self._get_group_db_path(group_id)
 
         if not os.path.exists(db_path):
@@ -469,37 +424,80 @@ class MemorySystem:
 
         conn = None
         try:
-            # 使用连接池获取数据库连接
             conn = resource_manager.get_db_connection(db_path)
             cursor = conn.cursor()
 
-            # 检查表是否存在
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='concepts'"
-            )
-            if not cursor.fetchone():
-                return
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            existing_tables = {row[0] for row in cursor.fetchall()}
 
-            # 加载概念
-            cursor.execute(
-                "SELECT id, name, created_at, last_accessed, access_count FROM concepts"
-            )
-            concepts = cursor.fetchall()
-            for concept_data in concepts:
-                self.memory_graph.add_concept(
-                    concept_id=concept_data[0],
-                    name=concept_data[1],
-                    created_at=concept_data[2],
-                    last_accessed=concept_data[3],
-                    access_count=concept_data[4],
+            has_elements = "elements" in existing_tables
+
+            if has_elements:
+                cursor.execute(
+                    "SELECT id, name, category, group_id, created_at, last_accessed, access_count FROM elements"
                 )
+                elements = cursor.fetchall()
+                for elem_data in elements:
+                    self.memory_graph.add_element(
+                        name=elem_data[1],
+                        category=elem_data[2],
+                        group_id=elem_data[3] or "",
+                        element_id=elem_data[0],
+                        created_at=elem_data[4],
+                        last_accessed=elem_data[5],
+                        access_count=elem_data[6],
+                    )
+
+                cursor.execute("SELECT element_id, memory_id, role FROM element_memories")
+                em_rows = cursor.fetchall()
+                for em_data in em_rows:
+                    self.memory_graph.link_memory(em_data[0], em_data[1], em_data[2] or "")
+
+            if "concepts" in existing_tables:
+                cursor.execute(
+                    "SELECT id, name, created_at, last_accessed, access_count FROM concepts"
+                )
+                concepts = cursor.fetchall()
+                for concept_data in concepts:
+                    self.memory_graph.add_concept(
+                        concept_id=concept_data[0],
+                        name=concept_data[1],
+                        created_at=concept_data[2],
+                        last_accessed=concept_data[3],
+                        access_count=concept_data[4],
+                    )
 
             cursor.execute("PRAGMA table_info('memories')")
             memory_columns = [col[1] for col in cursor.fetchall()]
             has_allow_forget = "allow_forget" in memory_columns
+            has_concept_id = "concept_id" in memory_columns
 
-            # 加载记忆 - 支持群聊隔离
-            if has_allow_forget:
+            if has_allow_forget and not has_concept_id:
+                if group_id:
+                    cursor.execute(
+                        "SELECT id, content, details, emotion, created_at, last_accessed, access_count, strength, allow_forget FROM memories WHERE group_id = ?",
+                        (group_id,),
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT id, content, details, emotion, created_at, last_accessed, access_count, strength, allow_forget FROM memories WHERE group_id = '' OR group_id IS NULL"
+                    )
+                mem_rows = cursor.fetchall()
+                for md in mem_rows:
+                    allow_forget = True if md[8] is None else bool(md[8])
+                    self.memory_graph.add_memory(
+                        content=md[1],
+                        memory_id=md[0],
+                        details=md[2] or "",
+                        emotion=md[3] or "",
+                        created_at=md[4],
+                        last_accessed=md[5],
+                        access_count=md[6],
+                        strength=md[7],
+                        allow_forget=allow_forget,
+                        group_id=group_id,
+                    )
+            elif has_allow_forget:
                 if group_id:
                     cursor.execute(
                         "SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength, allow_forget FROM memories WHERE group_id = ?",
@@ -508,6 +506,24 @@ class MemorySystem:
                 else:
                     cursor.execute(
                         "SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength, allow_forget FROM memories WHERE group_id = '' OR group_id IS NULL"
+                    )
+                mem_rows = cursor.fetchall()
+                for md in mem_rows:
+                    allow_forget = True if md[12] is None else bool(md[12])
+                    self.memory_graph.add_memory(
+                        content=md[2],
+                        memory_id=md[0],
+                        details=md[3] or "",
+                        participants=md[4] or "",
+                        location=md[5] or "",
+                        emotion=md[6] or "",
+                        tags=md[7] or "",
+                        created_at=md[8],
+                        last_accessed=md[9],
+                        access_count=md[10],
+                        strength=md[11],
+                        allow_forget=allow_forget,
+                        group_id=group_id,
                     )
             else:
                 if group_id:
@@ -519,48 +535,50 @@ class MemorySystem:
                     cursor.execute(
                         "SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength FROM memories WHERE group_id = '' OR group_id IS NULL"
                     )
-            memories = cursor.fetchall()
-            for memory_data in memories:
-                allow_forget = True
-                if has_allow_forget and len(memory_data) > 12:
-                    allow_forget = (
-                        True if memory_data[12] is None else bool(memory_data[12])
+                mem_rows = cursor.fetchall()
+                for md in mem_rows:
+                    self.memory_graph.add_memory(
+                        content=md[2],
+                        memory_id=md[0],
+                        details=md[3] or "",
+                        participants=md[4] or "",
+                        location=md[5] or "",
+                        emotion=md[6] or "",
+                        tags=md[7] or "",
+                        created_at=md[8],
+                        last_accessed=md[9],
+                        access_count=md[10],
+                        strength=md[11],
+                        group_id=group_id,
                     )
-                self.memory_graph.add_memory(
-                    content=memory_data[2],
-                    concept_id=memory_data[1],
-                    memory_id=memory_data[0],
-                    details=memory_data[3] or "",
-                    participants=memory_data[4] or "",
-                    location=memory_data[5] or "",
-                    emotion=memory_data[6] or "",
-                    tags=memory_data[7] or "",
-                    created_at=memory_data[8],
-                    last_accessed=memory_data[9],
-                    access_count=memory_data[10],
-                    strength=memory_data[11],
-                    allow_forget=allow_forget,
-                    group_id=group_id,
-                )
 
-            # 加载连接
-            cursor.execute(
-                "SELECT id, from_concept, to_concept, strength, last_strengthened FROM connections"
-            )
-            connections = cursor.fetchall()
-            for conn_data in connections:
-                self.memory_graph.add_connection(
-                    from_concept=conn_data[1],
-                    to_concept=conn_data[2],
-                    strength=conn_data[3],
-                    connection_id=conn_data[0],
-                    last_strengthened=conn_data[4],
-                )
+            if "connections" in existing_tables:
+                cursor.execute("PRAGMA table_info('connections')")
+                conn_columns = {col[1] for col in cursor.fetchall()}
 
-            # 仅在成功加载时输出一次统计信息
+                if "from_element" in conn_columns:
+                    cursor.execute(
+                        "SELECT id, from_element, to_element, strength, last_strengthened FROM connections"
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT id, from_concept, to_concept, strength, last_strengthened FROM connections"
+                    )
+                connections = cursor.fetchall()
+                for conn_data in connections:
+                    self.memory_graph.add_connection(
+                        from_element=conn_data[1],
+                        to_element=conn_data[2],
+                        strength=conn_data[3],
+                        connection_id=conn_data[0],
+                        last_strengthened=conn_data[4],
+                    )
+
+            elem_count = len(self.memory_graph.elements)
+            mem_count = len(self.memory_graph.memories)
             group_info = f" (群: {group_id})" if group_id else ""
             self._debug_log(
-                f"记忆系统加载{group_info}，包含 {len(concepts)} 个概念，{len(memories)} 条记忆",
+                f"记忆系统加载{group_info}，包含 {elem_count} 个元素，{mem_count} 条记忆",
                 "debug",
             )
 
@@ -573,82 +591,99 @@ class MemorySystem:
     async def save_memory_state(self, group_id: str = ""):
         """保存记忆状态到数据库"""
         try:
-            # 获取对应的数据库路径
             db_path = self._get_group_db_path(group_id)
-
-            # 确保数据库和表存在
             await self._ensure_database_structure(db_path)
-
-            # 使用连接池获取数据库连接
             conn = resource_manager.get_db_connection(db_path)
             cursor = conn.cursor()
-
-            # 使用事务确保数据一致性
             cursor.execute("BEGIN TRANSACTION")
 
             try:
-                # 增量更新概念
-                for concept in self.memory_graph.concepts.values():
+                for element in self.memory_graph.elements.values():
                     cursor.execute(
                         """
-                        INSERT OR REPLACE INTO concepts
-                        (id, name, created_at, last_accessed, access_count)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT OR REPLACE INTO elements
+                        (id, name, category, group_id, created_at, last_accessed, access_count)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                         (
-                            concept.id,
-                            concept.name,
-                            concept.created_at,
-                            concept.last_accessed,
-                            concept.access_count,
+                            element.id,
+                            element.name,
+                            element.category,
+                            element.group_id,
+                            element.created_at,
+                            element.last_accessed,
+                            element.access_count,
                         ),
                     )
 
-                # 增量更新记忆
                 for memory in self.memory_graph.memories.values():
+                    cursor.execute("PRAGMA table_info('memories')")
+                    mem_cols = {col[1] for col in cursor.fetchall()}
+                    if "concept_id" in mem_cols:
+                        cursor.execute(
+                            """
+                            INSERT OR REPLACE INTO memories
+                            (id, content, details, emotion, created_at, last_accessed, access_count, strength, allow_forget, group_id, concept_id, participants, location, tags)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', '')
+                        """,
+                            (
+                                memory.id,
+                                memory.content,
+                                getattr(memory, 'details', '') or '',
+                                getattr(memory, 'emotion', '') or '',
+                                memory.created_at,
+                                memory.last_accessed,
+                                memory.access_count,
+                                memory.strength,
+                                int(bool(memory.allow_forget)),
+                                group_id,
+                            ),
+                        )
+                    else:
+                        cursor.execute(
+                            """
+                            INSERT OR REPLACE INTO memories
+                            (id, content, details, emotion, created_at, last_accessed, access_count, strength, allow_forget, group_id)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                            (
+                                memory.id,
+                                memory.content,
+                                getattr(memory, 'details', '') or '',
+                                getattr(memory, 'emotion', '') or '',
+                                memory.created_at,
+                                memory.last_accessed,
+                                memory.access_count,
+                                memory.strength,
+                                int(bool(memory.allow_forget)),
+                                group_id,
+                            ),
+                        )
+
+                cursor.execute("DELETE FROM element_memories")
+                for em in self.memory_graph.element_memories:
                     cursor.execute(
-                        """
-                        INSERT OR REPLACE INTO memories
-                        (id, concept_id, content, details, participants,
-                        location, emotion, tags, created_at, last_accessed, access_count, strength, allow_forget, group_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                        (
-                            memory.id,
-                            memory.concept_id,
-                            memory.content,
-                            memory.details,
-                            memory.participants,
-                            memory.location,
-                            memory.emotion,
-                            memory.tags,
-                            memory.created_at,
-                            memory.last_accessed,
-                            memory.access_count,
-                            memory.strength,
-                            int(bool(memory.allow_forget)),
-                            group_id,
-                        ),
+                        "INSERT OR REPLACE INTO element_memories (element_id, memory_id, role) VALUES (?, ?, ?)",
+                        (em.element_id, em.memory_id, em.role),
                     )
 
-                # 增量更新连接
+                cursor.execute("PRAGMA table_info('connections')")
+                conn_cols = {col[1] for col in cursor.fetchall()}
+                from_col = "from_element" if "from_element" in conn_cols else "from_concept"
+                to_col = "to_element" if "to_element" in conn_cols else "to_concept"
+
                 existing_connections = set()
                 cursor.execute("SELECT id FROM connections")
                 for row in cursor.fetchall():
                     existing_connections.add(row[0])
 
-                # 更新现有连接
                 for conn_obj in self.memory_graph.connections:
                     if conn_obj.id in existing_connections:
                         cursor.execute(
-                            """
-                            UPDATE connections
-                            SET from_concept=?, to_concept=?, strength=?, last_strengthened=?
-                            WHERE id=?
-                        """,
+                            f"UPDATE connections SET {from_col}=?, {to_col}=?, strength=?, last_strengthened=? WHERE id=?",
                             (
-                                conn_obj.from_concept,
-                                conn_obj.to_concept,
+                                conn_obj.from_element,
+                                conn_obj.to_element,
                                 conn_obj.strength,
                                 conn_obj.last_strengthened,
                                 conn_obj.id,
@@ -656,39 +691,30 @@ class MemorySystem:
                         )
                     else:
                         cursor.execute(
-                            """
-                            INSERT INTO connections (id, from_concept, to_concept, strength, last_strengthened)
-                            VALUES (?, ?, ?, ?, ?)
-                        """,
+                            f"INSERT INTO connections (id, {from_col}, {to_col}, strength, last_strengthened) VALUES (?, ?, ?, ?, ?)",
                             (
                                 conn_obj.id,
-                                conn_obj.from_concept,
-                                conn_obj.to_concept,
+                                conn_obj.from_element,
+                                conn_obj.to_element,
                                 conn_obj.strength,
                                 conn_obj.last_strengthened,
                             ),
                         )
 
-                # 提交事务
                 conn.commit()
-
-                # 释放连接回连接池
                 resource_manager.release_db_connection(db_path, conn)
 
-                # 简化的保存完成日志
                 group_info = f" (群: {group_id})" if group_id else ""
                 self._debug_log(
-                    f"记忆保存完成{group_info}: {len(self.memory_graph.concepts)}个概念, {len(self.memory_graph.memories)}条记忆",
+                    f"记忆保存完成{group_info}: {len(self.memory_graph.elements)}个元素, {len(self.memory_graph.memories)}条记忆",
                     "debug",
                 )
 
             except Exception as e:
                 try:
-                    # 回滚事务
                     conn.rollback()
                 except Exception as rollback_e:
                     self._debug_log(f"回滚失败: {rollback_e}", "error")
-                # 释放连接回连接池
                 resource_manager.release_db_connection(db_path, conn)
                 self._debug_log(f"保存失败: {e}", "error")
                 raise
@@ -734,15 +760,52 @@ class MemorySystem:
     async def _ensure_database_structure(self, db_path: str):
         """确保数据库和所需的表结构存在"""
         try:
-            # 使用连接池获取数据库连接
             conn = resource_manager.get_db_connection(db_path)
             cursor = conn.cursor()
 
-            # 检查表是否存在
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
             existing_tables = {row[0] for row in cursor.fetchall()}
 
-            # 创建所需的表（如果不存在）
+            has_legacy = "concepts" in existing_tables and "elements" not in existing_tables
+
+            if has_legacy:
+                self._migrate_legacy_to_elements(cursor, conn, db_path)
+                conn.commit()
+                resource_manager.release_db_connection(db_path, conn)
+                self.memory_graph = MemoryGraph()
+                self.load_memory_state("")
+                return
+
+            if "elements" not in existing_tables:
+                cursor.execute("""
+                    CREATE TABLE elements (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        group_id TEXT DEFAULT '',
+                        created_at REAL,
+                        last_accessed REAL,
+                        access_count INTEGER DEFAULT 0
+                    )
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_elements_category ON elements(category)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_elements_group ON elements(group_id)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_elements_name ON elements(name)")
+                self._debug_log("创建表: elements", "debug")
+
+            if "element_memories" not in existing_tables:
+                cursor.execute("""
+                    CREATE TABLE element_memories (
+                        element_id TEXT NOT NULL,
+                        memory_id TEXT NOT NULL,
+                        role TEXT DEFAULT '',
+                        PRIMARY KEY (element_id, memory_id)
+                    )
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_em_element ON element_memories(element_id)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_em_memory ON element_memories(memory_id)")
+                self._debug_log("创建表: element_memories", "debug")
+
             if "concepts" not in existing_tables:
                 cursor.execute("""
                     CREATE TABLE concepts (
@@ -753,41 +816,26 @@ class MemorySystem:
                         access_count INTEGER DEFAULT 0
                     )
                 """)
-                self._debug_log("创建表: concepts", "debug")
+                self._debug_log("创建表: concepts (兼容)", "debug")
 
             if "memories" not in existing_tables:
                 cursor.execute("""
                     CREATE TABLE memories (
                         id TEXT PRIMARY KEY,
-                        concept_id TEXT NOT NULL,
                         content TEXT NOT NULL,
-                        details TEXT,
-                        participants TEXT,
-                        location TEXT,
-                        emotion TEXT,
-                        tags TEXT,
+                        details TEXT DEFAULT '',
+                        emotion TEXT DEFAULT '',
                         created_at REAL,
                         last_accessed REAL,
                         access_count INTEGER DEFAULT 0,
                         strength REAL DEFAULT 1.0,
                         allow_forget INTEGER DEFAULT 1,
-                        group_id TEXT DEFAULT "",
-                        FOREIGN KEY (concept_id) REFERENCES concepts (id)
+                        group_id TEXT DEFAULT ''
                     )
                 """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_group_id ON memories(group_id)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_created_group ON memories(created_at, group_id)")
                 self._debug_log("创建表: memories", "debug")
-
-                # 创建群聊隔离相关的索引
-                cursor.execute("""
-                    CREATE INDEX idx_memories_group_id ON memories(group_id)
-                """)
-                cursor.execute("""
-                    CREATE INDEX idx_memories_concept_group ON memories(concept_id, group_id)
-                """)
-                cursor.execute("""
-                    CREATE INDEX idx_memories_created_group ON memories(created_at, group_id)
-                """)
-                self._debug_log("创建群聊隔离索引", "debug")
             else:
                 cursor.execute("PRAGMA table_info('memories')")
                 memory_columns = {col[1] for col in cursor.fetchall()}
@@ -803,69 +851,282 @@ class MemorySystem:
                 cursor.execute("""
                     CREATE TABLE connections (
                         id TEXT PRIMARY KEY,
-                        from_concept TEXT NOT NULL,
-                        to_concept TEXT NOT NULL,
+                        from_element TEXT NOT NULL,
+                        to_element TEXT NOT NULL,
                         strength REAL DEFAULT 1.0,
-                        last_strengthened REAL,
-                        FOREIGN KEY (from_concept) REFERENCES concepts (id),
-                        FOREIGN KEY (to_concept) REFERENCES concepts (id)
+                        last_strengthened REAL
                     )
                 """)
                 self._debug_log("创建表: connections", "debug")
 
             conn.commit()
-
-            # 释放连接回连接池
             resource_manager.release_db_connection(db_path, conn)
 
         except Exception as e:
             self._debug_log(f"确保数据库结构异常: {e}", "error")
             raise
 
-    async def process_message(self, event: AstrMessageEvent, group_id: str = ""):
-        """处理消息，形成记忆（旧方法，保留兼容性）"""
+    def _migrate_legacy_to_elements(self, cursor, conn, db_path: str):
+        """将旧 concepts/memories/connections 表迁移到 elements 体系"""
         try:
-            # 获取对话历史
-            history = await self.get_conversation_history(event)
-            if not history:
+            self._debug_log("开始从旧概念体系迁移到元素体系...", "info")
+
+            backup_path = db_path.replace(".db", "_pre_element_migration_backup.db")
+            import shutil
+            if not os.path.exists(backup_path):
+                shutil.copy2(db_path, backup_path)
+                self._debug_log(f"迁移前备份: {backup_path}", "info")
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS elements (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    group_id TEXT DEFAULT '',
+                    created_at REAL,
+                    last_accessed REAL,
+                    access_count INTEGER DEFAULT 0
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_elements_category ON elements(category)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_elements_group ON elements(group_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_elements_name ON elements(name)")
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS element_memories (
+                    element_id TEXT NOT NULL,
+                    memory_id TEXT NOT NULL,
+                    role TEXT DEFAULT '',
+                    PRIMARY KEY (element_id, memory_id)
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_em_element ON element_memories(element_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_em_memory ON element_memories(memory_id)")
+
+            cursor.execute("SELECT id, name, created_at, last_accessed, access_count FROM concepts")
+            old_concepts = cursor.fetchall()
+            concept_to_elements: dict[str, list[str]] = {}
+
+            for concept_data in old_concepts:
+                concept_id = concept_data[0]
+                concept_name = concept_data[1]
+                created_at = concept_data[2]
+                last_accessed = concept_data[3]
+                access_count = concept_data[4]
+
+                if concept_name.startswith("Imprint:"):
+                    parts = concept_name.split(":", 2)
+                    person_name = parts[2] if len(parts) >= 3 else concept_name
+                    group_id = parts[1] if len(parts) >= 2 else ""
+                    elem_id = f"elem_{int(time.time() * 1000)}_{hash(person_name) % 10000}"
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO elements (id, name, category, group_id, created_at, last_accessed, access_count) VALUES (?, ?, 'person', ?, ?, ?, ?)",
+                        (elem_id, person_name, group_id, created_at, last_accessed, access_count),
+                    )
+                    concept_to_elements[concept_id] = [elem_id]
+                else:
+                    keywords = [k.strip() for k in concept_name.replace("，", ",").split(",") if k.strip()]
+                    elem_ids = []
+                    for kw in keywords:
+                        category = self._infer_category(kw)
+                        cursor.execute("SELECT id FROM elements WHERE name = ? AND category = ?", (kw, category))
+                        existing = cursor.fetchone()
+                        if existing:
+                            elem_ids.append(existing[0])
+                        else:
+                            elem_id = f"elem_{int(time.time() * 1000)}_{hash(kw) % 10000}"
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO elements (id, name, category, group_id, created_at, last_accessed, access_count) VALUES (?, ?, ?, '', ?, ?, ?)",
+                                (elem_id, kw, category, created_at, last_accessed, access_count),
+                            )
+                            elem_ids.append(elem_id)
+                    concept_to_elements[concept_id] = elem_ids
+
+            cursor.execute("PRAGMA table_info('memories')")
+            memory_columns = {col[1] for col in cursor.fetchall()}
+
+            if "concept_id" in memory_columns:
+                cursor.execute("SELECT id, concept_id, content, details, participants, location, emotion, tags, created_at, last_accessed, access_count, strength, allow_forget, group_id FROM memories")
+            else:
+                cursor.execute("SELECT id, content, details, emotion, created_at, last_accessed, access_count, strength, allow_forget, group_id FROM memories")
                 return
 
-            # 提取主题和关键词
-            themes = await self.extract_themes(history)
+            old_memories = cursor.fetchall()
+            for mem_data in old_memories:
+                memory_id = mem_data[0]
+                concept_id = mem_data[1]
+                participants = mem_data[4]
+                location = mem_data[5]
+                tags = mem_data[7]
 
-            # 形成记忆
-            for theme in themes:
-                memory_content = await self.form_memory(theme, history, event)
-                if memory_content:
-                    concept_id = self.memory_graph.add_concept(theme)
-                    memory_id = self.memory_graph.add_memory(
-                        memory_content, concept_id, group_id=group_id
+                elem_ids = concept_to_elements.get(concept_id, [])
+
+                for eid in elem_ids:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO element_memories (element_id, memory_id, role) VALUES (?, ?, '')",
+                        (eid, memory_id),
                     )
 
-                    # 建立连接
-                    self.establish_connections(concept_id, themes)
+                if participants:
+                    for p in participants.replace("，", ",").split(","):
+                        p = p.strip()
+                        if not p:
+                            continue
+                        cursor.execute("SELECT id FROM elements WHERE name = ? AND category = 'person'", (p,))
+                        existing = cursor.fetchone()
+                        if existing:
+                            eid = existing[0]
+                        else:
+                            eid = f"elem_{int(time.time() * 1000)}_{hash(p) % 10000}"
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO elements (id, name, category, group_id, created_at, last_accessed, access_count) VALUES (?, ?, 'person', '', ?, ?, 0)",
+                                (eid, p, time.time(), time.time()),
+                            )
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO element_memories (element_id, memory_id, role) VALUES (?, ?, 'subject')",
+                            (eid, memory_id),
+                        )
 
-            # 根据回忆模式决定是否触发回忆
-            recall_mode = self.memory_config["recall_mode"]
-            should_trigger = False
+                if location:
+                    for loc in location.replace("，", ",").split(","):
+                        loc = loc.strip()
+                        if not loc:
+                            continue
+                        cursor.execute("SELECT id FROM elements WHERE name = ? AND category = 'place'", (loc,))
+                        existing = cursor.fetchone()
+                        if existing:
+                            eid = existing[0]
+                        else:
+                            eid = f"elem_{int(time.time() * 1000)}_{hash(loc) % 10000}"
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO elements (id, name, category, group_id, created_at, last_accessed, access_count) VALUES (?, ?, 'place', '', ?, ?, 0)",
+                                (eid, loc, time.time(), time.time()),
+                            )
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO element_memories (element_id, memory_id, role) VALUES (?, ?, 'scene')",
+                            (eid, memory_id),
+                        )
 
-            if recall_mode == "simple" or recall_mode == "embedding":
-                # 关键词和嵌入模式每次都触发
-                should_trigger = True
-            elif recall_mode == "llm":
-                # LLM模式按概率触发
-                trigger_probability = self.memory_config.get(
-                    "recall_trigger_probability", 0.6
-                )
-                should_trigger = random.random() < trigger_probability
+                if tags:
+                    for tag in tags.replace("，", ",").split(","):
+                        tag = tag.strip()
+                        if not tag:
+                            continue
+                        category = self._infer_category(tag)
+                        cursor.execute(
+                            "SELECT id FROM elements WHERE name = ? AND category = ?",
+                            (tag, category),
+                        )
+                        existing = cursor.fetchone()
+                        if existing:
+                            eid = existing[0]
+                        else:
+                            eid = f"elem_{int(time.time() * 1000)}_{hash(tag) % 10000}"
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO elements (id, name, category, group_id, created_at, last_accessed, access_count) VALUES (?, ?, ?, '', ?, ?, 0)",
+                                (eid, tag, category, time.time(), time.time()),
+                            )
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO element_memories (element_id, memory_id, role) VALUES (?, ?, 'tag')",
+                            (eid, memory_id),
+                        )
 
-            if should_trigger:
-                recalled = await self.recall_memories("", event)
-                if recalled:
-                    logger.debug(f"触发了回忆: {recalled[:2]} (模式: {recall_mode})")
+            if "concept_id" in memory_columns or "participants" in memory_columns or "location" in memory_columns or "tags" in memory_columns:
+                try:
+                    cols_to_drop = []
+                    for col in ["concept_id", "participants", "location", "tags"]:
+                        if col in memory_columns:
+                            cols_to_drop.append(col)
+                    if cols_to_drop:
+                        keep_cols = [c for c in memory_columns if c not in cols_to_drop]
+                        col_defs = []
+                        for col_name in keep_cols:
+                            col_defs.append(f'"{col_name}"')
+                        cursor.execute(f"CREATE TABLE memories_new AS SELECT {', '.join(col_defs)} FROM memories")
+                        cursor.execute("DROP TABLE memories")
+                        cursor.execute("ALTER TABLE memories_new RENAME TO memories")
+                        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_group_id ON memories(group_id)")
+                        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_created_group ON memories(created_at, group_id)")
+                except Exception as drop_err:
+                    self._debug_log(f"清理旧字段时出错（可忽略）: {drop_err}", "warning")
+
+            try:
+                cursor.execute("SELECT id, from_concept, to_concept, strength, last_strengthened FROM connections")
+                old_connections = cursor.fetchall()
+                for oc in old_connections:
+                    conn_id = oc[0]
+                    from_c = oc[1]
+                    to_c = oc[2]
+                    strength = oc[3]
+                    last_s = oc[4]
+                    from_elems = concept_to_elements.get(from_c, [])
+                    to_elems = concept_to_elements.get(to_c, [])
+                    for fe in from_elems:
+                        for te in to_elems:
+                            new_id = f"conn_{fe}_{te}"
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO connections (id, from_element, to_element, strength, last_strengthened) VALUES (?, ?, ?, ?, ?)",
+                                (new_id, fe, te, strength, last_s),
+                            )
+                cursor.execute("DROP TABLE IF EXISTS connections")
+                cursor.execute("""
+                    CREATE TABLE connections (
+                        id TEXT PRIMARY KEY,
+                        from_element TEXT NOT NULL,
+                        to_element TEXT NOT NULL,
+                        strength REAL DEFAULT 1.0,
+                        last_strengthened REAL
+                    )
+                """)
+                for oc in old_connections:
+                    from_c = oc[1]
+                    to_c = oc[2]
+                    strength = oc[3]
+                    last_s = oc[4]
+                    from_elems = concept_to_elements.get(from_c, [])
+                    to_elems = concept_to_elements.get(to_c, [])
+                    for fe in from_elems:
+                        for te in to_elems:
+                            new_id = f"conn_{fe}_{te}"
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO connections (id, from_element, to_element, strength, last_strengthened) VALUES (?, ?, ?, ?, ?)",
+                                (new_id, fe, te, strength, last_s),
+                            )
+            except Exception as conn_err:
+                self._debug_log(f"连接迁移出错（可忽略）: {conn_err}", "warning")
+
+            self._debug_log("旧概念体系迁移到元素体系完成", "info")
 
         except Exception as e:
-            logger.error(f"处理消息时出错: {e}")
+            self._debug_log(f"迁移失败: {e}", "error")
+
+    def _infer_category(self, keyword: str) -> str:
+        """根据关键词推断元素类型"""
+        if not keyword:
+            return "trait"
+        kw = keyword.strip()
+
+        cursor_for_check = None
+        try:
+            db_path = self.db_path
+            conn_check = resource_manager.get_db_connection(db_path)
+            cursor_for_check = conn_check.cursor()
+            cursor_for_check.execute(
+                "SELECT name FROM elements WHERE category = 'person'"
+            )
+            known_persons = {row[0] for row in cursor_for_check.fetchall()}
+            if kw in known_persons:
+                return "person"
+        except Exception:
+            pass
+        finally:
+            if cursor_for_check:
+                try:
+                    resource_manager.release_db_connection(db_path, conn_check)
+                except Exception:
+                    pass
+
+        return "trait"
 
     async def process_message_optimized(
         self, event: AstrMessageEvent, group_id: str = ""
@@ -1099,136 +1360,6 @@ class MemorySystem:
             logger.error(f"获取完整对话历史失败: {e}")
             return []
 
-    async def extract_themes(self, history: list[str]) -> list[str]:
-        """从对话历史中提取主题"""
-        if not history:
-            return []
-
-        # 根据配置选择提取方式
-        if self.memory_config["recall_mode"] in ["llm", "embedding"]:
-            return await self._extract_themes_by_llm(history)
-        else:
-            return await self._extract_themes_simple(history)
-
-    async def _extract_themes_simple(self, history: list[str]) -> list[str]:
-        """简单的关键词提取"""
-        text = " ".join(
-            str(item) if not isinstance(item, str) else item for item in history
-        )
-        keywords = []
-
-        # 提取名词和关键词
-        words = re.findall(r"\b[\u4e00-\u9fff]{2,4}\b", text)
-        word_freq = {}
-        for word in words:
-            if len(word) >= 2 and word not in ["你好", "谢谢", "再见"]:
-                word_freq[word] = word_freq.get(word, 0) + 1
-
-        # 返回频率最高的前5个关键词
-        sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
-        return [str(word) for word, freq in sorted_words[:5]]
-
-    async def _extract_themes_by_llm(self, history: list[str]) -> list[str]:
-        """使用LLM从对话历史中提取主题"""
-        try:
-            if not history:
-                return []
-
-            prompt = f"""请从以下对话中提取3-5个核心主题或关键词。这些主题将用于构建记忆网络。
-
-对话内容：
-{" ".join(map(str, history))}
-
-要求：
-1. 提取的主题应该是对话的核心内容
-2. 每个主题可以包含多个相关关键词，用逗号分隔
-3. 返回格式：主题1关键词1,主题1关键词2,主题2关键词1,主题2关键词2
-4. 每个关键词2-4个汉字
-5. 不要包含解释，只返回主题列表
-6. 例如：工作,项目,会议,学习,考试,复习
-"""
-
-            provider = await self.get_llm_provider()
-            if provider:
-                response = await provider.text_chat(
-                    prompt=prompt,
-                    contexts=[],
-                    system_prompt="你是一个主题提取助手，请准确提取对话的核心主题。",
-                )
-
-                themes_text = response.completion_text.strip()
-                # 清理和分割主题，支持逗号分隔的多个关键词
-                themes = [
-                    theme.strip()
-                    for theme in themes_text.replace("，", ",").split(",")
-                    if theme.strip()
-                ]
-                return themes[:8]  # 最多返回8个关键词/主题
-
-        except Exception as e:
-            logger.error(f"LLM主题提取失败: {e}")
-            return await self._extract_themes_simple(history)  # 回退到简单模式
-
-    async def form_memory(
-        self, theme: str, history: list[str], event: AstrMessageEvent
-    ) -> str:
-        """形成记忆内容"""
-        try:
-            # 使用LLM总结记忆
-            prompt = f"""请将以下关于"{theme}"的对话总结成一句口语化的记忆，就像亲身经历一样：
-            
-            对话内容：{" ".join(map(str, history[-3:]))}
-            
-            要求：
-            1. 如果记忆内容涉及Bot的发言，请使用第一人称"我"来表述
-            2. 如果记忆内容涉及用户的发言，请使用第三人称
-            3. 简洁自然
-            4. 包含关键信息
-            5. 不超过50字
-            """
-
-            if self.memory_config["recall_mode"] == "llm":
-                provider = await self.get_llm_provider()
-                if provider:
-                    response = await provider.text_chat(
-                        prompt=prompt,
-                        contexts=[],
-                        system_prompt=self.memory_config["llm_system_prompt"],
-                    )
-                    return response.completion_text.strip()
-
-            # 简单总结
-            return f"我记得我们聊过关于{theme}的事情"
-
-        except Exception as e:
-            logger.error(f"形成记忆失败: {e}")
-            return f"关于{theme}的记忆"
-
-    def establish_connections(self, concept_id: str, themes: list[str]):
-        """建立概念之间的连接"""
-        try:
-            if concept_id not in self.memory_graph.concepts:
-                logger.warning(f"概念ID不存在: {concept_id}")
-                return
-
-            current_concept = self.memory_graph.concepts[concept_id]
-
-            for other_theme in themes:
-                if other_theme != current_concept.name:
-                    other_concept = None
-                    for concept in self.memory_graph.concepts.values():
-                        if concept.name == other_theme:
-                            other_concept = concept
-                            break
-
-                    if other_concept and other_concept.id != concept_id:
-                        self.memory_graph.add_connection(concept_id, other_concept.id)
-
-        except Exception as e:
-            logger.error(
-                f"建立概念连接时出错: {e}, 概念ID: {concept_id}, 主题: {themes}"
-            )
-
     async def recall_memories_full(self, keyword: str) -> list["Memory"]:
         """回忆相关记忆并返回完整的Memory对象"""
         try:
@@ -1250,189 +1381,6 @@ class MemorySystem:
             logger.error(f"回忆记忆失败: {e}")
             return []
 
-    async def _recall_simple(self, keyword: str) -> list[str]:
-        """增强的简单关键词匹配回忆"""
-        try:
-            if not keyword:
-                # 随机回忆，优先选择强度高的记忆
-                memories = list(self.memory_graph.memories.values())
-                if memories:
-                    # 按记忆强度和时间排序
-                    memories.sort(
-                        key=lambda m: (m.strength, m.last_accessed), reverse=True
-                    )
-                    selected = memories[: min(3, len(memories))]
-                    return [m.content for m in selected]
-                return []
-
-            # 增强的关键词匹配，支持多关键词匹配
-            related_memories = []
-            keyword_lower = keyword.lower()
-
-            # 直接概念匹配，支持逗号分隔的多关键词
-            for concept in self.memory_graph.concepts.values():
-                concept_name_lower = concept.name.lower()
-
-                # 检查概念名称是否包含任意关键词
-                concept_keywords = concept_name_lower.split(",")
-                for concept_keyword in concept_keywords:
-                    concept_keyword = concept_keyword.strip()
-                    if (
-                        keyword_lower in concept_keyword
-                        or concept_keyword in keyword_lower
-                        or any(
-                            kw.strip() in concept_keyword
-                            for kw in keyword_lower.split(",")
-                        )
-                    ):
-                        concept_memories = [
-                            m
-                            for m in self.memory_graph.memories.values()
-                            if m.concept_id == concept.id
-                        ]
-                        # 按记忆强度排序
-                        concept_memories.sort(key=lambda m: m.strength, reverse=True)
-                        for memory in concept_memories[:2]:  # 每个概念最多2条
-                            if memory.content not in related_memories:
-                                related_memories.append(memory.content)
-                        break
-
-            # 内容关键词匹配
-            for memory in self.memory_graph.memories.values():
-                if keyword_lower in memory.content.lower():
-                    if memory.content not in related_memories:
-                        related_memories.append(memory.content)
-
-            # 去重并限制数量
-            seen = set()
-            unique_memories = []
-            for memory in related_memories:
-                if memory not in seen:
-                    seen.add(memory)
-                    unique_memories.append(memory)
-                    if len(unique_memories) >= 5:
-                        break
-
-            return unique_memories
-
-        except Exception as e:
-            logger.error(f"简单回忆失败: {e}")
-            return []
-
-    async def _recall_llm(self, keyword: str, event: AstrMessageEvent) -> list[str]:
-        """LLM智能回忆"""
-        try:
-            if not self.memory_graph.memories:
-                return []
-
-            # 获取所有记忆内容
-            all_memories = [m.content for m in self.memory_graph.memories.values()]
-
-            if not keyword:
-                # 随机选择3条记忆
-                return random.sample(all_memories, min(3, len(all_memories)))
-
-            # 使用LLM进行智能回忆
-            prompt = f"""请从以下记忆列表中，找出与用户提问“{keyword}”最相关的3-5条记忆。
-
-记忆列表：
-{chr(10).join(f"- {mem}" for mem in all_memories)}
-
-严格按照以下JSON格式返回结果，不要有任何多余的解释：
-{{
-  "recalled_memories": [
-    "记忆1",
-    "记忆2",
-    ...
-  ]
-}}
-
-如果找不到任何相关记忆，或记忆列表为空，请返回一个空列表：
-{{
-  "recalled_memories": []
-}}
-"""
-
-            provider = await self.get_llm_provider()
-            if provider:
-                response = await provider.text_chat(
-                    prompt=prompt,
-                    contexts=[],
-                    system_prompt="你是一个记忆检索助手，你的任务是严格按照JSON格式返回检索到的记忆。",
-                )
-
-                try:
-                    # 提取并解析JSON
-                    completion_text = response.completion_text.strip()
-                    json_match = re.search(r"\{.*\}", completion_text, re.DOTALL)
-                    if json_match:
-                        json_str = json_match.group(0)
-                        data = json.loads(json_str)
-                        recalled = data.get("recalled_memories", [])
-                        # 确保返回的是列表
-                        if isinstance(recalled, list):
-                            return recalled[:5]
-                    self._debug_log("LLM响应中未找到JSON格式", "warning")
-                    return []  # 如果没有找到JSON或解析失败
-                except json.JSONDecodeError as e:
-                    self._debug_log(
-                        f"JSON解析失败: {e}, 响应: {completion_text[:200]}...", "error"
-                    )
-                    return []  # JSON解析失败
-                except Exception as e:
-                    self._debug_log(f"JSON解析异常: {e}", "error")
-                    return []
-
-            # LLM不可用，回退到简单模式
-            return await self._recall_simple(keyword)
-
-        except Exception as e:
-            logger.error(f"LLM回忆失败: {e}")
-            return await self._recall_simple(keyword)
-
-    async def _recall_embedding(self, keyword: str) -> list[str]:
-        """基于嵌入向量的相似度回忆"""
-        try:
-            if not keyword or not self.memory_graph.memories:
-                # 随机回忆
-                memories = list(self.memory_graph.memories.values())
-                if memories:
-                    selected = random.sample(memories, min(3, len(memories)))
-                    return [m.content for m in selected]
-                return []
-
-            # 检查是否配置了嵌入提供商，如果没有直接回退到简单模式
-            provider = await self.get_embedding_provider()
-            if not provider:
-                logger.debug("嵌入提供商不可用，回退到简单模式")
-                return await self._recall_simple(keyword)
-
-            # 获取关键词的嵌入向量
-            keyword_embedding = await self.get_embedding(keyword)
-            if not keyword_embedding:
-                logger.debug("无法获取关键词嵌入向量，回退到简单模式")
-                return await self._recall_simple(keyword)
-
-            # 计算与所有记忆的相似度
-            memory_similarities = []
-            for memory in self.memory_graph.memories.values():
-                memory_embedding = await self.get_embedding(memory.content)
-                if memory_embedding:
-                    similarity = self._cosine_similarity(
-                        keyword_embedding, memory_embedding
-                    )
-                    memory_similarities.append((memory, similarity))
-
-            # 按相似度排序
-            memory_similarities.sort(key=lambda x: x[1], reverse=True)
-
-            # 返回最相似的5条记忆
-            return [mem.content for mem, sim in memory_similarities[:5] if sim > 0.3]
-
-        except Exception as e:
-            logger.error(f"嵌入回忆失败: {e}")
-            return await self._recall_simple(keyword)
-
     def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
         """计算余弦相似度"""
         try:
@@ -1450,237 +1398,6 @@ class MemorySystem:
         except Exception:
             return 0.0
 
-    async def _get_associative_memories(self, core_memories: list[str]) -> list[str]:
-        """基于核心记忆获取联想记忆"""
-        try:
-            if not core_memories or not self.memory_graph.memories:
-                return []
-
-            # 找到核心记忆对应的概念节点
-            core_concepts = set()
-            for memory_content in core_memories:
-                for memory in self.memory_graph.memories.values():
-                    if memory.content == memory_content:
-                        core_concepts.add(memory.concept_id)
-                        break
-
-            if not core_concepts:
-                return []
-
-            # 收集与核心概念直接相连的相邻概念
-            adjacent_concepts = set()
-            for concept_id in core_concepts:
-                neighbors = self.memory_graph.get_neighbors(concept_id)
-                for neighbor_id, strength in neighbors:
-                    if neighbor_id not in core_concepts and strength > 0.3:
-                        adjacent_concepts.add(neighbor_id)
-
-            # 收集相邻概念下的记忆
-            associative_memories = []
-            for concept_id in adjacent_concepts:
-                concept_memories = [
-                    m
-                    for m in self.memory_graph.memories.values()
-                    if m.concept_id == concept_id
-                ]
-
-                # 按记忆强度和时间排序
-                concept_memories.sort(
-                    key=lambda m: (m.strength, m.last_accessed), reverse=True
-                )
-
-                # 每个相邻概念最多添加1条记忆
-                if concept_memories:
-                    associative_memories.append(concept_memories[0].content)
-
-            return associative_memories
-
-        except Exception as e:
-            logger.error(f"获取联想记忆失败: {e}")
-            return []
-
-    def _merge_memories_with_associative(
-        self, core_memories: list[str], associative_memories: list[str]
-    ) -> list[str]:
-        """合并核心记忆和联想记忆"""
-        try:
-            # 去重并合并
-            all_memories = []
-            seen = set()
-
-            # 核心记忆在前
-            for memory in core_memories:
-                if memory not in seen:
-                    seen.add(memory)
-                    all_memories.append(memory)
-
-            # 联想记忆在后
-            for memory in associative_memories:
-                if memory not in seen:
-                    seen.add(memory)
-                    all_memories.append(memory)
-
-            # 限制总数量
-            return all_memories[:5]
-
-        except Exception as e:
-            logger.error(f"合并记忆失败: {e}")
-            return core_memories
-
-    async def _recall_by_activation(self, keyword: str) -> list[str]:
-        """基于激活扩散的回忆算法"""
-        try:
-            if not self.memory_graph.concepts or not self.memory_graph.memories:
-                return []
-
-            # 如果没有关键词，随机回忆
-            if not keyword:
-                memories = list(self.memory_graph.memories.values())
-                if memories:
-                    selected = random.sample(memories, min(3, len(memories)))
-                    return [m.content for m in selected]
-                return []
-
-            # 找到初始激活的概念节点
-            initial_concepts = []
-            for concept in self.memory_graph.concepts.values():
-                if keyword.lower() in concept.name.lower():
-                    initial_concepts.append(concept)
-
-            if not initial_concepts:
-                # 如果没有直接匹配，使用简单关键词匹配
-                return await self._recall_simple(keyword)
-
-            # 激活扩散算法
-            activation_map = {}  # concept_id -> activation_energy
-            visited = set()
-
-            # 初始化激活
-            for concept in initial_concepts:
-                activation_map[concept.id] = 1.0  # 初始能量为1.0
-
-            # 扩散参数，以后加配置文件
-            decay_factor = 0.7  # 能量衰减因子
-            min_threshold = 0.1  # 最小激活阈值
-            max_hops = 3  # 最大扩散步数
-
-            # 进行扩散
-            for hop in range(max_hops):
-                new_activations = {}
-
-                for concept_id, energy in activation_map.items():
-                    if concept_id in visited:
-                        continue
-
-                    # 获取该节点的所有连接
-                    related_connections = [
-                        conn
-                        for conn in self.memory_graph.connections
-                        if conn.from_concept == concept_id
-                        or conn.to_concept == concept_id
-                    ]
-
-                    for conn in related_connections:
-                        # 确定相邻节点
-                        neighbor_id = (
-                            conn.to_concept
-                            if conn.from_concept == concept_id
-                            else conn.from_concept
-                        )
-
-                        if neighbor_id in self.memory_graph.concepts:
-                            # 计算传递的能量
-                            transferred_energy = energy * conn.strength * decay_factor
-
-                            if transferred_energy > min_threshold:
-                                if neighbor_id not in new_activations:
-                                    new_activations[neighbor_id] = 0
-                                new_activations[neighbor_id] += transferred_energy
-
-                    visited.add(concept_id)
-
-                # 合并新的激活
-                for concept_id, energy in new_activations.items():
-                    if concept_id not in activation_map:
-                        activation_map[concept_id] = 0
-                    activation_map[concept_id] += energy
-
-            # 收集被激活的概念下的记忆
-            activated_memories = []
-            adjacent_memories = []
-
-            # 获取高激活的核心概念
-            core_concepts = [
-                concept_id
-                for concept_id, energy in activation_map.items()
-                if energy > min_threshold
-            ]
-
-            # 收集核心概念下的记忆
-            for concept_id in core_concepts:
-                concept_memories = [
-                    m
-                    for m in self.memory_graph.memories.values()
-                    if m.concept_id == concept_id
-                ]
-
-                # 按记忆强度和时间排序
-                concept_memories.sort(
-                    key=lambda m: (m.strength, m.last_accessed), reverse=True
-                )
-
-                # 添加核心记忆
-                for memory in concept_memories[:2]:  # 每个概念最多2条记忆
-                    activated_memories.append(memory.content)
-
-            # 收集相邻概念的记忆（与核心概念直接相连的概念）
-            adjacent_concepts = set()
-            for concept_id in core_concepts:
-                for conn in self.memory_graph.connections:
-                    if conn.from_concept == concept_id:
-                        adjacent_concepts.add(conn.to_concept)
-                    elif conn.to_concept == concept_id:
-                        adjacent_concepts.add(conn.from_concept)
-
-            # 收集相邻概念下的记忆
-            for adjacent_concept_id in adjacent_concepts:
-                if adjacent_concept_id in self.memory_graph.concepts:
-                    adjacent_concept_memories = [
-                        m
-                        for m in self.memory_graph.memories.values()
-                        if m.concept_id == adjacent_concept_id
-                    ]
-
-                    # 按记忆强度和时间排序
-                    adjacent_concept_memories.sort(
-                        key=lambda m: (m.strength, m.last_accessed), reverse=True
-                    )
-
-                    # 添加相邻记忆
-                    for memory in adjacent_concept_memories[
-                        :1
-                    ]:  # 每个相邻概念最多1条记忆
-                        adjacent_memories.append(memory.content)
-
-            # 合并结果：核心记忆在前，相邻记忆在后
-            final_memories = activated_memories + adjacent_memories
-
-            # 去重并限制数量
-            seen = set()
-            unique_memories = []
-            for memory in final_memories:
-                if memory not in seen:
-                    seen.add(memory)
-                    unique_memories.append(memory)
-                    if len(unique_memories) >= 5:  # 最多返回5条
-                        break
-
-            return unique_memories
-
-        except Exception as e:
-            logger.error(f"激活扩散回忆失败: {e}")
-            return await self._recall_simple(keyword)
-
     async def memory_maintenance_loop(self):
         """记忆维护循环"""
         db_dir = os.path.dirname(self.db_path)
@@ -1688,18 +1405,18 @@ class MemorySystem:
         while True:
             try:
                 consolidation_interval = (
-                    self.memory_config["consolidation_interval_hours"] * 3600
+                    self.memory_config.get("consolidation_interval_hours", 24) * 3600
                 )
                 await asyncio.sleep(consolidation_interval)  # 按配置间隔检查
 
                 maintenance_actions = []
 
                 # 处理默认数据库（私有对话）
-                if self.memory_config["enable_forgetting"]:
+                if self.memory_config.get("enable_forgetting", True):
                     await self.forget_memories()
                     maintenance_actions.append("遗忘")
 
-                if self.memory_config["enable_consolidation"]:
+                if self.memory_config.get("enable_consolidation", False):
                     await self.consolidate_memories()
                     maintenance_actions.append("整理")
 
@@ -1726,10 +1443,10 @@ class MemorySystem:
                             self.load_memory_state(group_id)
 
                             # 执行群聊的维护操作
-                            if self.memory_config["enable_forgetting"]:
+                            if self.memory_config.get("enable_forgetting", True):
                                 await self.forget_memories()
 
-                            if self.memory_config["enable_consolidation"]:
+                            if self.memory_config.get("enable_consolidation", False):
                                 await self.consolidate_memories()
 
                             # 保存群聊数据库
@@ -1755,7 +1472,7 @@ class MemorySystem:
     async def forget_memories(self):
         """遗忘机制"""
         current_time = time.time()
-        forget_threshold = self.memory_config["forget_threshold_days"] * 24 * 3600
+        forget_threshold = self.memory_config.get("forget_threshold_days", 30) * 24 * 3600
 
         # 降低连接强度
         connections_to_remove = []
@@ -1802,133 +1519,8 @@ class MemorySystem:
             self._debug_log("遗忘检查完成: 没有需要清理的记忆或连接", "debug")
 
     async def consolidate_memories(self):
-        """记忆整理机制 - 智能合并相似记忆"""
-        consolidation_count = 0
-
-        for concept in list(self.memory_graph.concepts.values()):
-            concept_memories = [
-                m
-                for m in self.memory_graph.memories.values()
-                if m.concept_id == concept.id
-            ]
-
-            if len(concept_memories) > self.memory_config["max_memories_per_topic"]:
-                # 按时间排序，优先合并旧记忆
-                concept_memories.sort(key=lambda m: m.created_at)
-
-                # 使用更智能的合并策略
-                merged_memories = []
-                used_indices = set()
-
-                for i, memory1 in enumerate(concept_memories):
-                    if i in used_indices:
-                        continue
-
-                    similar_group = [memory1]
-                    used_indices.add(i)
-
-                    # 找到所有相似的记忆
-                    for j, memory2 in enumerate(concept_memories):
-                        if j not in used_indices and self.are_memories_similar(
-                            memory1, memory2
-                        ):
-                            similar_group.append(memory2)
-                            used_indices.add(j)
-
-                    # 如果找到相似记忆，合并它们
-                    if len(similar_group) > 1:
-                        merged_content = await self._merge_memories(similar_group)
-                        if merged_content:
-                            # 保留最新的记忆ID，更新内容
-                            newest_memory = max(
-                                similar_group, key=lambda m: m.last_accessed
-                            )
-                            newest_memory.content = merged_content
-                            newest_memory.last_accessed = time.time()
-                            consolidation_count += len(similar_group) - 1
-
-                            # 收集需要移除的记忆ID
-                            memories_to_remove_in_group = []
-                            for mem in similar_group:
-                                if mem.id != newest_memory.id:
-                                    memories_to_remove_in_group.append(mem.id)
-
-                            # 统一移除
-                            for mem_id in memories_to_remove_in_group:
-                                self.memory_graph.remove_memory(mem_id)
-
-        # 仅在有实际合并时输出日志
-        if consolidation_count > 0:
-            self._debug_log(
-                f"记忆整理完成: 合并{consolidation_count}条相似记忆", "debug"
-            )
-
-    async def _merge_memories(self, memories: list["Memory"]) -> str:
-        """智能合并多条相似记忆"""
-        if len(memories) == 1:
-            return memories[0].content
-
-        # 按时间排序
-        memories.sort(key=lambda m: m.created_at)
-
-        # 提取关键信息
-        contents = [m.content for m in memories]
-
-        # 使用LLM进行智能合并（如果可用）
-        try:
-            if self.memory_config["recall_mode"] == "llm":
-                provider = await self.get_llm_provider()
-                if provider:
-                    prompt = f"""请将以下{len(contents)}条相似记忆合并成一条更完整、更准确的记忆：
-
-{chr(10).join(f"{i + 1}. {content}" for i, content in enumerate(contents))}
-
-要求：
-1. 保留所有重要信息
-2. 去除重复内容
-3. 保持简洁自然
-4. 不超过100字"""
-
-                    response = await provider.text_chat(
-                        prompt=prompt,
-                        contexts=[],
-                        system_prompt="你是一个记忆整理助手，请准确合并相似记忆。",
-                    )
-
-                    merged = response.completion_text.strip()
-                    if merged and len(merged) > 10:
-                        return merged
-        except Exception as e:
-            logger.warning(f"LLM合并记忆失败: {e}")
-
-        # 简单合并策略
-        # 提取共同关键词，合并时间信息
-        words_list = [content.split() for content in contents]
-        common_words = set(words_list[0])
-        for words in words_list[1:]:
-            common_words &= set(words)
-
-        if common_words:
-            key_phrase = " ".join(list(common_words)[:5])
-            return f"关于{key_phrase}的多次讨论"
-
-        # 默认合并
-        return contents[-1]  # 返回最新的记忆
-
-    def are_memories_similar(self, mem1, mem2) -> bool:
-        """判断两条记忆是否相似"""
-        # 简单的相似度判断
-        words1 = mem1.content.split()
-        words2 = mem2.content.split()
-
-        # 防止除零错误
-        denominator = max(len(words1), len(words2))
-        if denominator == 0:
-            return False
-
-        common_words = set(words1) & set(words2)
-        similarity = len(common_words) / denominator
-        return similarity > 0.5
+        """Element体系下暂不执行旧式按Concept合并。"""
+        self._debug_log("Element体系下跳过旧式记忆整理", "debug")
 
     async def get_memory_stats(self) -> dict:
         """获取记忆统计信息"""
@@ -1936,11 +1528,11 @@ class MemorySystem:
             "concepts": len(self.memory_graph.concepts),
             "memories": len(self.memory_graph.memories),
             "connections": len(self.memory_graph.connections),
-            "recall_mode": self.memory_config["recall_mode"],
-            "llm_provider": self.memory_config["llm_provider"],
-            "embedding_provider": self.memory_config["embedding_provider"],
-            "enable_forgetting": self.memory_config["enable_forgetting"],
-            "enable_consolidation": self.memory_config["enable_consolidation"],
+            "recall_mode": self.memory_config.get("recall_mode", "simple"),
+            "llm_provider": self.memory_config.get("llm_provider", ""),
+            "embedding_provider": self.memory_config.get("embedding_provider", ""),
+            "enable_forgetting": self.memory_config.get("enable_forgetting", True),
+            "enable_consolidation": self.memory_config.get("enable_consolidation", False),
         }
 
     def _parse_allow_forget_value(
@@ -2076,7 +1668,7 @@ class MemorySystem:
             return self._embedding_provider_cache
 
         try:
-            provider_id = self.memory_config["embedding_provider"]
+            provider_id = self.memory_config.get("embedding_provider", "")
 
             # 获取所有已注册的嵌入提供商
             if hasattr(self.context, "get_all_embedding_providers"):
@@ -2136,7 +1728,7 @@ class MemorySystem:
         self._embedding_in_progress = True
         try:
             # 检查当前回忆模式，如果不是embedding模式，直接返回空列表，避免不必要的嵌入计算
-            if self.memory_config["recall_mode"] not in ["embedding"]:
+            if self.memory_config.get("recall_mode", "simple") not in ["embedding"]:
                 return []
 
             # 如果启用了嵌入向量缓存，尝试从缓存获取
@@ -2464,41 +2056,37 @@ class MemorySystem:
     async def query_memory(
         self, query: str, event: AstrMessageEvent = None
     ) -> list[str]:
-        """记忆查询接口"""
-        try:
-            if not query:
-                return []
-
-            # 使用统一的回忆接口
-            return await self.recall_memories(query, event)
-
-        except Exception as e:
-            logger.error(f"记忆查询失败: {e}")
-            return []
+        """记忆查询接口。"""
+        return await self.recall_memories(query, event)
 
     async def recall_memories(
         self, keyword: str, event: AstrMessageEvent = None
     ) -> list[str]:
-        """回忆相关记忆，回忆接口"""
+        """使用Element增强召回接口回忆相关记忆。"""
         try:
-            if not self.memory_graph.memories:
+            if not keyword or not self.memory_graph.memories:
                 return []
 
-            # 根据配置的回忆模式选择合适的方法
-            recall_mode = self.memory_config["recall_mode"]
+            group_id = ""
+            if event is not None:
+                try:
+                    group_id = self._extract_group_id_from_event(event)
+                except Exception:
+                    group_id = ""
 
-            if recall_mode == "llm":
-                return await self._recall_llm(keyword, event)
-            elif recall_mode == "embedding":
-                return await self._recall_embedding(keyword)
-            elif recall_mode == "activation":
-                return await self._recall_by_activation(keyword)
-            else:
-                return await self._recall_simple(keyword)
+            from ..memory.memory_recall import EnhancedMemoryRecall
+
+            enhanced_recall = EnhancedMemoryRecall(self)
+            results = await enhanced_recall.recall_all_relevant_memories(
+                query=keyword,
+                max_memories=self.memory_config.get("max_injected_memories", 5),
+                group_id=group_id,
+            )
+            return [result.memory for result in results]
 
         except Exception as e:
             logger.error(f"回忆记忆失败: {e}")
-            return await self._recall_simple(keyword)
+            return []
 
     async def recall_relevant_memories(self, message: str) -> list[str]:
         """基于消息内容智能召回相关记忆"""
@@ -2553,33 +2141,31 @@ class MemorySystem:
             logger.error(f"上下文格式化失败: {e}")
             return ""
 
-    def ensure_person_impression(self, group_id: str, person_name: str) -> str:
-        """确保指定群组的人物印象概念存在，返回概念ID
-
-        Args:
-            group_id: 群组ID，用于跨群隔离
-            person_name: 人物名称
-
-        Returns:
-            str: 概念ID
-        """
+    def _find_person_element(self, group_id: str, person_name: str) -> str:
+        """查找或创建 person 类型的元素"""
         try:
-            # 构建印象概念名称，格式：Imprint:GROUPID:NAME
-            concept_name = f"Imprint:{group_id}:{person_name}"
+            for elem in self.memory_graph.elements.values():
+                if elem.name == person_name and elem.category == "person":
+                    if not group_id or elem.group_id == group_id:
+                        return elem.id
 
-            # 检查是否已存在
+            legacy_name = f"Imprint:{group_id}:{person_name}"
             for concept in self.memory_graph.concepts.values():
-                if concept.name == concept_name:
-                    return concept.id
+                if concept.name == legacy_name:
+                    eid = self.memory_graph.get_or_create_element(person_name, "person", group_id)
+                    return eid
 
-            # 创建新的印象概念
-            concept_id = self.memory_graph.add_concept(concept_name)
-            self._debug_log(f"创建新印象概念: {concept_name}", "debug")
-
-            return concept_id
-
+            return self.memory_graph.get_or_create_element(person_name, "person", group_id)
         except Exception as e:
-            self._debug_log(f"确保印象概念失败: {e}", "error")
+            self._debug_log(f"查找人物元素失败: {e}", "error")
+            return ""
+
+    def ensure_person_impression(self, group_id: str, person_name: str) -> str:
+        """确保指定群组的人物印象元素存在，返回元素ID"""
+        try:
+            return self._find_person_element(group_id, person_name)
+        except Exception as e:
+            self._debug_log(f"确保印象元素失败: {e}", "error")
             return ""
 
     def record_person_impression(
@@ -2590,48 +2176,30 @@ class MemorySystem:
         score: float | None = None,
         details: str = "",
     ) -> str:
-        """记录或更新人物印象
-
-        Args:
-            group_id: 群组ID
-            person_name: 人物名称
-            summary: 印象摘要
-            score: 好感度分数 (0-1)，默认使用配置的默认值
-            details: 详细信息
-
-        Returns:
-            str: 记忆ID
-        """
+        """记录或更新人物印象"""
         try:
-            # 确保印象概念存在
-            concept_id = self.ensure_person_impression(group_id, person_name)
-            if not concept_id:
+            element_id = self._find_person_element(group_id, person_name)
+            if not element_id:
                 return ""
 
-            # 使用默认分数或指定分数
             if score is None:
                 score = float(self.impression_config["default_score"])
 
-            # 确保score是float类型
             score = float(score)
-
-            # 限制分数范围
             score = max(
                 float(self.impression_config["min_score"]),
                 min(float(self.impression_config["max_score"]), score),
             )
 
-            # 创建印象记忆 - 确保设置正确的group_id
             memory_id = self.memory_graph.add_memory(
                 content=summary,
-                concept_id=concept_id,
                 details=details,
-                participants=person_name,
                 emotion="印象",
-                tags="人际",
                 strength=score,
                 group_id=group_id,
             )
+
+            self.memory_graph.link_memory(element_id, memory_id, "impression")
 
             self._debug_log(
                 f"记录印象: {person_name} (分数: {score}, 群组: {group_id})", "debug"
@@ -2644,45 +2212,30 @@ class MemorySystem:
             return ""
 
     def get_impression_score(self, group_id: str, person_name: str) -> float:
-        """获取人物的好感度分数
-
-        Args:
-            group_id: 群组ID
-            person_name: 人物名称
-
-        Returns:
-            float: 好感度分数，未找到返回默认值
-        """
+        """获取人物的好感度分数"""
         try:
-            concept_name = f"Imprint:{group_id}:{person_name}"
-
-            # 查找对应的印象概念
-            concept_id = None
-            for concept in self.memory_graph.concepts.values():
-                if concept.name == concept_name:
-                    concept_id = concept.id
-                    break
-
-            if not concept_id:
+            element_id = self._find_person_element(group_id, person_name)
+            if not element_id:
                 return self.impression_config["default_score"]
 
-            # 获取该概念下最新的记忆（即最新印象）- 使用群聊隔离过滤
-            all_concept_memories = [
-                m
-                for m in self.memory_graph.memories.values()
-                if m.concept_id == concept_id
-            ]
-
-            # 应用群聊隔离过滤
-            concept_memories = self.filter_memories_by_group(
-                all_concept_memories, group_id
+            impression_memories = self.memory_graph.get_element_memories_with_role(
+                element_id, "impression"
+            )
+            impression_memories = self.filter_memories_by_group(
+                impression_memories, group_id
             )
 
-            if not concept_memories:
+            if not impression_memories:
+                legacy_name = f"Imprint:{group_id}:{person_name}"
+                for concept in self.memory_graph.concepts.values():
+                    if concept.name == legacy_name:
+                        all_memories = self.memory_graph.get_element_memories(concept.id)
+                        concept_memories = self.filter_memories_by_group(all_memories, group_id)
+                        if concept_memories:
+                            return max(concept_memories, key=lambda m: m.last_accessed).strength
                 return self.impression_config["default_score"]
 
-            # 按时间排序，获取最新的印象分数
-            latest_memory = max(concept_memories, key=lambda m: m.last_accessed)
+            latest_memory = max(impression_memories, key=lambda m: m.last_accessed)
             return latest_memory.strength
 
         except Exception as e:
@@ -2692,65 +2245,35 @@ class MemorySystem:
     def adjust_impression_score(
         self, group_id: str, person_name: str, delta: float
     ) -> float:
-        """调整人物的好感度分数
-
-        Args:
-            group_id: 群组ID
-            person_name: 人物名称
-            delta: 调整增量（可正可负）
-
-        Returns:
-            float: 调整后的新分数
-        """
+        """调整人物的好感度分数"""
         try:
-            # 获取当前分数
             current_score = self.get_impression_score(group_id, person_name)
-
-            # 计算新分数
             new_score = current_score + delta
             new_score = max(
                 self.impression_config["min_score"],
                 min(self.impression_config["max_score"], new_score),
             )
 
-            # 获取印象概念
-            concept_name = f"Imprint:{group_id}:{person_name}"
-            concept_id = None
-            for concept in self.memory_graph.concepts.values():
-                if concept.name == concept_name:
-                    concept_id = concept.id
-                    break
+            element_id = self._find_person_element(group_id, person_name)
 
-            if concept_id:
-                # 查找现有的印象记忆 - 使用群聊隔离过滤
-                all_concept_memories = [
-                    m
-                    for m in self.memory_graph.memories.values()
-                    if m.concept_id == concept_id
-                ]
-
-                # 应用群聊隔离过滤
-                concept_memories = self.filter_memories_by_group(
-                    all_concept_memories, group_id
+            if element_id:
+                impression_memories = self.memory_graph.get_element_memories_with_role(
+                    element_id, "impression"
+                )
+                impression_memories = self.filter_memories_by_group(
+                    impression_memories, group_id
                 )
 
-                if concept_memories:
-                    # 更新最新一条印象记忆的强度
-                    latest_memory = max(concept_memories, key=lambda m: m.last_accessed)
+                if impression_memories:
+                    latest_memory = max(impression_memories, key=lambda m: m.last_accessed)
                     latest_memory.strength = new_score
                     latest_memory.last_accessed = time.time()
-                    self._debug_log(
-                        f"更新现有印象记忆强度: {person_name} -> {new_score:.2f}",
-                        "debug",
-                    )
                 else:
-                    # 如果没有现有记忆，创建新的
                     summary = f"对{person_name}的印象更新，当前好感度：{new_score:.2f}"
                     self.record_person_impression(
                         group_id, person_name, summary, new_score
                     )
             else:
-                # 如果概念不存在，创建新的印象
                 summary = f"对{person_name}的印象更新，当前好感度：{new_score:.2f}"
                 self.record_person_impression(group_id, person_name, summary, new_score)
 
@@ -2768,28 +2291,11 @@ class MemorySystem:
     def get_person_impression_summary(
         self, group_id: str, person_name: str
     ) -> dict[str, Any]:
-        """获取人物印象摘要信息
-
-        Args:
-            group_id: 群组ID
-            person_name: 人物名称
-
-        Returns:
-            dict: 包含印象摘要的字典
-        """
+        """获取人物印象摘要信息"""
         try:
-            concept_name = f"Imprint:{group_id}:{person_name}"
+            element_id = self._find_person_element(group_id, person_name)
 
-            # 查找对应的印象概念
-            concept_id = None
-            concept = None
-            for c in self.memory_graph.concepts.values():
-                if c.name == concept_name:
-                    concept_id = c.id
-                    concept = c
-                    break
-
-            if not concept_id or not concept:
+            if not element_id:
                 return {
                     "name": person_name,
                     "score": self.impression_config["default_score"],
@@ -2798,17 +2304,20 @@ class MemorySystem:
                     "last_updated": "无",
                 }
 
-            # 获取该概念下的所有印象记忆 - 使用群聊隔离过滤
-            all_impression_memories = [
-                m
-                for m in self.memory_graph.memories.values()
-                if m.concept_id == concept_id
-            ]
-
-            # 应用群聊隔离过滤
-            impression_memories = self.filter_memories_by_group(
-                all_impression_memories, group_id
+            impression_memories = self.memory_graph.get_element_memories_with_role(
+                element_id, "impression"
             )
+            impression_memories = self.filter_memories_by_group(
+                impression_memories, group_id
+            )
+
+            if not impression_memories:
+                legacy_name = f"Imprint:{group_id}:{person_name}"
+                for concept in self.memory_graph.concepts.values():
+                    if concept.name == legacy_name:
+                        all_mem = self.memory_graph.get_element_memories(concept.id)
+                        impression_memories = self.filter_memories_by_group(all_mem, group_id)
+                        break
 
             if not impression_memories:
                 return {
@@ -2819,26 +2328,19 @@ class MemorySystem:
                     "last_updated": "无",
                 }
 
-            # 获取最新印象
             latest_memory = max(impression_memories, key=lambda m: m.last_accessed)
             current_score = latest_memory.strength
-
-            # 获取印象摘要
             summary = latest_memory.content
 
-            # 格式化时间 - 确保last_accessed是datetime对象
             try:
                 if isinstance(latest_memory.last_accessed, (int, float)):
-                    # 如果是时间戳，转换为datetime
                     dt = datetime.fromtimestamp(latest_memory.last_accessed)
                     last_updated = dt.strftime("%Y-%m-%d %H:%M:%S")
                 elif hasattr(latest_memory.last_accessed, "strftime"):
-                    # 如果已经有strftime方法，直接使用
                     last_updated = latest_memory.last_accessed.strftime(
                         "%Y-%m-%d %H:%M:%S"
                     )
                 else:
-                    # 其他情况，使用当前时间
                     last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             except Exception as time_e:
                 self._debug_log(f"时间格式化失败: {time_e}", "warning")
@@ -2865,55 +2367,38 @@ class MemorySystem:
     def get_person_impression_memories(
         self, group_id: str, person_name: str, limit: int = 5
     ) -> list[dict[str, Any]]:
-        """获取人物印象相关的记忆列表
-
-        Args:
-            group_id: 群组ID
-            person_name: 人物名称
-            limit: 返回的记忆数量限制
-
-        Returns:
-            List[dict]: 记忆列表
-        """
+        """获取人物印象相关的记忆列表"""
         try:
-            concept_name = f"Imprint:{group_id}:{person_name}"
+            element_id = self._find_person_element(group_id, person_name)
 
-            # 查找对应的印象概念
-            concept_id = None
-            for c in self.memory_graph.concepts.values():
-                if c.name == concept_name:
-                    concept_id = c.id
-                    break
-
-            if not concept_id:
+            if not element_id:
                 return []
 
-            # 获取该概念下的所有印象记忆 - 使用群聊隔离过滤
-            all_impression_memories = [
-                m
-                for m in self.memory_graph.memories.values()
-                if m.concept_id == concept_id
-            ]
-
-            # 应用群聊隔离过滤
+            impression_memories = self.memory_graph.get_element_memories_with_role(
+                element_id, "impression"
+            )
             impression_memories = self.filter_memories_by_group(
-                all_impression_memories, group_id
+                impression_memories, group_id
             )
 
-            # 按时间倒序排序
-            impression_memories.sort(key=lambda m: m.last_accessed, reverse=True)
+            if not impression_memories:
+                legacy_name = f"Imprint:{group_id}:{person_name}"
+                for concept in self.memory_graph.concepts.values():
+                    if concept.name == legacy_name:
+                        all_mem = self.memory_graph.get_element_memories(concept.id)
+                        impression_memories = self.filter_memories_by_group(all_mem, group_id)
+                        break
 
-            # 限制数量
+            impression_memories.sort(key=lambda m: m.last_accessed, reverse=True)
             impression_memories = impression_memories[:limit]
 
-            # 转换为字典格式
             memories_list = []
             for memory in impression_memories:
                 memories_list.append(
                     {
                         "id": memory.id,
                         "content": memory.content,
-                        "details": memory.details or "",
+                        "details": getattr(memory, 'details', '') or "",
                         "score": memory.strength,
                         "created": self._safe_format_datetime(memory.created_at),
                         "last_accessed": self._safe_format_datetime(

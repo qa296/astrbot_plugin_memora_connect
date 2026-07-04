@@ -558,7 +558,10 @@ class MemoryAPIGateway:
                         "content": memory.content,
                         "importance_score": importance_score,
                         "access_count": memory.access_count,
-                        "participants": memory.participants or "",
+                        "elements": [
+                            {"name": e.name, "category": e.category}
+                            for e, _ in memory_graph.get_memory_elements(memory.id)
+                        ],
                         "created_at": datetime.fromtimestamp(
                             memory.created_at
                         ).isoformat(),

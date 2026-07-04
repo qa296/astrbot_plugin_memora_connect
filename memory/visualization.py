@@ -182,143 +182,171 @@ class MemoryGraphVisualizer:
         edge_strength_threshold: float,
         group_id: str = "",
     ) -> dict[str, Any]:
-        """
-        在主事件循环中准备所有需要的数据，避免在线程池中访问异步资源
-        支持群聊隔离：根据group_id过滤记忆、概念和连接
-        """
         graph = getattr(self.ms, "memory_graph", None)
-        if not graph or not graph.concepts:
+        if not graph:
             return {"error": "记忆图谱为空, 无法生成图谱"}
 
-        # 获取所有概念、记忆和连接
-        concepts = list(graph.concepts.values())
-        memories = list(graph.memories.values())
+        if not graph.memories:
+            return {"error": "记忆图谱为空, 无法生成图谱"}
+
+        has_elements = bool(getattr(graph, "elements", {}))
+
+        if has_elements:
+            return await self._prepare_element_graph_data(
+                graph, max_nodes, max_edges, edge_strength_threshold, group_id
+            )
+
+        return await self._prepare_fallback_graph_data(
+            graph, max_nodes, max_edges, edge_strength_threshold, group_id
+        )
+
+    async def _prepare_element_graph_data(
+        self,
+        graph,
+        max_nodes: int,
+        max_edges: int,
+        edge_strength_threshold: float,
+        group_id: str,
+    ) -> dict[str, Any]:
+        elements = list(graph.elements.values())
         connections = list(graph.connections)
 
-        # 如果启用了群聊隔离且有group_id，过滤数据
-        if group_id and self.ms.memory_config.get("enable_group_isolation", True):
-            # 过滤记忆：只包含指定群聊的记忆
-            filtered_memory_ids = set()
-            for memory in memories:
-                # 检查记忆是否有group_id字段
-                memory_group_id = getattr(memory, "group_id", "")
-                if memory_group_id:
-                    if memory_group_id == group_id:
-                        filtered_memory_ids.add(memory.id)
-                else:
-                    # 如果记忆没有group_id字段，检查是否为印象记忆
-                    # 印象记忆通常以"Imprint:"开头，需要特殊处理
-                    if (
-                        hasattr(memory, "content")
-                        and memory.content
-                        and memory.content.startswith("Imprint:")
-                    ):
-                        # 对于印象记忆，检查内容中是否包含群组ID
-                        if f"Imprint:{group_id}:" in memory.content:
-                            filtered_memory_ids.add(memory.id)
-                    else:
-                        # 对于非印象记忆且没有group_id字段的旧版本数据，默认包含
-                        # 这样可以确保旧版本数据在群聊隔离模式下仍然可见
-                        filtered_memory_ids.add(memory.id)
-
-            # 根据过滤后的记忆获取相关的概念
-            filtered_concept_ids = set()
-            for memory_id in filtered_memory_ids:
-                memory = graph.memories.get(memory_id)
-                if memory:
-                    filtered_concept_ids.add(memory.concept_id)
-
-            # 过滤概念：只包含与过滤后记忆相关的概念
-            concepts = [c for c in concepts if c.id in filtered_concept_ids]
-
-            # 过滤连接：只包含过滤后概念之间的连接
+        if group_id:
+            elements = [e for e in elements if not e.group_id or e.group_id == group_id]
+            valid_ids = {e.id for e in elements}
             connections = [
-                conn
-                for conn in connections
-                if conn.from_concept in filtered_concept_ids
-                and conn.to_concept in filtered_concept_ids
+                c for c in connections
+                if c.from_element in valid_ids and c.to_element in valid_ids
             ]
 
-            # 更新记忆列表
-            memories = [m for m in memories if m.id in filtered_memory_ids]
+        element_stats: dict[str, dict[str, float]] = {}
+        for elem in elements:
+            mems = graph.get_element_memories(elem.id)
+            if group_id:
+                mems = [m for m in mems if not m.group_id or m.group_id == group_id]
+            count = len(mems)
+            sum_strength = sum(float(m.strength or 0.0) for m in mems)
+            max_strength = max((float(m.strength or 0.0) for m in mems), default=0.0)
+            element_stats[elem.id] = {
+                "count": count,
+                "sum_strength": sum_strength,
+                "max_strength": max_strength,
+                "avg_strength": sum_strength / max(1, count),
+            }
 
-        # 1) 统计每个概念的记忆数量与强度
-        concept_stats: dict[str, dict[str, float]] = {}
-        for cid in graph.concepts.keys():
-            concept_stats[cid] = {"count": 0, "sum_strength": 0.0, "max_strength": 0.0}
-
-        # 只统计过滤后的记忆
-        for m in memories:
-            stat = concept_stats.get(m.concept_id)
-            if stat is None:
-                continue
-            stat["count"] += 1
-            stat["sum_strength"] += float(m.strength or 0.0)
-            stat["max_strength"] = max(stat["max_strength"], float(m.strength or 0.0))
-
-        for cid, s in concept_stats.items():
-            cnt = max(1, int(s["count"]))
-            s["avg_strength"] = s["sum_strength"] / cnt if cnt > 0 else 0.0
-
-        # 2) 节点选择(如概念过多, 选取 Top-N)
-        ranked_concepts = sorted(
-            concepts,  # 使用过滤后的概念
-            key=lambda c: (
-                concept_stats.get(c.id, {}).get("count", 0),
-                concept_stats.get(c.id, {}).get("avg_strength", 0.0),
+        ranked = sorted(
+            elements,
+            key=lambda e: (
+                element_stats.get(e.id, {}).get("count", 0),
+                element_stats.get(e.id, {}).get("avg_strength", 0.0),
             ),
             reverse=True,
         )
-        selected_concepts: list[Any] = ranked_concepts[:max_nodes]
-        selected_ids = set(c.id for c in selected_concepts)
+        selected = ranked[:max_nodes]
+        selected_ids = {e.id for e in selected}
 
-        # 3) 过滤边(只保留强度足够且两端都被选中的)
-        filtered_edges: list[Any] = []
-        for conn in connections:  # 使用过滤后的连接
-            if conn.strength is None:
+        filtered_edges = []
+        for conn in connections:
+            if conn.strength is None or conn.strength < edge_strength_threshold:
                 continue
-            if conn.strength < edge_strength_threshold:
-                continue
-            if (conn.from_concept in selected_ids) and (
-                conn.to_concept in selected_ids
-            ):
+            if conn.from_element in selected_ids and conn.to_element in selected_ids:
                 filtered_edges.append(conn)
 
-        # 缩减边数量: 保留强度靠前的前 max_edges 条
         filtered_edges.sort(key=lambda e: float(e.strength or 0.0), reverse=True)
         filtered_edges = filtered_edges[:max_edges]
 
-        # 4) 准备节点数据
-        nodes_data = []
-        for c in selected_concepts:
-            stat = concept_stats.get(
-                c.id, {"count": 0, "avg_strength": 0.0, "max_strength": 0.0}
-            )
-            nodes_data.append(
-                {
-                    "id": c.id,
-                    "name": c.name,
-                    "count": stat["count"],
-                    "avg_strength": stat["avg_strength"],
-                    "max_strength": stat["max_strength"],
-                }
-            )
+        from ..core.models import CATEGORY_NAMES
 
-        # 5) 准备边数据
+        nodes_data = []
+        for elem in selected:
+            stat = element_stats.get(elem.id, {"count": 0, "avg_strength": 0.0, "max_strength": 0.0})
+            cat_name = CATEGORY_NAMES.get(elem.category, elem.category)
+            nodes_data.append({
+                "id": elem.id,
+                "name": f"{elem.name}({cat_name})",
+                "count": stat["count"],
+                "avg_strength": stat["avg_strength"],
+                "max_strength": stat["max_strength"],
+                "category": elem.category,
+            })
+
         edges_data = []
         for e in filtered_edges:
-            edges_data.append(
-                {
-                    "from_concept": e.from_concept,
-                    "to_concept": e.to_concept,
-                    "strength": float(e.strength or 0.0),
-                }
-            )
+            edges_data.append({
+                "from_element": e.from_element,
+                "to_element": e.to_element,
+                "strength": float(e.strength or 0.0),
+            })
 
         return {
             "nodes": nodes_data,
             "edges": edges_data,
-            "group_id": group_id,  # 传递group_id给同步函数
+            "group_id": group_id,
+            "error": None,
+        }
+
+    async def _prepare_fallback_graph_data(
+        self,
+        graph,
+        max_nodes: int,
+        max_edges: int,
+        edge_strength_threshold: float,
+        group_id: str,
+    ) -> dict[str, Any]:
+        memories = list(graph.memories.values())
+        if group_id:
+            from ..core.memory_system import MemorySystem
+            memories = MemorySystem.filter_memories_by_group(memories, group_id)
+
+        mem_elements_map: dict[str, list[str]] = {}
+        for m in memories:
+            elements = graph.get_memory_elements(m.id)
+            if elements:
+                mem_elements_map[m.id] = [e.name for e, _ in elements]
+
+        nodes_data = []
+        edges_data = []
+        used_names = set()
+
+        for m in memories[:max_nodes]:
+            names = mem_elements_map.get(m.id, [])
+            if not names:
+                text = m.content[:20]
+                names = [text]
+            display_name = names[0] if len(names) == 1 else f"{names[0]}+{len(names)-1}"
+            if display_name in used_names:
+                display_name = f"{display_name}_{m.id[:6]}"
+            used_names.add(display_name)
+            nodes_data.append({
+                "id": m.id,
+                "name": display_name,
+                "count": 1,
+                "avg_strength": m.strength,
+                "max_strength": m.strength,
+                "category": "",
+            })
+
+        for i, m1 in enumerate(memories[:max_nodes]):
+            for j in range(i + 1, len(memories[:max_nodes])):
+                m2 = memories[j]
+                names1 = set(mem_elements_map.get(m1.id, []))
+                names2 = set(mem_elements_map.get(m2.id, []))
+                overlap = names1 & names2
+                if overlap:
+                    strength = 0.5 + 0.1 * len(overlap)
+                    edges_data.append({
+                        "from_element": m1.id,
+                        "to_element": m2.id,
+                        "strength": min(1.0, strength),
+                    })
+
+        edges_data.sort(key=lambda e: e["strength"], reverse=True)
+        edges_data = edges_data[:max_edges]
+
+        return {
+            "nodes": nodes_data,
+            "edges": edges_data,
+            "group_id": group_id,
             "error": None,
         }
 
@@ -356,7 +384,9 @@ class MemoryGraphVisualizer:
         for edge in edges_data:
             # 使用连接强度作为 weight, 强度越大, spring_layout 越倾向拉近节点
             G.add_edge(
-                edge["from_concept"], edge["to_concept"], weight=edge["strength"]
+                edge.get("from_element", edge.get("from_concept")),
+                edge.get("to_element", edge.get("to_concept")),
+                weight=edge["strength"],
             )
 
         # 5) 节点可视参数计算(大小/颜色)
@@ -379,9 +409,8 @@ class MemoryGraphVisualizer:
             cnt = G.nodes[n]["count"]
             avg_s = float(G.nodes[n]["avg_strength"] or 0.0)
             max_s = float(G.nodes[n]["max_strength"] or 0.0)
+            category = G.nodes[n].get("category", "")
 
-            # 大小: 记忆数量占比 + 平均强度占比 + 最大强度占比 的加权
-            # 增加最大强度的权重，使重要节点更突出
             max_strengths = [G.nodes[n]["max_strength"] for n in G.nodes()]
             max_max_strength = max(
                 0.0001, max(max_strengths) if max_strengths else 0.0001
@@ -393,7 +422,6 @@ class MemoryGraphVisualizer:
                 float(G.nodes[n]["max_strength"] or 0.0) / max_max_strength
             )
 
-            # 调整权重，更强调记忆强度
             size_factor = (
                 0.5 * count_factor
                 + 0.25 * avg_strength_factor
@@ -402,24 +430,28 @@ class MemoryGraphVisualizer:
             size = min_area + (max_area - min_area) * max(0.0, min(1.0, size_factor))
             node_sizes.append(size)
 
-            # 颜色:
-            #   印象概念: Imprint:<group_id>:<name>  -> 红色系
-            #   重要事件: max_strength 高或标签线索不可直接取, 以 max_strength>=0.8 作为"重要"近似 -> 绿色系
-            #   其他: 蓝色系
-            if name.startswith("Imprint:"):
-                node_colors.append("#e57373")  # red 300
-                # 对于印象记忆，提取显示名称时考虑群聊隔离
+            category_colors = {
+                "person": "#e57373",
+                "object": "#64b5f6",
+                "place": "#4db6ac",
+                "action": "#ffb74d",
+                "trait": "#ba68c8",
+            }
+
+            if category and category in category_colors:
+                node_colors.append(category_colors[category])
+                display = name.split("\n")[0].split("(")[0].strip()
+            elif name.startswith("Imprint:"):
+                node_colors.append("#e57373")
                 if group_id and f"Imprint:{group_id}:" in name:
-                    # 如果是当前群聊的印象记忆，显示完整名称
                     display = name
                 else:
-                    # 否则只显示最后一部分
                     display = name.split(":")[-1] if ":" in name else name
             elif max_s >= 0.8:
-                node_colors.append("#66bb6a")  # green 400
+                node_colors.append("#66bb6a")
                 display = (name.split(",")[0]).strip()
             else:
-                node_colors.append("#64b5f6")  # blue 300
+                node_colors.append("#64b5f6")
                 display = (name.split(",")[0]).strip()
 
             labels[n] = f"{display}\n{cnt}"
@@ -1009,7 +1041,7 @@ class MemoryGraphVisualizer:
                 )
 
         # 10) 图例(用文本方式)
-        legend_text = "颜色: 红=印象, 绿=重要(强度高), 蓝=普通\n大小=记忆数量与强度 | 边粗/短=连接强"
+        legend_text = "颜色: 红=人物, 蓝=物品, 青=场所, 橙=行为, 紫=特质, 绿=重要\n大小=记忆数量与强度 | 边粗/短=连接强"
         ax.text(
             0.01,
             0.01,

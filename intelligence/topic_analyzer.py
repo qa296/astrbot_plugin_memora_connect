@@ -59,6 +59,10 @@ class TopicAnalyzer:
         # 会话ID计数器
         self._session_counter: int = 0
 
+        # 会话轮次跟踪：{group_id: {session_id: round_count}}
+        # 每轮分析时，仍为 ongoing 的会话轮次 +1，超限则强制完成
+        self._session_rounds: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
 
     def _get_config_value(self, key: str, default):
         """从配置中获取值"""
@@ -76,6 +80,11 @@ class TopicAnalyzer:
     @property
     def max_completed_sessions(self) -> int:
         return self._get_config_value("recent_completed_sessions_count", 5)
+
+    @property
+    def max_session_rounds(self) -> int:
+        """会话强制总结轮次：达到该轮次后强制完成，0 表示不限制"""
+        return int(self._get_config_value("max_session_rounds", 5))
 
     def _next_session_id(self) -> str:
         self._session_counter += 1
@@ -204,7 +213,6 @@ class TopicAnalyzer:
         """构建LLM分析的完整prompt"""
         parts = []
 
-        # 1. 新消息（带序号）
         parts.append("新消息:")
         for i, msg in enumerate(messages):
             sender = msg.get("sender_name", "未知")
@@ -212,7 +220,6 @@ class TopicAnalyzer:
             time_str = msg.get("time_str", "")
             parts.append(f"[{i}] [{time_str}] {sender}: {content}")
 
-        # 2. 未完成会话
         active = self._active_sessions.get(group_id, {})
         if active:
             parts.append("\n未完成会话（完整消息历史）:")
@@ -226,7 +233,6 @@ class TopicAnalyzer:
                         f"  [{m.get('time_str', '')}] {m.get('sender_name', '未知')}: {m.get('content', '')}"
                     )
 
-        # 3. 最近完成会话摘要
         completed = self._completed_sessions.get(group_id, [])
         if completed:
             recent = completed[-self.max_completed_sessions :]
@@ -236,12 +242,29 @@ class TopicAnalyzer:
                     f"- 会话 {session.session_id}: {session.topic} - {session.summary or '无摘要'}"
                 )
 
+        existing = self.memory_system.memory_graph.get_all_element_names_by_category(group_id)
+        if any(existing.values()):
+            from ..core.models import CATEGORY_NAMES
+            parts.append("\n已有记忆元素（优先复用已有名称，不要创建重复）：")
+            for cat, names in existing.items():
+                if names:
+                    parts.append(f"  {CATEGORY_NAMES.get(cat, cat)}：{'、'.join(names)}")
+
         if persona_injection:
             parts.append("\n记忆生成的人格约束:")
             parts.append(persona_injection)
 
-        # 4. 任务要求
-        parts.append("""
+        max_rounds = self.max_session_rounds
+        round_hint = ""
+        if max_rounds > 0:
+            round_hint = (
+                f"\n注意：会话存在硬性轮次上限（{max_rounds}轮），"
+                "达到上限仍未结束的会话将被系统强制总结完成。"
+                "请在临近上限或话题自然收束时主动将status标为completed并生成summary。"
+            )
+
+        parts.append(
+            """
 请分析以上新消息，将其分配到合适的会话中。
 
 要求：
@@ -250,8 +273,11 @@ class TopicAnalyzer:
 3. 分析每个会话的言外之意（subtext）
 4. 判断会话状态：ongoing（进行中）或 completed（已结束）
 5. 为每个会话生成记忆内容
-6. 如果涉及对人物的评价或互动，生成印象
-7. 对completed的会话生成摘要
+6. 从对话中提取记忆元素，类型只能是：person(人物)、object(物品)、place(场所)、action(行为)、trait(特征)
+7. 如果涉及对人物的评价或互动，生成印象
+8. 对completed的会话生成摘要"""
+            + round_hint
+            + """
 
 返回JSON格式：
 {
@@ -269,12 +295,12 @@ class TopicAnalyzer:
       "memory": {
         "content": "记忆核心内容",
         "details": "详细信息，包含言外之意分析",
-        "participants": "参与者",
-        "location": "地点",
         "emotion": "情感",
-        "tags": "标签",
         "confidence": 0.8
       },
+      "elements": [
+        {"name": "元素名", "category": "person|object|place|action|trait", "role": "subject|object|scene|action|attribute"}
+      ],
       "impression": {
         "person_name": "人物名称",
         "summary": "印象摘要",
@@ -286,12 +312,15 @@ class TopicAnalyzer:
 }
 
 注意：
+- elements字段必须为每个会话生成，提取对话中涉及的人、物品、地点、行为、特征
+- 优先使用已有记忆元素列表中的名称，避免创建重复
 - impression字段可选，仅在涉及对人物评价时生成
 - memory字段必须为每个会话生成
 - new_message_indices中的数字对应新消息的序号
 - 每条新消息必须被分配到某个会话中
 - 只返回JSON，不要其他内容
-""")
+"""
+        )
         return "\n".join(parts)
 
     def _parse_response(self, raw_text: str) -> dict | None:
@@ -331,6 +360,9 @@ class TopicAnalyzer:
     async def _process_result(self, result: dict, messages: list[dict], group_id: str):
         """处理LLM分析结果，更新会话状态并生成衍生产物"""
         sessions_data = result.get("sessions", [])
+
+        # 记录本轮被LLM显式处理过的会话ID（用于区分"被延续"与"未被提及"）
+        touched_session_ids: set[str] = set()
 
         for s_data in sessions_data:
             try:
@@ -375,6 +407,9 @@ class TopicAnalyzer:
                         summary=str(summary) if summary else None,
                     )
                     self._active_sessions[group_id][real_id] = session
+                    # 新建会话本轮即计入1轮
+                    self._session_rounds[group_id][real_id] = 1
+                    touched_session_ids.add(real_id)
                     logger.info(f"创建新会话: {real_id}, 话题: {topic}")
                 else:
                     # 延续已有会话
@@ -406,6 +441,9 @@ class TopicAnalyzer:
                         session.participants = list(set(session.participants + new_p))
                     if summary:
                         session.summary = str(summary)
+                    # 延续会话轮次 +1
+                    self._session_rounds[group_id][session_id] += 1
+                    touched_session_ids.add(session_id)
                     logger.debug(f"更新会话: {session_id}, 话题: {topic}")
 
                 # 生成衍生产物
@@ -424,6 +462,7 @@ class TopicAnalyzer:
                     sid = real_id if is_new else session_id
                     completed_session = self._active_sessions[group_id].pop(sid, None)
                     if completed_session:
+                        self._session_rounds[group_id].pop(sid, None)
                         self._completed_sessions[group_id].append(completed_session)
                         # 限制已完成会话数量
                         max_count = self.max_completed_sessions * 2
@@ -437,44 +476,80 @@ class TopicAnalyzer:
                 logger.error(f"处理会话数据失败: {e}", exc_info=True)
                 continue
 
+        # 强制总结：未被LLM标记为completed、且已达轮次上限的会话强制完成
+        await self._force_complete_overspent_sessions(group_id, touched_session_ids)
+
         # 保存记忆状态
         await self.memory_system._queue_save_memory_state(group_id)
+
+    async def _force_complete_overspent_sessions(
+        self, group_id: str, touched_session_ids: set[str]
+    ):
+        """对达到轮次上限仍未完成的会话强制标记为completed并补生成摘要。
+
+        Args:
+            group_id: 群组/会话ID
+            touched_session_ids: 本轮被LLM显式处理过的会话ID集合，
+                这些会话的轮次已经在 _process_result 主循环中累加。
+        """
+        limit = self.max_session_rounds
+        if limit <= 0:
+            return
+
+        active = self._active_sessions.get(group_id, {})
+        # 复制key，避免迭代时修改
+        for sid in list(active.keys()):
+            rounds = self._session_rounds[group_id].get(sid, 0)
+            if rounds < limit:
+                continue
+
+            session = active.get(sid)
+            if not session:
+                self._session_rounds[group_id].pop(sid, None)
+                continue
+
+            if session.status != "completed":
+                session.status = "completed"
+                if not session.summary:
+                    session.summary = (
+                        f"会话已达强制总结轮次({limit}轮)，自动完成。"
+                        f"话题：{session.topic}"
+                    )
+                logger.info(
+                    f"会话强制完成: {sid}, 话题: {session.topic}, 轮次: {rounds}"
+                )
+
+            completed_session = active.pop(sid, None)
+            if completed_session:
+                self._session_rounds[group_id].pop(sid, None)
+                self._completed_sessions[group_id].append(completed_session)
+                max_count = self.max_completed_sessions * 2
+                if len(self._completed_sessions[group_id]) > max_count:
+                    self._completed_sessions[group_id] = (
+                        self._completed_sessions[group_id][-max_count:]
+                    )
 
     async def _generate_products(self, s_data: dict, session: Session, group_id: str):
         """生成衍生产物：记忆和印象"""
         if not session:
             return
 
-        # 1. 生成记忆
         memory_data = s_data.get("memory")
+        elements_data = s_data.get("elements", [])
+        memory_id = None
+
         if memory_data and isinstance(memory_data, dict):
             try:
                 content = str(memory_data.get("content", "")).strip()
                 details = str(memory_data.get("details", "")).strip()
-                m_participants = str(memory_data.get("participants", "")).strip()
-                location = str(memory_data.get("location", "")).strip()
                 m_emotion = str(memory_data.get("emotion", "")).strip()
-                tags = str(memory_data.get("tags", "")).strip()
                 confidence = float(memory_data.get("confidence", 0.7))
 
                 if content:
-                    theme = (
-                        ", ".join(session.keywords)
-                        if session.keywords
-                        else session.topic
-                    )
-                    # 清理主题中的特殊字符
-                    theme = re.sub(r"[^\w\u4e00-\u9fff,，\s]", "", theme)
-
-                    concept_id = self.memory_system.memory_graph.add_concept(theme)
-                    self.memory_system.memory_graph.add_memory(
+                    memory_id = self.memory_system.memory_graph.add_memory(
                         content=content,
-                        concept_id=concept_id,
                         details=details,
-                        participants=m_participants,
-                        location=location,
                         emotion=m_emotion,
-                        tags=tags,
                         strength=max(0.0, min(1.0, confidence)),
                         group_id=group_id,
                     )
@@ -482,7 +557,30 @@ class TopicAnalyzer:
             except Exception as e:
                 logger.error(f"生成记忆失败: {e}", exc_info=True)
 
-        # 2. 生成印象
+        if elements_data and isinstance(elements_data, list) and memory_id:
+            try:
+                element_ids = []
+                for elem in elements_data:
+                    if not isinstance(elem, dict):
+                        continue
+                    name = str(elem.get("name", "")).strip()
+                    category = str(elem.get("category", "")).strip()
+                    role = str(elem.get("role", "")).strip()
+                    if not name or not category:
+                        continue
+                    from ..core.models import CATEGORIES
+                    if category not in CATEGORIES:
+                        category = "trait"
+                    eid = self.memory_system.memory_graph.get_or_create_element(
+                        name, category, group_id
+                    )
+                    self.memory_system.memory_graph.link_memory(eid, memory_id, role)
+                    element_ids.append(eid)
+
+                self.memory_system.memory_graph.auto_connect_cooccurring_elements(memory_id)
+            except Exception as e:
+                logger.error(f"提取元素失败: {e}", exc_info=True)
+
         impression_data = s_data.get("impression")
         if impression_data and isinstance(impression_data, dict):
             try:

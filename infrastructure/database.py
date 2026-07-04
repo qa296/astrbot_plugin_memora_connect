@@ -505,35 +505,44 @@ class SmartDatabaseMigration:
                 )
 
             else:
-                # 创建最小主记忆数据库结构
+                # 创建最小主记忆数据库结构（Element 统一架构）
                 cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS concepts (
+                    CREATE TABLE IF NOT EXISTS elements (
                         id TEXT PRIMARY KEY,
                         name TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        group_id TEXT DEFAULT '',
                         created_at REAL NOT NULL,
                         last_accessed REAL NOT NULL,
                         access_count INTEGER DEFAULT 0
                     )
                 """)
-
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS element_memories (
+                        element_id TEXT NOT NULL,
+                        memory_id TEXT NOT NULL,
+                        role TEXT DEFAULT '',
+                        PRIMARY KEY (element_id, memory_id)
+                    )
+                """)
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS memories (
                         id TEXT PRIMARY KEY,
-                        concept_id TEXT NOT NULL,
                         content TEXT NOT NULL,
-                        group_id TEXT DEFAULT "",
+                        details TEXT DEFAULT '',
+                        emotion TEXT DEFAULT '',
+                        group_id TEXT DEFAULT '',
                         created_at REAL NOT NULL,
                         last_accessed REAL NOT NULL,
                         access_count INTEGER DEFAULT 0,
                         strength REAL DEFAULT 1.0
                     )
                 """)
-
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS connections (
                         id TEXT PRIMARY KEY,
-                        from_concept TEXT NOT NULL,
-                        to_concept TEXT NOT NULL,
+                        from_element TEXT NOT NULL,
+                        to_element TEXT NOT NULL,
                         strength REAL DEFAULT 1.0,
                         last_strengthened REAL NOT NULL
                     )
@@ -544,7 +553,22 @@ class SmartDatabaseMigration:
                     "CREATE INDEX IF NOT EXISTS idx_memories_group_id ON memories(group_id)"
                 )
                 cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_memories_concept_group ON memories(concept_id, group_id)"
+                    "CREATE INDEX IF NOT EXISTS idx_memories_created_group ON memories(created_at, group_id)"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_elements_category ON elements(category)"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_elements_group ON elements(group_id)"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_elements_name ON elements(name)"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_em_element ON element_memories(element_id)"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_em_memory ON element_memories(memory_id)"
                 )
 
             conn.commit()
@@ -621,31 +645,34 @@ class SmartDatabaseMigration:
             return self._generate_main_memory_schema()
 
     def _generate_main_memory_schema(self) -> DatabaseSchema:
-        """生成主记忆数据库结构"""
+        """生成主记忆数据库结构（Element 统一架构）"""
         schema = DatabaseSchema()
 
-        # 概念表
-        concepts_table = TableSchema(name="concepts")
-        concepts_table.fields = [
+        # 元素表（替代旧 concepts 表）
+        elements_table = TableSchema(name="elements")
+        elements_table.fields = [
             FieldSchema(name="id", type="TEXT", primary_key=True),
             FieldSchema(name="name", type="TEXT", not_null=True),
+            FieldSchema(name="category", type="TEXT", not_null=True),
+            FieldSchema(name="group_id", type="TEXT", default_value=""),
             FieldSchema(name="created_at", type="REAL", not_null=True),
             FieldSchema(name="last_accessed", type="REAL", not_null=True),
             FieldSchema(name="access_count", type="INTEGER", default_value=0),
         ]
-        schema.tables["concepts"] = concepts_table
+        elements_table.indexes = [
+            "idx_elements_category",
+            "idx_elements_group",
+            "idx_elements_name",
+        ]
+        schema.tables["elements"] = elements_table
 
-        # 记忆表 - 增强版，包含更多详细信息和群聊隔离支持
+        # 记忆表 - 精简版，去掉 concept_id/participants/location/tags
         memories_table = TableSchema(name="memories")
         memories_table.fields = [
             FieldSchema(name="id", type="TEXT", primary_key=True),
-            FieldSchema(name="concept_id", type="TEXT", not_null=True),
             FieldSchema(name="content", type="TEXT", not_null=True),
             FieldSchema(name="details", type="TEXT", default_value=""),
-            FieldSchema(name="participants", type="TEXT", default_value=""),
-            FieldSchema(name="location", type="TEXT", default_value=""),
             FieldSchema(name="emotion", type="TEXT", default_value=""),
-            FieldSchema(name="tags", type="TEXT", default_value=""),
             FieldSchema(name="group_id", type="TEXT", default_value=""),
             FieldSchema(name="created_at", type="REAL", not_null=True),
             FieldSchema(name="last_accessed", type="REAL", not_null=True),
@@ -653,20 +680,31 @@ class SmartDatabaseMigration:
             FieldSchema(name="strength", type="REAL", default_value=1.0),
             FieldSchema(name="allow_forget", type="INTEGER", default_value=1),
         ]
-        # 添加群聊隔离索引
         memories_table.indexes = [
             "idx_memories_group_id",
-            "idx_memories_concept_group",
             "idx_memories_created_group",
         ]
         schema.tables["memories"] = memories_table
 
-        # 连接表
+        # 元素-记忆关联表
+        element_memories_table = TableSchema(name="element_memories")
+        element_memories_table.fields = [
+            FieldSchema(name="element_id", type="TEXT", not_null=True),
+            FieldSchema(name="memory_id", type="TEXT", not_null=True),
+            FieldSchema(name="role", type="TEXT", default_value=""),
+        ]
+        element_memories_table.indexes = [
+            "idx_em_element",
+            "idx_em_memory",
+        ]
+        schema.tables["element_memories"] = element_memories_table
+
+        # 连接表（使用 from_element/to_element）
         connections_table = TableSchema(name="connections")
         connections_table.fields = [
             FieldSchema(name="id", type="TEXT", primary_key=True),
-            FieldSchema(name="from_concept", type="TEXT", not_null=True),
-            FieldSchema(name="to_concept", type="TEXT", not_null=True),
+            FieldSchema(name="from_element", type="TEXT", not_null=True),
+            FieldSchema(name="to_element", type="TEXT", not_null=True),
             FieldSchema(name="strength", type="REAL", default_value=1.0),
             FieldSchema(name="last_strengthened", type="REAL", not_null=True),
         ]
@@ -1154,13 +1192,29 @@ class SmartDatabaseMigration:
                         cursor.execute(
                             "CREATE INDEX IF NOT EXISTS idx_memories_group_id ON memories(group_id)"
                         )
-                    elif index_name == "idx_memories_concept_group":
-                        cursor.execute(
-                            "CREATE INDEX IF NOT EXISTS idx_memories_concept_group ON memories(concept_id, group_id)"
-                        )
                     elif index_name == "idx_memories_created_group":
                         cursor.execute(
                             "CREATE INDEX IF NOT EXISTS idx_memories_created_group ON memories(created_at, group_id)"
+                        )
+                    elif index_name == "idx_elements_category":
+                        cursor.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_elements_category ON elements(category)"
+                        )
+                    elif index_name == "idx_elements_group":
+                        cursor.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_elements_group ON elements(group_id)"
+                        )
+                    elif index_name == "idx_elements_name":
+                        cursor.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_elements_name ON elements(name)"
+                        )
+                    elif index_name == "idx_em_element":
+                        cursor.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_em_element ON element_memories(element_id)"
+                        )
+                    elif index_name == "idx_em_memory":
+                        cursor.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_em_memory ON element_memories(memory_id)"
                         )
                     elif index_name == "idx_concept_embeddings":
                         cursor.execute(

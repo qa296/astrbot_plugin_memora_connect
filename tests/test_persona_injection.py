@@ -57,6 +57,9 @@ class _FakeProvider:
 
 
 class _FakeGraph:
+    def get_all_element_names_by_category(self, group_id):
+        return {}
+
     def add_concept(self, theme):
         return f"concept:{theme}"
 
