@@ -28,7 +28,7 @@ from .intelligence.topic_analyzer import TopicAnalyzer
 from .memory.memory_display import EnhancedMemoryDisplay
 from .memory.memory_recall import EnhancedMemoryRecall
 from .memory.visualization import MemoryGraphVisualizer
-from .web.server import MemoryWebServer
+from .web.api import MemoryWebAPI
 
 
 @register(
@@ -46,7 +46,7 @@ class MemoraConnectPlugin(Star):
         self.memory_display = EnhancedMemoryDisplay(self.memory_system)
         self.graph_visualizer = MemoryGraphVisualizer(self.memory_system)
         self._initialized = False
-        self.web_server = None
+        self.web_api = None
 
         # 新增：主动能力升级模块
         self.event_bus = None
@@ -146,22 +146,12 @@ class MemoraConnectPlugin(Star):
 
             self._initialized = True
 
-            # 根据配置启动 Web 界面
+            # 注册 Plugin Page API 到 AstrBot Dashboard
             try:
-                web_cfg = (self.memory_system.memory_config or {}).get(
-                    "web_ui", {}
-                ) or {}
-                if web_cfg.get("enabled", False):
-                    host = str(web_cfg.get("host", "127.0.0.1"))
-                    port = int(web_cfg.get("port", 8350))
-                    token = str(web_cfg.get("access_token", "") or "")
-                    self.web_server = MemoryWebServer(
-                        self.memory_system, host=host, port=port, access_token=token
-                    )
-                    await self.web_server.start()
-                    logger.info(f"Web 界面已启动: http://{host}:{port}")
+                self.web_api = MemoryWebAPI(self.memory_system, self.context)
+                self.web_api.register()
             except Exception as _we:
-                logger.error(f"启动Web界面失败: {_we}", exc_info=True)
+                logger.error(f"注册 Plugin Page API 失败: {_we}", exc_info=True)
             logger.info("记忆系统异步初始化完成")
         except Exception as e:
             logger.error(f"记忆系统初始化失败: {e}", exc_info=True)
@@ -484,12 +474,6 @@ class MemoraConnectPlugin(Star):
             except Exception as bus_e:
                 logger.warning(f"关闭事件总线失败: {bus_e}")
 
-            # 停止 Web 服务
-            if hasattr(self, "web_server") and self.web_server:
-                try:
-                    await self.web_server.stop()
-                except Exception as _we:
-                    logger.warning(f"停止Web服务失败: {_we}")
             # 1. 停止维护循环
             if hasattr(self.memory_system, "_should_stop_maintenance"):
                 self.memory_system._should_stop_maintenance.set()
