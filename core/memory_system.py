@@ -715,6 +715,7 @@ class MemorySystem:
 
                 conn.commit()
                 resource_manager.release_db_connection(db_path, conn)
+                conn = None  # 已释放，防止后续异常触发二次释放
 
                 group_info = f" (群: {group_id})" if group_id else ""
                 self._debug_log(
@@ -723,11 +724,12 @@ class MemorySystem:
                 )
 
             except BaseException as e:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                resource_manager.release_db_connection(db_path, conn)
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    resource_manager.release_db_connection(db_path, conn)
                 if isinstance(e, Exception):
                     self._debug_log(f"保存失败: {e}", "error")
                 raise
