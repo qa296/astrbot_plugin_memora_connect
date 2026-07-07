@@ -290,12 +290,12 @@ class MemorySystem:
             if self._last_save_time.get(group_id, 0) > creation_time:
                 return  # 如果有更新的请求，跳过这次保存
 
-            # 执行实际保存
-            await self.save_memory_state(group_id)
+            # 执行实际保存（shield 防止 cancel 打断数据库写入导致连接泄露）
+            await asyncio.shield(self.save_memory_state(group_id))
             self._last_save_time[group_id] = time.time()
 
         except asyncio.CancelledError:
-            pass  # 任务被取消，正常情况
+            pass  # 在 sleep 期间被取消，正常情况
         except Exception as e:
             self._debug_log(f"延迟保存失败: {e}", "warning")
 
@@ -713,17 +713,20 @@ class MemorySystem:
                     "debug",
                 )
 
-            except Exception as e:
+            except BaseException as e:
                 try:
                     conn.rollback()
-                except Exception as rollback_e:
-                    self._debug_log(f"回滚失败: {rollback_e}", "error")
+                except Exception:
+                    pass
                 resource_manager.release_db_connection(db_path, conn)
-                self._debug_log(f"保存失败: {e}", "error")
+                if isinstance(e, Exception):
+                    self._debug_log(f"保存失败: {e}", "error")
                 raise
 
-        except Exception as e:
-            self._debug_log(f"保存过程异常: {e}", "error")
+        except BaseException as e:
+            if isinstance(e, Exception):
+                self._debug_log(f"保存过程异常: {e}", "error")
+            raise
 
     async def delete_memory_by_id(self, memory_id: str, group_id: str = "") -> bool:
         conn = None
