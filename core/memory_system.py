@@ -428,6 +428,10 @@ class MemorySystem:
         conn = None
         try:
             conn = resource_manager.get_db_connection(db_path)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             cursor = conn.cursor()
 
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -597,6 +601,11 @@ class MemorySystem:
             db_path = self._get_group_db_path(group_id)
             await self._ensure_database_structure(db_path)
             conn = resource_manager.get_db_connection(db_path)
+            # 清理连接池复用的脏连接可能残留的未提交事务
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             cursor = conn.cursor()
             cursor.execute("BEGIN TRANSACTION")
 
@@ -742,6 +751,10 @@ class MemorySystem:
             db_path = self._get_group_db_path(group_id)
             await self._ensure_database_structure(db_path)
             conn = resource_manager.get_db_connection(db_path)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             cursor = conn.cursor()
 
             if group_id:
