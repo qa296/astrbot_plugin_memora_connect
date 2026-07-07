@@ -125,7 +125,7 @@ class MemorySystem:
         self._save_cache = {}  # 保存缓存 {group_id: pending_changes}
         self._save_locks = {}  # 保存锁 {group_id: asyncio.Lock}
         self._last_save_time = {}  # 最后保存时间 {group_id: timestamp}
-        self._pending_save_task = None  # 待处理的保存任务
+        self._pending_save_tasks: dict[str, asyncio.Task] = {}  # 按 group_id 分的待处理保存任务
 
         # 异步任务生命周期管理 - 新增
         self._managed_tasks = set()  # 管理的异步任务集合
@@ -255,24 +255,27 @@ class MemorySystem:
             if group_id not in self._save_locks:
                 self._save_locks[group_id] = asyncio.Lock()
 
-            # 获取最后保存时间
-            last_save = self._last_save_time.get(group_id, 0)
-            current_time = time.time()
+            async with self._save_locks[group_id]:
+                # 获取最后保存时间
+                last_save = self._last_save_time.get(group_id, 0)
+                current_time = time.time()
 
-            # 如果距离上次保存时间少于2秒，延迟保存
-            if current_time - last_save < 2:
-                # 取消之前的保存任务
-                if self._pending_save_task and not self._pending_save_task.done():
-                    self._pending_save_task.cancel()
+                # 如果距离上次保存时间少于2秒，延迟保存
+                if current_time - last_save < 2:
+                    # 取消该 group_id 之前的保存任务
+                    if group_id in self._pending_save_tasks:
+                        old_task = self._pending_save_tasks[group_id]
+                        if not old_task.done():
+                            old_task.cancel()
 
-                # 创建新的延迟保存任务
-                self._pending_save_task = asyncio.create_task(
-                    self._delayed_save(group_id, current_time)
-                )
-            else:
-                # 立即保存
-                await self.save_memory_state(group_id)
-                self._last_save_time[group_id] = current_time
+                    # 创建新的延迟保存任务
+                    self._pending_save_tasks[group_id] = asyncio.create_task(
+                        self._delayed_save(group_id, current_time)
+                    )
+                else:
+                    # 立即保存
+                    await self.save_memory_state(group_id)
+                    self._last_save_time[group_id] = current_time
 
         except Exception as e:
             self._debug_log(f"队列保存失败: {e}", "warning")
@@ -723,6 +726,7 @@ class MemorySystem:
             self._debug_log(f"保存过程异常: {e}", "error")
 
     async def delete_memory_by_id(self, memory_id: str, group_id: str = "") -> bool:
+        conn = None
         try:
             if not memory_id:
                 return False
@@ -748,17 +752,27 @@ class MemorySystem:
             deleted_rows = cursor.rowcount
             conn.commit()
             resource_manager.release_db_connection(db_path, conn)
+            conn = None  # 已释放
 
             if self.embedding_cache:
                 await self.embedding_cache.delete_embedding(memory_id, group_id)
 
             return removed_from_graph or deleted_rows > 0
         except Exception as e:
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             self._debug_log(f"删除记忆失败: {e}", "error")
             return False
+        finally:
+            if conn:
+                resource_manager.release_db_connection(db_path, conn)
 
     async def _ensure_database_structure(self, db_path: str):
         """确保数据库和所需的表结构存在"""
+        conn = None
         try:
             conn = resource_manager.get_db_connection(db_path)
             cursor = conn.cursor()
@@ -772,6 +786,7 @@ class MemorySystem:
                 self._migrate_legacy_to_elements(cursor, conn, db_path)
                 conn.commit()
                 resource_manager.release_db_connection(db_path, conn)
+                conn = None  # 已释放，避免 finally 重复释放
                 self.memory_graph = MemoryGraph()
                 self.load_memory_state("")
                 return
@@ -861,10 +876,19 @@ class MemorySystem:
 
             conn.commit()
             resource_manager.release_db_connection(db_path, conn)
+            conn = None  # 已释放，避免 finally 重复释放
 
         except Exception as e:
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             self._debug_log(f"确保数据库结构异常: {e}", "error")
             raise
+        finally:
+            if conn:
+                resource_manager.release_db_connection(db_path, conn)
 
     def _migrate_legacy_to_elements(self, cursor, conn, db_path: str):
         """将旧 concepts/memories/connections 表迁移到 elements 体系"""

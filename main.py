@@ -499,21 +499,17 @@ class MemoraConnectPlugin(Star):
                 await self.memory_system._cancel_all_managed_tasks()
 
             # 3. 等待待处理的保存任务完成
-            if (
-                hasattr(self.memory_system, "_pending_save_task")
-                and self.memory_system._pending_save_task
-                and not self.memory_system._pending_save_task.done()
-            ):
-                try:
-                    await asyncio.wait_for(
-                        self.memory_system._pending_save_task, timeout=5.0
-                    )
-                except asyncio.TimeoutError:
-                    self.memory_system._pending_save_task.cancel()
-                    try:
-                        await self.memory_system._pending_save_task
-                    except asyncio.CancelledError:
-                        pass
+            if hasattr(self.memory_system, "_pending_save_tasks"):
+                for task in list(self.memory_system._pending_save_tasks.values()):
+                    if task and not task.done():
+                        try:
+                            await asyncio.wait_for(task, timeout=5.0)
+                        except asyncio.TimeoutError:
+                            task.cancel()
+                            try:
+                                await task
+                            except asyncio.CancelledError:
+                                pass
 
             # 4. 清理嵌入向量缓存
             if (
