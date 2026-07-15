@@ -1602,10 +1602,7 @@ class MemorySystem:
             return initial_allow_forget
 
     async def get_llm_provider(self):
-        """使用配置文件指定的提供商 - 添加缓存和日志限制"""
-        # 检查是否已经有缓存结果
-        if hasattr(self, "_llm_provider_cache"):
-            return self._llm_provider_cache
+        """使用配置文件指定的提供商 - 每次调用重新获取，保留错误日志限速"""
 
         try:
             provider_id = self.memory_config.get("llm_provider")
@@ -1616,13 +1613,11 @@ class MemorySystem:
                 ):  # 每分钟最多记录一次
                     logger.error("插件配置中未指定 'llm_provider'")
                     self._llm_provider_no_config_time = time.time()
-                self._llm_provider_cache = None
                 return None
 
             # 1. 尝试通过ID精确查找
             provider = self.context.get_provider_by_id(provider_id)
             if provider:
-                self._llm_provider_cache = provider
                 return provider
 
             # 2. 如果ID查找失败，尝试通过名称模糊匹配
@@ -1632,7 +1627,6 @@ class MemorySystem:
                     getattr(p, "meta", None), "name", getattr(p, "name", None)
                 )
                 if p_name and p_name.lower() == provider_id.lower():
-                    self._llm_provider_cache = p
                     return p
 
             if (
@@ -1647,7 +1641,6 @@ class MemorySystem:
                 logger.error(f"可用提供商: {available_ids}")
                 self._llm_provider_error_time = time.time()
 
-            self._llm_provider_cache = None
             return None
 
         except Exception as e:
@@ -1658,7 +1651,6 @@ class MemorySystem:
                 logger.error(f"获取LLM提供商失败: {e}", exc_info=True)
                 self._llm_provider_exception_time = time.time()
 
-            self._llm_provider_cache = None
             return None
 
     async def get_embedding_provider(self):
