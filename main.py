@@ -10,6 +10,7 @@ from typing import Any
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
 from astrbot.api.provider import ProviderRequest
+from astrbot.core.agent.message import TextPart
 from astrbot.api.star import Context, Star, StarTools, register
 
 from .api.gateway import MemoryAPIGateway
@@ -453,11 +454,13 @@ class MemoraConnectPlugin(Star):
             # [修改] 统一使用 inject_memories_to_context 获取完整上下文（包含记忆、话题、画像等）
             # 避免重复召回和注入
             full_context = await self.memory_system.inject_memories_to_context(event)
-            if full_context and hasattr(req, "system_prompt"):
-                # 避免重复注入（简单检查）
-                if "【相关记忆】" not in (req.system_prompt or ""):
-                    req.system_prompt = f"{req.system_prompt or ''}\n\n{full_context}"
-                    logger.debug("已将完整上下文注入到 System Prompt")
+            if full_context:
+                if not any(
+                    "【相关记忆】" in getattr(p, "text", "")
+                    for p in req.extra_user_content_parts
+                ):
+                    req.extra_user_content_parts.append(TextPart(text=full_context))
+                    logger.debug("已将完整上下文作为用户内容块注入")
 
         except Exception as e:
             logger.error(f"LLM请求记忆召回失败: {e}", exc_info=True)
