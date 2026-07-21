@@ -11,6 +11,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.core.agent.message import TextPart
 
 from .api.gateway import MemoryAPIGateway
 from .core.memory_graph import MemoryGraph
@@ -35,7 +36,7 @@ from .web.api import MemoryWebAPI
     "astrbot_plugin_memora_connect",
     "qa296",
     "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。",
-    "0.5.2",
+    "0.5.3",
     "https://github.com/qa296/astrbot_plugin_memora_connect",
 )
 class MemoraConnectPlugin(Star):
@@ -115,7 +116,6 @@ class MemoraConnectPlugin(Star):
 
             # 初始化新增模块
             try:
-
                 # 1. 初始化事件总线
                 self.event_bus = await initialize_event_bus()
 
@@ -453,11 +453,13 @@ class MemoraConnectPlugin(Star):
             # [修改] 统一使用 inject_memories_to_context 获取完整上下文（包含记忆、话题、画像等）
             # 避免重复召回和注入
             full_context = await self.memory_system.inject_memories_to_context(event)
-            if full_context and hasattr(req, "system_prompt"):
-                # 避免重复注入（简单检查）
-                if "【相关记忆】" not in (req.system_prompt or ""):
-                    req.system_prompt = f"{req.system_prompt or ''}\n\n{full_context}"
-                    logger.debug("已将完整上下文注入到 System Prompt")
+            if full_context:
+                if not any(
+                    "【相关记忆】" in getattr(p, "text", "")
+                    for p in req.extra_user_content_parts
+                ):
+                    req.extra_user_content_parts.append(TextPart(text=full_context))
+                    logger.debug("已将完整上下文作为用户内容块注入")
 
         except Exception as e:
             logger.error(f"LLM请求记忆召回失败: {e}", exc_info=True)
@@ -584,7 +586,10 @@ class MemoraConnectPlugin(Star):
             if elements:
                 try:
                     import json
-                    elem_list = json.loads(elements) if isinstance(elements, str) else elements
+
+                    elem_list = (
+                        json.loads(elements) if isinstance(elements, str) else elements
+                    )
                     if isinstance(elem_list, list):
                         for elem in elem_list:
                             if isinstance(elem, dict):
@@ -595,8 +600,12 @@ class MemoraConnectPlugin(Star):
                                     eid = self.memory_system.memory_graph.get_or_create_element(
                                         name, category, group_id
                                     )
-                                    self.memory_system.memory_graph.link_memory(eid, memory_id, role)
-                        self.memory_system.memory_graph.auto_connect_cooccurring_elements(memory_id)
+                                    self.memory_system.memory_graph.link_memory(
+                                        eid, memory_id, role
+                                    )
+                        self.memory_system.memory_graph.auto_connect_cooccurring_elements(
+                            memory_id
+                        )
                 except Exception:
                     pass
 
@@ -605,29 +614,53 @@ class MemoraConnectPlugin(Star):
                     for p in participants.replace("，", ",").split(","):
                         p = p.strip()
                         if p:
-                            eid = self.memory_system.memory_graph.get_or_create_element(p, "person", group_id)
-                            self.memory_system.memory_graph.link_memory(eid, memory_id, "subject")
+                            eid = self.memory_system.memory_graph.get_or_create_element(
+                                p, "person", group_id
+                            )
+                            self.memory_system.memory_graph.link_memory(
+                                eid, memory_id, "subject"
+                            )
                 if location:
                     for loc in location.replace("，", ",").split(","):
                         loc = loc.strip()
                         if loc:
-                            eid = self.memory_system.memory_graph.get_or_create_element(loc, "place", group_id)
-                            self.memory_system.memory_graph.link_memory(eid, memory_id, "scene")
+                            eid = self.memory_system.memory_graph.get_or_create_element(
+                                loc, "place", group_id
+                            )
+                            self.memory_system.memory_graph.link_memory(
+                                eid, memory_id, "scene"
+                            )
                 if tags:
                     for tag in tags.replace("，", ",").split(","):
                         tag = tag.strip()
                         if tag:
-                            eid = self.memory_system.memory_graph.get_or_create_element(tag, "trait", group_id)
-                            self.memory_system.memory_graph.link_memory(eid, memory_id, "attribute")
-                self.memory_system.memory_graph.auto_connect_cooccurring_elements(memory_id)
+                            eid = self.memory_system.memory_graph.get_or_create_element(
+                                tag, "trait", group_id
+                            )
+                            self.memory_system.memory_graph.link_memory(
+                                eid, memory_id, "attribute"
+                            )
+                self.memory_system.memory_graph.auto_connect_cooccurring_elements(
+                    memory_id
+                )
 
-            if not elements and not participants and not location and not tags and theme:
+            if (
+                not elements
+                and not participants
+                and not location
+                and not tags
+                and theme
+            ):
                 for kw in theme.replace("，", ",").split(","):
                     kw = kw.strip()
                     if kw:
-                        eid = self.memory_system.memory_graph.get_or_create_element(kw, "trait", group_id)
+                        eid = self.memory_system.memory_graph.get_or_create_element(
+                            kw, "trait", group_id
+                        )
                         self.memory_system.memory_graph.link_memory(eid, memory_id, "")
-                self.memory_system.memory_graph.auto_connect_cooccurring_elements(memory_id)
+                self.memory_system.memory_graph.auto_connect_cooccurring_elements(
+                    memory_id
+                )
 
             await self.memory_system._queue_save_memory_state(group_id)
 
@@ -805,7 +838,10 @@ class MemoraConnectPlugin(Star):
             if elements:
                 try:
                     import json
-                    elem_list = json.loads(elements) if isinstance(elements, str) else elements
+
+                    elem_list = (
+                        json.loads(elements) if isinstance(elements, str) else elements
+                    )
                     if isinstance(elem_list, list):
                         for elem in elem_list:
                             if isinstance(elem, dict):
@@ -814,15 +850,20 @@ class MemoraConnectPlugin(Star):
                                 role = str(elem.get("role", "")).strip()
                                 if name:
                                     from .core.models import CATEGORIES
+
                                     if category not in CATEGORIES:
                                         category = "trait"
                                     eid = self.memory_system.memory_graph.get_or_create_element(
                                         name, category, group_id
                                     )
-                                    self.memory_system.memory_graph.link_memory(eid, memory_id, role)
+                                    self.memory_system.memory_graph.link_memory(
+                                        eid, memory_id, role
+                                    )
                                     element_linked = True
                         if element_linked:
-                            self.memory_system.memory_graph.auto_connect_cooccurring_elements(memory_id)
+                            self.memory_system.memory_graph.auto_connect_cooccurring_elements(
+                                memory_id
+                            )
                 except Exception:
                     pass
 
@@ -830,25 +871,43 @@ class MemoraConnectPlugin(Star):
                 actual_theme = theme or ""
                 fallback_parts = []
                 if participants:
-                    fallback_parts.extend(p.strip() for p in participants.replace("，", ",").split(",") if p.strip())
+                    fallback_parts.extend(
+                        p.strip()
+                        for p in participants.replace("，", ",").split(",")
+                        if p.strip()
+                    )
                 if location:
-                    fallback_parts.extend(l.strip() for l in location.replace("，", ",").split(",") if l.strip())
+                    fallback_parts.extend(
+                        l.strip()
+                        for l in location.replace("，", ",").split(",")
+                        if l.strip()
+                    )
                 if tags:
-                    fallback_parts.extend(t.strip() for t in tags.replace("，", ",").split(",") if t.strip())
+                    fallback_parts.extend(
+                        t.strip()
+                        for t in tags.replace("，", ",").split(",")
+                        if t.strip()
+                    )
                 if actual_theme:
-                    fallback_parts.extend(k.strip() for k in actual_theme.replace("，", ",").split(",") if k.strip())
+                    fallback_parts.extend(
+                        k.strip()
+                        for k in actual_theme.replace("，", ",").split(",")
+                        if k.strip()
+                    )
 
                 for kw in fallback_parts:
-                    eid = self.memory_system.memory_graph.get_or_create_element(kw, "trait", group_id)
+                    eid = self.memory_system.memory_graph.get_or_create_element(
+                        kw, "trait", group_id
+                    )
                     self.memory_system.memory_graph.link_memory(eid, memory_id, "")
                 if fallback_parts:
-                    self.memory_system.memory_graph.auto_connect_cooccurring_elements(memory_id)
+                    self.memory_system.memory_graph.auto_connect_cooccurring_elements(
+                        memory_id
+                    )
 
             await self.memory_system._queue_save_memory_state(group_id)
 
-            logger.info(
-                f"LLM工具创建记忆：{content[:30]} (置信度: {confidence})"
-            )
+            logger.info(f"LLM工具创建记忆：{content[:30]} (置信度: {confidence})")
 
             return f"记忆创建成功,内容为:{content}"
 
