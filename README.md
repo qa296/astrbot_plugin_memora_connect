@@ -12,7 +12,7 @@
 
 ## 项目简介
 
-Memora Connect 为 AstrBot 注入类人记忆能力：自动从对话中提取知识图谱节点（人、物、地点...），构建关联网络，并按需召回。记忆会衰减、巩固、联想 — 就像人脑一样。
+Memora Connect 为 AstrBot 注入类人记忆能力：自动从对话中提取知识图谱节点（人、物、地点...），构建关联网络，并按需召回。记忆会衰减、巩固、联想。
 
 ```
 对话 → 提取元素 → 构建图谱 → 持久化存储
@@ -40,7 +40,7 @@ LLM 请求 → 多策略召回 → 注入上下文 → 有记忆的对话
 | `/记忆 印象 [人名]` | 查询对某人的印象 |
 | `/记忆 图谱` | 可视化知识图谱 |
 
-LLM 也会自动调用 `create_memory`、`recall_memory`、`adjust_impression` 等工具。
+LLM 也可以自动调用 `create_memory`、`recall_memory`、`adjust_impression` 等工具。
 
 ## 设计理念
 
