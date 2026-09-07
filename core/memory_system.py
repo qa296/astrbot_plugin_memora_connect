@@ -1843,21 +1843,6 @@ class MemorySystem:
                 except Exception as e:
                     self._debug_log(f"获取话题上下文失败: {e}", "warning")
 
-            # [新增] 注入用户画像/亲密度上下文
-            profile_context = ""
-            if self.user_profiling:
-                try:
-                    sender_id = event.get_sender_id()
-                    # 自用模式：移除亲密度计算，默认为主人/最高权限
-                    # 仅保留互动统计，作为数据参考
-                    intimacy = await self.user_profiling.calculate_intimacy(
-                        sender_id, group_id
-                    )
-                    if intimacy:
-                        profile_context = f"【用户状态】\n身份: 主人\n互动: {intimacy.total_interactions}次"
-                except Exception as e:
-                    self._debug_log(f"获取用户画像失败: {e}", "warning")
-
             # 使用增强记忆召回系统获取相关记忆
             from ..memory.memory_recall import EnhancedMemoryRecall
 
@@ -1888,8 +1873,6 @@ class MemorySystem:
 
             # 组合记忆上下文和印象上下文
             combined_context = ""
-            if profile_context:
-                combined_context += profile_context + "\n\n"
             if impression_context:
                 combined_context += impression_context + "\n\n"
             if topic_context:
@@ -1904,8 +1887,6 @@ class MemorySystem:
 
             if combined_context:
                 debug_info = []
-                if profile_context:
-                    debug_info.append("用户画像")
                 if impression_context:
                     debug_info.append("印象")
                 if topic_context:
