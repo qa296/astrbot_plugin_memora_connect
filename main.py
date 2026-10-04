@@ -36,7 +36,7 @@ from .web.api import MemoryWebAPI
     "astrbot_plugin_memora_connect",
     "qa296",
     "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。",
-    "0.5.3",
+    "0.5.4",
     "https://github.com/qa296/astrbot_plugin_memora_connect",
 )
 class MemoraConnectPlugin(Star):
@@ -458,7 +458,9 @@ class MemoraConnectPlugin(Star):
                     "【相关记忆】" in getattr(p, "text", "")
                     for p in req.extra_user_content_parts
                 ):
-                    req.extra_user_content_parts.append(TextPart(text=full_context))
+                    req.extra_user_content_parts.append(
+                        TextPart(text=full_context).mark_as_temp()
+                    )
                     logger.debug("已将完整上下文作为用户内容块注入")
 
         except Exception as e:
