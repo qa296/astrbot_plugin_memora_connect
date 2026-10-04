@@ -458,7 +458,9 @@ class MemoraConnectPlugin(Star):
                     "【相关记忆】" in getattr(p, "text", "")
                     for p in req.extra_user_content_parts
                 ):
-                    req.extra_user_content_parts.append(TextPart(text=full_context))
+                    req.extra_user_content_parts.append(
+                        TextPart(text=full_context).mark_as_temp()
+                    )
                     logger.debug("已将完整上下文作为用户内容块注入")
 
         except Exception as e:
