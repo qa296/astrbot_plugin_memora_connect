@@ -1,11 +1,14 @@
 """
-AstrBot Memora Connect 插件主文件
-提供记忆和印象管理功能的主要入口
+Memora Connect 插件主文件（薄装配层）。
+
+只做装配、事件门控、scope 解析与 AstrBot API 适配；
+所有 @filter.* 处理器必须留在本模块（AstrBot 按模块绑定 handler）。
 """
 
 import asyncio
+import json
 import os
-from typing import Any
+import time
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
@@ -13,148 +16,253 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.agent.message import TextPart
 
-from .api.gateway import MemoryAPIGateway
-from .core.memory_graph import MemoryGraph
-from .core.memory_system import MemorySystem
-
-# 导入模块化的组件
-from .infrastructure.events import (
-    initialize_event_bus,
-    shutdown_event_bus,
-)
-from .infrastructure.resources import resource_manager
-from .intelligence.profiling import UserProfilingSystem
-from .intelligence.temporal import TemporalMemorySystem
-from .intelligence.topic_analyzer import TopicAnalyzer
-from .memory.memory_display import EnhancedMemoryDisplay
-from .memory.memory_recall import EnhancedMemoryRecall
-from .memory.visualization import MemoryGraphVisualizer
+from .application.formation import FormationService
+from .application.ingest import IngestService
+from .application.recall import RecallService
+from .domain.models import CATEGORIES, Memory, score_verbal
+from .memory.visualization import generate_graph_image, prepare_graph_data
+from .storage.migrate_v1 import migrate_v1
+from .storage.repository import MemoryRepository, new_id
 from .web.api import MemoryWebAPI
+
+_COMMAND_PREFIXES = ("/", "!", "！")
 
 
 @register(
     "astrbot_plugin_memora_connect",
     "qa296",
-    "赋予AI记忆与印象/好感的能力！  模仿生物海马体，通过概念节点与关系连接构建记忆网络，具备记忆形成、提取、遗忘、巩固功能，采用双峰时间分布回顾聊天，打造有记忆能力的智能对话体验。",
-    "0.5.4",
+    "赋予AI模仿人类的记忆和印象能力。从对话自动沉淀记忆、人物与关系图谱，请求时按相关度召回注入，好感度独立追踪",
+    "0.7.0",
     "https://github.com/qa296/astrbot_plugin_memora_connect",
 )
 class MemoraConnectPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.cfg = config
         data_dir = StarTools.get_data_dir() / "memora_connect"
-        self.memory_system = MemorySystem(context, config, data_dir)
-        self.memory_display = EnhancedMemoryDisplay(self.memory_system)
-        self.graph_visualizer = MemoryGraphVisualizer(self.memory_system)
-        self._initialized = False
-        self.web_api = None
+        os.makedirs(data_dir, exist_ok=True)
+        self.data_dir = str(data_dir)
 
-        # 新增：主动能力升级模块
-        self.event_bus = None
-        self.topic_analyzer = None
-        self.user_profiling = None
-        self.temporal_memory = None
-        self.api_gateway = None
+        self.repo = MemoryRepository(str(data_dir / "memora.db"))
+        migrate_v1(str(data_dir), self.repo)
 
-        asyncio.create_task(self._async_init())
+        self.ingest = IngestService(
+            self.repo,
+            exclude_keywords=list(config.get("exclude_keywords") or []),
+            flush_threshold=int(config.get("topic_message_threshold", 20)),
+            idle_seconds=float(config.get("formation_idle_flush_seconds", 60)),
+        )
+        self.formation = FormationService(
+            self.repo,
+            self._ask_llm,
+            max_session_rounds=int(config.get("max_session_rounds", 5)),
+            recent_completed_count=int(
+                config.get("recent_completed_sessions_count", 5)
+            ),
+            history_count=int(config.get("conversation_history_count", 24)),
+            persona_fn=self._persona_text,
+        )
+        self.recall = RecallService(
+            self.repo,
+            weights={
+                "kw": float(config.get("recall_weight_keyword", 0.2)),
+                "emb": float(config.get("recall_weight_semantic", 0.6)),
+                "graph": float(config.get("recall_weight_graph", 0.2)),
+            },
+            threshold=float(config.get("memory_injection_threshold", 0.3)),
+            max_injected=int(config.get("max_injected_memories", 5)),
+            half_life_hours=float(config.get("recency_half_life_hours", 72)),
+            enable_embedding=bool(config.get("enable_embedding_recall", False)),
+            embed_fn=self._get_embedding,
+        )
 
-    def _load_group_context_for_event(self, event: AstrMessageEvent) -> str:
-        group_id = event.get_group_id() if event.get_group_id() else ""
-        if not self.memory_system.memory_config.get("enable_group_isolation", True):
-            return group_id
+        self._flush_locks: dict[str, asyncio.Lock] = {}
+        self._background_tasks: set[asyncio.Task] = []
+        self._stopping = False
+        self._sweeper_task = asyncio.create_task(self._sweeper_loop())
 
-        def _load_scope(scope_id: str) -> bool:
-            self.memory_system.memory_graph = MemoryGraph()
-            self.memory_system.load_memory_state(scope_id)
-            return bool(self.memory_system.memory_graph.memories)
+        try:
+            self.web_api = MemoryWebAPI(self.repo, context)
+            self.web_api.register()
+        except Exception as e:
+            self.web_api = None
+            logger.error(f"注册 Plugin Page API 失败: {e}", exc_info=True)
 
-        if group_id:
-            _load_scope(group_id)
-            return group_id
+        logger.info(f"Memora Connect v2 就绪：{self.repo.db_path}")
 
-        if _load_scope(""):
+    def _get_provider(self, provider_id: str):
+        try:
+            if provider_id:
+                provider = self.context.get_provider_by_id(provider_id)
+                if provider:
+                    return provider
+                for p in self.context.get_all_providers():
+                    name = getattr(getattr(p, "meta", None), "name", None) or getattr(
+                        p, "name", None
+                    )
+                    if name and str(name).lower() == provider_id.lower():
+                        return p
+                return None
+            return self.context.get_using_provider()
+        except Exception:
+            return None
+
+    async def _ask_llm(self, prompt: str) -> str:
+        provider = self._get_provider(str(self.cfg.get("llm_provider", "") or ""))
+        if provider is None:
+            raise RuntimeError("无可用 LLM 提供商（检查 llm_provider 配置）")
+        response = await provider.text_chat(prompt=prompt, contexts=[])
+        return getattr(response, "completion_text", "") or ""
+
+    async def _get_embedding(self, text: str) -> list[float]:
+        provider = self._get_provider(str(self.cfg.get("embedding_provider", "") or ""))
+        if provider is None:
+            return []
+        for method_name in ("embedding", "embeddings", "get_embedding", "get_embeddings"):
+            method = getattr(provider, method_name, None)
+            if method is None:
+                continue
+            try:
+                result = await method(text)
+                if isinstance(result, list) and result:
+                    return result
+            except Exception:
+                continue
+        return []
+
+    def _persona_text(self) -> str:
+        if not self.cfg.get("enable_persona_injection_in_memory_generation", True):
+            return ""
+        try:
+            pm = self.context.persona_manager
+            persona = pm.get_default_persona_v3()
+            if persona is None:
+                return ""
+            return str(getattr(persona, "system_prompt", "") or "")
+        except Exception:
             return ""
 
-        sender_id = ""
+    def resolve_scope(self, event: AstrMessageEvent) -> str:
+        """群聊=群号；私聊隔离=u:{sender_id}；私聊共享=default。"""
+        group_id = event.get_group_id() or ""
+        if group_id:
+            return str(group_id)
+        if not self.cfg.get("enable_group_isolation", True):
+            return "default"
+        return f"u:{event.get_sender_id() or ''}"
+
+    def _memorable(self, event: AstrMessageEvent) -> bool:
+        if event.is_private_chat():
+            return True
+        if str(self.cfg.get("group_chat_memory_mode", "at_only") or "at_only").strip().lower() == "all":
+            return True
+        return bool(getattr(event, "is_at_or_wake_command", False))
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._background_tasks = [t for t in self._background_tasks if not t.done()]
+        self._background_tasks.append(task)
+
+    def _flush_lock(self, scope_id: str) -> asyncio.Lock:
+        lock = self._flush_locks.get(scope_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._flush_locks[scope_id] = lock
+        return lock
+
+    async def _flush(self, scope_id: str) -> None:
+        async with self._flush_lock(scope_id):
+            if self.repo.count_raw(scope_id) == 0:
+                return
+            try:
+                stats = await self.formation.flush_scope(scope_id, time.time())
+                logger.info(f"记忆整理完成 scope={scope_id}: {stats}")
+            except Exception as e:
+                logger.warning(f"记忆整理失败 scope={scope_id}: {e}")
+            finally:
+                self.ingest.mark_flushed(scope_id)
+
+    async def _sweeper_loop(self) -> None:
+        """空闲触发：沉默超过阈值的 scope 定期 flush。"""
         try:
-            sender_id = str(event.get_sender_id() or "")
-        except Exception:
-            sender_id = ""
-
-        candidates = [
-            c for c in [sender_id, f"pm:{sender_id}" if sender_id else ""] if c
-        ]
-        for scope_id in candidates:
-            if _load_scope(scope_id):
-                return scope_id
-
-        return ""
-
-    def _debug_log(self, message: str, level: str = "debug"):
-        try:
-            if level == "debug":
-                logger.debug(message)
-            elif level == "info":
-                logger.info(message)
-            elif level == "warning":
-                logger.warning(message)
-            elif level == "error":
-                logger.error(message)
-            else:
-                logger.info(message)
-        except Exception:
+            while not self._stopping:
+                await asyncio.sleep(10)
+                try:
+                    for scope in self.ingest.scopes_due_flush():
+                        self._spawn(self._flush(scope))
+                except Exception as e:
+                    logger.warning(f"空闲整理调度失败: {e}")
+        except asyncio.CancelledError:
             pass
 
-    async def _async_init(self):
-        """异步初始化包装器"""
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_message(self, event: AstrMessageEvent):
+        if not self.cfg.get("enable_memory_system", True):
+            return
+        if not self._memorable(event):
+            return
+        message = (event.message_str or "").strip()
+        if not message or message.startswith(_COMMAND_PREFIXES):
+            return
+        if self.ingest.is_blocked(message):
+            return
+
+        scope = self.resolve_scope(event)
         try:
-            # 等待一小段时间，确保所有提供商都已加载完成
-            await asyncio.sleep(2)
-
-            logger.info("开始异步初始化记忆系统...")
-            await self.memory_system.initialize()
-
-            # 初始化新增模块
-            try:
-                # 1. 初始化事件总线
-                self.event_bus = await initialize_event_bus()
-
-                # 2. 初始化话题分析器
-                self.topic_analyzer = TopicAnalyzer(self.memory_system)
-
-                # 3. 初始化用户画像系统
-                self.user_profiling = UserProfilingSystem(self.memory_system)
-
-                # 注入组件到记忆系统
-                self.memory_system.set_components(
-                    self.topic_analyzer, self.user_profiling
-                )
-
-                # 4. 初始化时间维度记忆系统
-                self.temporal_memory = TemporalMemorySystem(self.memory_system)
-
-                # 5. 初始化API网关
-                self.api_gateway = MemoryAPIGateway(
-                    self.memory_system,
-                    self.topic_analyzer,
-                    self.user_profiling,
-                    self.temporal_memory,
-                )
-
-            except Exception as upgrade_e:
-                logger.error(f"主动能力升级模块初始化失败: {upgrade_e}", exc_info=True)
-
-            self._initialized = True
-
-            # 注册 Plugin Page API 到 AstrBot Dashboard
-            try:
-                self.web_api = MemoryWebAPI(self.memory_system, self.context)
-                self.web_api.register()
-            except Exception as _we:
-                logger.error(f"注册 Plugin Page API 失败: {_we}", exc_info=True)
-            logger.info("记忆系统异步初始化完成")
+            should_flush = self.ingest.accept(
+                scope,
+                message,
+                str(event.get_sender_id() or ""),
+                str(getattr(event, "get_sender_name", lambda: "")() or ""),
+            )
+            if should_flush:
+                self._spawn(self._flush(scope))
         except Exception as e:
-            logger.error(f"记忆系统初始化失败: {e}", exc_info=True)
+            logger.warning(f"消息入站失败: {e}")
+
+    @filter.on_llm_request(priority=999)
+    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
+        if not self.cfg.get("enable_memory_system", True):
+            return
+        if not self._memorable(event):
+            return
+        query = (event.message_str or "").strip()
+        if not query:
+            return
+        try:
+            scope = self.resolve_scope(event)
+            sender_name = str(getattr(event, "get_sender_name", lambda: "")() or "")
+            injection = await self.recall.build_injection(
+                scope, query, sender_name, time.time()
+            )
+            if injection and not any(
+                "【相关记忆】" in getattr(p, "text", "")
+                for p in req.extra_user_content_parts
+            ):
+                req.extra_user_content_parts.append(
+                    TextPart(text=injection).mark_as_temp()
+                )
+        except Exception as e:
+            logger.error(f"LLM请求记忆召回失败: {e}", exc_info=True)
+
+    async def terminate(self):
+        self._stopping = True
+        for task in list(self._background_tasks):
+            task.cancel()
+        if self._sweeper_task:
+            self._sweeper_task.cancel()
+            try:
+                await self._sweeper_task
+            except asyncio.CancelledError:
+                pass
+        try:
+            self.repo.close()
+        except Exception:
+            pass
+        logger.info("Memora Connect v2 已安全关闭")
+
+    async def safe_cleanup(self):
+        await self.terminate()
 
     @filter.command_group("记忆")
     def memory(self):
@@ -163,607 +271,187 @@ class MemoraConnectPlugin(Star):
 
     @memory.command("回忆")
     async def memory_recall(self, event: AstrMessageEvent, keyword: str = ""):
-        # 检查记忆系统是否启用
-        if not self.memory_system.config_manager.is_memory_system_enabled():
-            yield event.plain_result("记忆系统已禁用，无法使用回忆功能。")
+        if not self.cfg.get("enable_memory_system", True):
+            yield event.plain_result("记忆系统已禁用。")
             return
-        group_id = self._load_group_context_for_event(event)
-        memories = await self.memory_system.recall_memories_full(keyword)
-        if memories:
-            await self.memory_system._queue_save_memory_state(group_id)
-        response = self.memory_display.format_memory_search_result(memories, keyword)
-        yield event.plain_result(response)
+        scope = self.resolve_scope(event)
+        if not keyword:
+            mems = self.repo.list_memories(scope, limit=10)
+        else:
+            fused = await self.recall.recall(scope, keyword, time.time())
+            mems = [c.memory for c in fused]
+        if not mems:
+            yield event.plain_result("没有找到相关记忆。")
+            return
+        lines = ["🔍 找到以下记忆："]
+        for i, m in enumerate(mems[:10], 1):
+            date = time.strftime("%Y-%m-%d", time.localtime(m.created_at))
+            detail = f" —— {m.details}" if m.details else ""
+            lines.append(f"{i}. ({date}) {m.content}{detail} [ID:{m.id[:8]}]")
+        yield event.plain_result("\n".join(lines))
 
     @memory.command("删除")
     async def memory_delete(self, event: AstrMessageEvent, memory_id: str):
-        if not self.memory_system.config_manager.is_memory_system_enabled():
-            yield event.plain_result("记忆系统已禁用，无法删除记忆。")
+        if not self.cfg.get("enable_memory_system", True):
+            yield event.plain_result("记忆系统已禁用。")
             return
-
-        group_id = self._load_group_context_for_event(event)
-        success = await self.memory_system.delete_memory_by_id(memory_id, group_id)
-        if success:
-            await self.memory_system._queue_save_memory_state(group_id)
-            yield event.plain_result(f"✅ 记忆已删除: {memory_id}")
-        else:
+        scope = self.resolve_scope(event)
+        mem = self.repo.get_memory(memory_id.strip())
+        if mem is None or mem.scope_id != scope:
             yield event.plain_result(f"未找到记忆: {memory_id}")
+            return
+        self.repo.delete_memory(mem.id)
+        yield event.plain_result(f"✅ 记忆已删除: {mem.content[:30]}")
 
     @memory.command("状态")
     async def memory_status(self, event: AstrMessageEvent):
-        # 检查记忆系统是否启用
-        if not self.memory_system.config_manager.is_memory_system_enabled():
-            yield event.plain_result("记忆系统已禁用，无法查看状态。")
+        if not self.cfg.get("enable_memory_system", True):
+            yield event.plain_result("记忆系统已禁用。")
             return
-        scope_id = self._load_group_context_for_event(event)
-        stats = self.memory_display.format_memory_statistics()
-        if stats == "记忆库为空":
-            try:
-                from .infrastructure.resources import resource_manager
-
-                conn = resource_manager.get_db_connection(self.memory_system.db_path)
-                try:
-                    cur = conn.cursor()
-                    cur.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name='memories'"
-                    )
-                    if cur.fetchone():
-                        cur.execute("SELECT COUNT(*) FROM memories")
-                        total = int(cur.fetchone()[0])
-                        cur.execute(
-                            "SELECT COUNT(*) FROM memories WHERE group_id = ?",
-                            (scope_id,),
-                        )
-                        scope_total = int(cur.fetchone()[0])
-                        stats = "\n".join(
-                            [
-                                stats,
-                                f"当前会话ID: {scope_id or '(default)'}",
-                                f"数据库总记忆数: {total}",
-                                f"当前会话记忆数: {scope_total}",
-                                f"数据库路径: {self.memory_system.db_path}",
-                            ]
-                        )
-                finally:
-                    resource_manager.release_db_connection(
-                        self.memory_system.db_path, conn
-                    )
-            except Exception:
-                pass
-        yield event.plain_result(stats)
+        scope = self.resolve_scope(event)
+        stats = self.repo.stats(scope)
+        yield event.plain_result(
+            "\n".join(
+                [
+                    "📊 记忆系统状态 (Memora Connect v2)",
+                    f"当前空间: {scope or 'default'}",
+                    f"记忆数量: {stats['memories']}",
+                    f"要素数量: {stats['elements']}",
+                    f"关系数量: {stats['connections']}",
+                    f"印象数量: {stats['impressions']}",
+                    f"话题数量: {stats['sessions']}",
+                    f"数据库: {self.repo.db_path}",
+                ]
+            )
+        )
 
     @memory.command("印象")
     async def memory_impression(self, event: AstrMessageEvent, name: str):
-        """查询人物印象摘要和相关记忆"""
-        # 检查记忆系统是否启用
-        if not self.memory_system.config_manager.is_memory_system_enabled():
-            yield event.plain_result("记忆系统已禁用，无法查询印象。")
+        if not self.cfg.get("enable_memory_system", True):
+            yield event.plain_result("记忆系统已禁用。")
             return
-
-        try:
-            group_id = self._load_group_context_for_event(event)
-
-            # 获取印象摘要
-            impression_summary = self.memory_system.get_person_impression_summary(
-                group_id, name
+        scope = self.resolve_scope(event)
+        imp = self.repo.get_impression(scope, name.strip())
+        parts = [f"📝 {name} 的印象摘要:"]
+        if imp is not None:
+            parts.append(f"   印象: {imp.summary or '无'}")
+            parts.append(f"   好感度: {score_verbal(imp.score)} ({imp.score:.2f})")
+            parts.append(
+                f"   更新时间: {time.strftime('%Y-%m-%d %H:%M', time.localtime(imp.updated_at))}"
             )
-
-            # 获取印象记忆列表
-            impression_memories = self.memory_system.get_person_impression_memories(
-                group_id, name, limit=5
-            )
-
-            # 格式化响应
-            response_parts = []
-
-            # 添加印象摘要
-            if impression_summary:
-                score = impression_summary.get("score", 0.5)
-                score_desc = self.memory_system._score_to_description(score)
-                response_parts.append(f"📝 {name} 的印象摘要:")
-                response_parts.append(
-                    f"   印象: {impression_summary.get('summary', '无')}"
-                )
-                response_parts.append(f"   好感度: {score_desc} ({score:.2f})")
-                response_parts.append(
-                    f"   记忆数: {impression_summary.get('memory_count', 0)}"
-                )
-                response_parts.append(
-                    f"   更新时间: {impression_summary.get('last_updated', '无')}"
-                )
-            else:
-                response_parts.append(f"📝 尚未建立对 {name} 的印象")
-
-            # 添加相关记忆
-            if impression_memories:
-                response_parts.append("\n📚 相关记忆:")
-                for i, memory in enumerate(impression_memories, 1):
-                    response_parts.append(f"   {i}. {memory['content']}")
-                    if memory.get("details"):
-                        response_parts.append(f"      详情: {memory['details']}")
-                    response_parts.append(
-                        f"      好感度: {memory['score']:.2f} | 时间: {memory['last_accessed']}"
-                    )
-            else:
-                response_parts.append(f"\n📚 暂无关于 {name} 的印象记忆")
-
-            # 组合响应
-            response = "\n".join(response_parts)
-            yield event.plain_result(response)
-
-        except Exception as e:
-            logger.error(f"查询印象失败: {e}")
-            yield event.plain_result(f"查询 {name} 的印象时出现错误")
+        else:
+            parts.append(f"   尚未建立对 {name} 的印象")
+        elem = next(
+            (e for e in self.repo.list_elements(scope) if e.name == name.strip()), None
+        )
+        related = self.repo.get_element_memories(elem.id, limit=5) if elem else []
+        if related:
+            parts.append("\n📚 相关记忆:")
+            for i, m in enumerate(related, 1):
+                parts.append(f"   {i}. {m.content}")
+        else:
+            parts.append(f"\n📚 暂无关于 {name} 的相关记忆")
+        yield event.plain_result("\n".join(parts))
 
     @memory.command("图谱")
     async def memory_graph(self, event: AstrMessageEvent, layout_style: str = "auto"):
         """生成记忆图谱可视化图片
 
         Args:
-            layout_style: 布局风格，可选值：
-                - auto: 自适应布局（根据图的复杂度自动选择最适合的布局，默认）
-                - force_directed: 力导向布局
-                - circular: 圆形布局
-                - kamada_kawai: Kamada-Kawai布局
-                - spectral: 谱布局
-                - community: 社区布局
-                - hierarchical: 多层次布局
+            layout_style(string): 布局风格，可选 auto/force_directed/circular/kamada_kawai/spectral/community/hierarchical
         """
-        # 检查记忆系统是否启用
-        if not self.memory_system.config_manager.is_memory_system_enabled():
-            yield event.plain_result("记忆系统已禁用，无法生成图谱。")
+        if not self.cfg.get("enable_memory_system", True):
+            yield event.plain_result("记忆系统已禁用。")
             return
-
+        scope = self.resolve_scope(event)
+        yield event.plain_result(f"🔄 正在生成记忆图谱（布局风格: {layout_style}），请稍候...")
         try:
-            self._load_group_context_for_event(event)
-            # 发送生成中的提示
-            yield event.plain_result(
-                f"🔄 正在生成记忆图谱（布局风格: {layout_style}），请稍候..."
+            image_path = await generate_graph_image(
+                self.repo, scope, os.path.join(self.data_dir, "graphs"), layout_style
             )
-
-            # 异步生成图谱图片
-            image_path = await self.graph_visualizer.generate_graph_image(
-                layout_style=layout_style
-            )
-
-            if image_path:
-                # 检查文件是否存在
-                if os.path.exists(image_path):
-                    # 发送图片消息
-                    try:
-                        # 尝试使用 AstrBot 的图片发送功能
-                        if hasattr(event, "send_image"):
-                            await event.send_image(image_path)
-                            yield event.plain_result(
-                                f"✅ 记忆图谱已生成！（布局风格: {layout_style}）"
-                            )
-                        else:
-                            # 如果不支持直接发送图片，尝试使用其他方法
-                            yield event.image_result(image_path)
-                    except Exception as img_e:
-                        logger.error(f"发送图片失败: {img_e}", exc_info=True)
-                        # 如果发送图片失败，发送文件路径
-                        yield event.plain_result(
-                            f"✅ 记忆图谱已生成！（布局风格: {layout_style}）\n图片路径: {image_path}"
-                        )
-                else:
-                    yield event.plain_result(
-                        "❌ 图谱文件生成失败，请检查权限和磁盘空间。"
-                    )
-            else:
-                yield event.plain_result(
-                    "❌ 记忆图谱生成失败，可能是因为：\n1. 未安装依赖库（networkx, matplotlib）\n2. 记忆数据为空\n3. 系统错误"
-                )
-
         except Exception as e:
             logger.error(f"生成记忆图谱失败: {e}", exc_info=True)
-            yield event.plain_result(f"❌ 生成记忆图谱时出现错误: {str(e)}")
-
-    @filter.event_message_type(filter.EventMessageType.ALL)
-    async def on_message(self, event: AstrMessageEvent):
-        """监听所有消息，形成记忆并注入相关记忆"""
-        if not self._initialized:
-            self._debug_log("记忆系统尚未初始化完成，跳过消息处理", "debug")
-            return
-        # 检查记忆系统是否启用
-        if not self.memory_system.config_manager.is_memory_system_enabled():
-            return
-        if not event.is_private_chat() and not getattr(
-            event, "is_at_or_wake_command", False
-        ):
-            return
-
-        try:
-            group_id = self._load_group_context_for_event(event)
-
-            # 3. 消息处理使用异步队列，避免阻塞主流程
-            self.memory_system._create_managed_task(
-                self._process_message_async(event, group_id)
-            )
-
-        except Exception as e:
-            self._debug_log(f"on_message处理错误: {e}", "error")
-
-    async def _process_message_async(self, event: AstrMessageEvent, group_id: str):
-        """异步消息处理，避免阻塞主流程"""
-        try:
-            message = event.message_str
-
-            # 排除指令消息（以 / ! ！ 开头的消息）
-            # 修复话题模块在任何消息下都会触发的问题
-            if (
-                not message
-                or not message.strip()
-                or any(
-                    message.strip().startswith(prefix) for prefix in ["/", "!", "！"]
-                )
-            ):
-                return
-
-            # 检查配置中的排除关键词
-            exclude_keywords = self.memory_system.config_manager.config.exclude_keywords
-            if exclude_keywords and any(k in message.strip() for k in exclude_keywords):
-                return
-
-            sender_id = event.get_sender_id()
-
-            # 使用优化后的单次LLM调用处理消息
-            await self.memory_system.process_message_optimized(event, group_id)
-
-            # === 主动能力升级相关处理 ===
-            if self.temporal_memory:
-                try:
-                    # 未闭合话题检测
-                    await self.temporal_memory.auto_detect_and_track_questions(
-                        message, sender_id, group_id
-                    )
-                except Exception as upgrade_e:
-                    logger.debug(f"主动能力升级处理失败: {upgrade_e}")
-
-            # 使用队列化保存，减少I/O操作
-            if group_id and self.memory_system.memory_config.get(
-                "enable_group_isolation", True
-            ):
-                await self.memory_system._queue_save_memory_state(group_id)
-            else:
-                await self.memory_system._queue_save_memory_state("")  # 默认数据库
-
-        except Exception as e:
-            self._debug_log(f"异步消息处理失败: {e}", "error")
-
-    @filter.on_llm_request(priority=999)
-    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
-        """处理LLM请求时的记忆召回"""
-        try:
-            logger.info("Memora Connect 拦截到 LLM 请求，准备注入记忆...")
-            if not self._initialized:
-                logger.warning("Memora Connect 尚未初始化，跳过注入")
-                return
-            if not event.is_private_chat() and not getattr(
-                event, "is_at_or_wake_command", False
-            ):
-                return
-
-            # 获取当前消息内容
-            current_message = event.message_str.strip()
-            if not current_message:
-                return
-
-            group_id = self._load_group_context_for_event(event)
-
-            # [修改] 统一使用 inject_memories_to_context 获取完整上下文（包含记忆、话题、画像等）
-            # 避免重复召回和注入
-            full_context = await self.memory_system.inject_memories_to_context(event)
-            if full_context:
-                if not any(
-                    "【相关记忆】" in getattr(p, "text", "")
-                    for p in req.extra_user_content_parts
-                ):
-                    req.extra_user_content_parts.append(
-                        TextPart(text=full_context).mark_as_temp()
-                    )
-                    logger.debug("已将完整上下文作为用户内容块注入")
-
-        except Exception as e:
-            logger.error(f"LLM请求记忆召回失败: {e}", exc_info=True)
-
-    async def terminate(self):
-        """插件卸载时保存记忆并清理资源"""
-        self._debug_log("开始插件终止流程，清理所有资源", "info")
-
-        try:
-            # === 新增：清理主动能力升级模块 ===
+            image_path = None
+        if image_path:
             try:
-                if self.event_bus:
-                    await shutdown_event_bus()
-            except Exception as bus_e:
-                logger.warning(f"关闭事件总线失败: {bus_e}")
-
-            # 1. 停止维护循环
-            if hasattr(self.memory_system, "_should_stop_maintenance"):
-                self.memory_system._should_stop_maintenance.set()
-            if (
-                hasattr(self.memory_system, "_maintenance_task")
-                and self.memory_system._maintenance_task
-            ):
-                # 等待维护任务正常退出
-                try:
-                    await asyncio.wait_for(
-                        self.memory_system._maintenance_task, timeout=10.0
-                    )
-                except asyncio.TimeoutError:
-                    # 如果超时，取消任务
-                    self.memory_system._maintenance_task.cancel()
-                    try:
-                        await self.memory_system._maintenance_task
-                    except asyncio.CancelledError:
-                        pass
-
-            # 2. 取消所有托管的异步任务
-            if hasattr(self.memory_system, "_managed_tasks"):
-                await self.memory_system._cancel_all_managed_tasks()
-
-            # 3. 等待待处理的保存任务完成
-            if (
-                hasattr(self.memory_system, "_pending_save_task")
-                and self.memory_system._pending_save_task
-                and not self.memory_system._pending_save_task.done()
-            ):
-                try:
-                    await asyncio.wait_for(
-                        self.memory_system._pending_save_task, timeout=5.0
-                    )
-                except asyncio.TimeoutError:
-                    self.memory_system._pending_save_task.cancel()
-                    try:
-                        await self.memory_system._pending_save_task
-                    except asyncio.CancelledError:
-                        pass
-
-            # 4. 清理嵌入向量缓存
-            if (
-                hasattr(self.memory_system, "embedding_cache")
-                and self.memory_system.embedding_cache
-            ):
-                try:
-                    await self.memory_system.embedding_cache.cleanup()
-                except Exception as e:
-                    logger.warning(f"清理嵌入向量缓存时出错: {e}")
-
-            # 5. 保存记忆状态
-            await self.memory_system.save_memory_state()
-
-            # 6. 如果启用了群聊隔离，保存所有群聊数据库
-            if self.memory_system.memory_config.get("enable_group_isolation", True):
-                db_dir = os.path.dirname(self.memory_system.db_path)
-                if os.path.exists(db_dir):
-                    for filename in os.listdir(db_dir):
-                        if filename.startswith("memory_group_") and filename.endswith(
-                            ".db"
-                        ):
-                            group_id = filename[12:-3]
-                            await self.memory_system.save_memory_state(group_id)
-
-            # 7. 使用资源管理器清理所有资源
-            resource_manager.cleanup()
-
-            self._debug_log("记忆系统已保存并安全关闭", "info")
-
-        except Exception as e:
-            logger.error(f"插件终止过程中发生错误: {e}", exc_info=True)
-
-    async def safe_cleanup(self):
-        """安全清理方法，用于在 terminate 之外调用的情况"""
-        await self.terminate()
-
-    # ---------- 插件API ----------
-    async def add_memory_api(
-        self,
-        content: str,
-        theme: str = "",
-        group_id: str = "",
-        details: str = "",
-        participants: str = "",
-        location: str = "",
-        emotion: str = "",
-        tags: str = "",
-        elements: str = "",
-    ) -> str | None:
-        """【API】添加一条记忆"""
-        if not self._initialized or not self.memory_system.memory_system_enabled:
-            logger.warning("API调用失败：记忆系统未启用或未初始化。")
-            return None
-
-        try:
-            if self.memory_system.memory_config.get("enable_group_isolation", True):
-                self.memory_system.memory_graph = MemoryGraph()
-                self.memory_system.load_memory_state(group_id)
-
-            memory_id = self.memory_system.memory_graph.add_memory(
-                content=content,
-                details=details,
-                emotion=emotion,
-                group_id=group_id,
+                if hasattr(event, "send_image"):
+                    await event.send_image(image_path)
+                    yield event.plain_result("✅ 记忆图谱已生成！")
+                else:
+                    yield event.image_result(image_path)
+            except Exception as e:
+                logger.error(f"发送图片失败: {e}")
+                yield event.plain_result(f"✅ 图谱已生成：{image_path}")
+        else:
+            yield event.plain_result(
+                "❌ 图谱生成失败：记忆数据为空，或未安装 networkx/matplotlib。"
             )
 
-            if elements:
-                try:
-                    import json
-
-                    elem_list = (
-                        json.loads(elements) if isinstance(elements, str) else elements
-                    )
-                    if isinstance(elem_list, list):
-                        for elem in elem_list:
-                            if isinstance(elem, dict):
-                                name = str(elem.get("name", "")).strip()
-                                category = str(elem.get("category", "trait")).strip()
-                                role = str(elem.get("role", "")).strip()
-                                if name:
-                                    eid = self.memory_system.memory_graph.get_or_create_element(
-                                        name, category, group_id
-                                    )
-                                    self.memory_system.memory_graph.link_memory(
-                                        eid, memory_id, role
-                                    )
-                        self.memory_system.memory_graph.auto_connect_cooccurring_elements(
-                            memory_id
-                        )
-                except Exception:
-                    pass
-
-            if not elements and (participants or location or tags):
-                if participants:
-                    for p in participants.replace("，", ",").split(","):
-                        p = p.strip()
-                        if p:
-                            eid = self.memory_system.memory_graph.get_or_create_element(
-                                p, "person", group_id
-                            )
-                            self.memory_system.memory_graph.link_memory(
-                                eid, memory_id, "subject"
-                            )
-                if location:
-                    for loc in location.replace("，", ",").split(","):
-                        loc = loc.strip()
-                        if loc:
-                            eid = self.memory_system.memory_graph.get_or_create_element(
-                                loc, "place", group_id
-                            )
-                            self.memory_system.memory_graph.link_memory(
-                                eid, memory_id, "scene"
-                            )
-                if tags:
-                    for tag in tags.replace("，", ",").split(","):
-                        tag = tag.strip()
-                        if tag:
-                            eid = self.memory_system.memory_graph.get_or_create_element(
-                                tag, "trait", group_id
-                            )
-                            self.memory_system.memory_graph.link_memory(
-                                eid, memory_id, "attribute"
-                            )
-                self.memory_system.memory_graph.auto_connect_cooccurring_elements(
-                    memory_id
-                )
-
-            if (
-                not elements
-                and not participants
-                and not location
-                and not tags
-                and theme
-            ):
-                for kw in theme.replace("，", ",").split(","):
-                    kw = kw.strip()
-                    if kw:
-                        eid = self.memory_system.memory_graph.get_or_create_element(
-                            kw, "trait", group_id
-                        )
-                        self.memory_system.memory_graph.link_memory(eid, memory_id, "")
-                self.memory_system.memory_graph.auto_connect_cooccurring_elements(
-                    memory_id
-                )
-
-            await self.memory_system._queue_save_memory_state(group_id)
-
-            logger.info(f"通过API添加记忆成功: {memory_id}")
-            return memory_id
-        except Exception as e:
-            logger.error(f"API add_memory_api 失败: {e}", exc_info=True)
+    async def add_memory_api(self, content: str, theme: str = "", group_id: str = "",
+                             details: str = "", participants: str = "",
+                             location: str = "", emotion: str = "", tags: str = "",
+                             elements: str = "") -> str | None:
+        scope = group_id or "default"
+        if not content:
             return None
+        now = time.time()
+        memory = Memory(id=new_id("mem"), scope_id=scope, content=content,
+                        details=details, emotion=emotion, created_at=now,
+                        last_accessed=now)
+        self.repo.upsert_memory(memory)
+        names: list[tuple[str, str]] = []
+        if elements:
+            try:
+                parsed = json.loads(elements) if isinstance(elements, str) else elements
+                for el in parsed if isinstance(parsed, list) else []:
+                    if isinstance(el, dict) and str(el.get("name", "")).strip():
+                        cat = str(el.get("category", "trait")).strip()
+                        names.append((str(el["name"]).strip(),
+                                      cat if cat in CATEGORIES else "trait"))
+            except Exception:
+                pass
+        if not names:
+            for raw, cat in ((participants, "person"), (location, "place"),
+                             (tags, "trait"), (theme, "trait")):
+                names.extend((p.strip(), cat) for p in (raw or "").replace("，", ",").split(",")
+                             if p.strip())
+        for name, cat in names:
+            elem = self.repo.get_or_create_element(scope, name, cat, now)
+            self.repo.link_memory_element(memory.id, elem.id, "")
+        return memory.id
 
-    async def recall_memories_api(
-        self, keyword: str, group_id: str = ""
-    ) -> list[dict[str, Any]]:
-        """【API】根据关键词回忆相关记忆"""
-        if not self._initialized or not self.memory_system.memory_system_enabled:
-            logger.warning("API调用失败：记忆系统未启用或未初始化。")
-            return []
+    async def recall_memories_api(self, keyword: str, group_id: str = "") -> list:
+        scope = group_id or "default"
+        fused = await self.recall.recall(scope, keyword, time.time())
+        return [c.memory.__dict__ for c in fused]
 
-        try:
-            # 切换到正确的群聊上下文
-            if self.memory_system.memory_config.get("enable_group_isolation", True):
-                self.memory_system.memory_graph = MemoryGraph()
-                self.memory_system.load_memory_state(group_id)
-
-            memories = await self.memory_system.recall_memories_full(keyword)
-            if memories:
-                await self.memory_system._queue_save_memory_state(group_id)
-            return [memory.__dict__ for memory in memories]
-        except Exception as e:
-            logger.error(f"API recall_memories_api 失败: {e}", exc_info=True)
-            return []
-
-    async def record_impression_api(
-        self,
-        person_name: str,
-        summary: str,
-        score: float | None,
-        details: str = "",
-        group_id: str = "",
-    ) -> bool:
-        """【API】记录对某个人的印象"""
-        if not self._initialized or not self.memory_system.memory_system_enabled:
-            logger.warning("API调用失败：记忆系统未启用或未初始化。")
+    async def record_impression_api(self, person_name: str, summary: str,
+                                    score: float | None, details: str = "",
+                                    group_id: str = "") -> bool:
+        scope = group_id or "default"
+        if not person_name or not summary:
             return False
+        current = self.repo.get_impression(scope, person_name)
+        new_score = max(0.0, min(1.0, float(score))) if score is not None else (
+            current.score if current else 0.5
+        )
+        self.repo.upsert_impression(scope, person_name, new_score, summary, time.time())
+        return True
 
-        try:
-            if self.memory_system.memory_config.get("enable_group_isolation", True):
-                self.memory_system.memory_graph = MemoryGraph()
-                self.memory_system.load_memory_state(group_id)
-
-            memory_id = self.memory_system.record_person_impression(
-                group_id, person_name, summary, score, details
-            )
-            await self.memory_system._queue_save_memory_state(group_id)
-            return bool(memory_id)
-        except Exception as e:
-            logger.error(f"API record_impression_api 失败: {e}", exc_info=True)
-            return False
-
-    async def get_impression_summary_api(
-        self, person_name: str, group_id: str = ""
-    ) -> dict[str, Any] | None:
-        """【API】获取对某个人的印象摘要"""
-        if not self._initialized or not self.memory_system.memory_system_enabled:
-            logger.warning("API调用失败：记忆系统未启用或未初始化。")
+    async def get_impression_summary_api(self, person_name: str,
+                                         group_id: str = "") -> dict | None:
+        imp = self.repo.get_impression(group_id or "default", person_name)
+        if imp is None:
             return None
+        return {"score": imp.score, "summary": imp.summary,
+                "last_updated": imp.updated_at}
 
-        try:
-            if self.memory_system.memory_config.get("enable_group_isolation", True):
-                self.memory_system.memory_graph = MemoryGraph()
-                self.memory_system.load_memory_state(group_id)
+    async def adjust_impression_score_api(self, person_name: str, delta: float,
+                                          group_id: str = "") -> float | None:
+        return self.repo.adjust_impression(
+            group_id or "default", person_name, float(delta), time.time()
+        )
 
-            return self.memory_system.get_person_impression_summary(
-                group_id, person_name
-            )
-        except Exception as e:
-            logger.error(f"API get_impression_summary_api 失败: {e}", exc_info=True)
-            return None
-
-    async def adjust_impression_score_api(
-        self, person_name: str, delta: float, group_id: str = ""
-    ) -> float | None:
-        """【API】调整对某个人的好感度分数"""
-        if not self._initialized or not self.memory_system.memory_system_enabled:
-            logger.warning("API调用失败：记忆系统未启用或未初始化。")
-            return None
-
-        try:
-            if self.memory_system.memory_config.get("enable_group_isolation", True):
-                self.memory_system.memory_graph = MemoryGraph()
-                self.memory_system.load_memory_state(group_id)
-
-            new_score = self.memory_system.adjust_impression_score(
-                group_id, person_name, delta
-            )
-            await self.memory_system._queue_save_memory_state(group_id)
-            return new_score
-        except Exception as e:
-            logger.error(f"API adjust_impression_score_api 失败: {e}", exc_info=True)
-            return None
-
-    # ---------- LLM 函数工具 ----------
     @filter.llm_tool(name="create_memory")
     async def create_memory_tool(
         self,
@@ -783,140 +471,38 @@ class MemoraConnectPlugin(Star):
 
         Args:
             content(string): 需要记录的完整对话内容
-            theme(string): 核心关键词，用逗号分隔（向后兼容，优先使用elements）
+            theme(string): 核心关键词，用逗号分隔（优先使用elements）
             elements(string): 记忆元素JSON数组，格式如 [{"name":"张三","category":"person","role":"subject"}]，category可选: person/object/place/action/trait
             details(string): 具体细节和背景信息
             emotion(string): 情感色彩
             allow_forget(string): 是否允许遗忘
             confidence(number): 置信度，0-1之间的数值
-            participants(string): 涉及的人物，用逗号分隔（向后兼容）
-            location(string): 相关场景或地点（向后兼容）
-            tags(string): 分类标签（向后兼容）
+            participants(string): 涉及的人物，用逗号分隔
+            location(string): 相关场景或地点
+            tags(string): 分类标签
         """
+        if not content or not content.strip():
+            return "创建记忆失败：内容为空"
+        scope = self.resolve_scope(event)
         try:
-            if not content:
-                logger.warning("创建记忆失败：内容为空")
-                return "创建记忆失败：内容为空"
-
-            parsed_allow_forget = self.memory_system._parse_allow_forget_value(
-                allow_forget, None
-            )
-            if allow_forget is not None and parsed_allow_forget is None:
-                return "创建记忆失败：allow_forget参数无效"
-            initial_allow_forget = (
-                parsed_allow_forget if parsed_allow_forget is not None else True
-            )
-
-            try:
-                confidence_float = max(0.0, min(1.0, float(confidence)))
-            except (ValueError, TypeError):
-                confidence_float = 0.7
-
-            group_id = self._load_group_context_for_event(event)
-            base_strength = 1.0 * confidence_float
-
-            resolved_allow_forget = await self.memory_system.resolve_allow_forget(
-                content=content,
-                theme=theme or "",
-                details=details,
-                participants=participants,
-                location=location,
-                emotion=emotion,
-                tags=tags,
-                initial_allow_forget=initial_allow_forget,
-            )
-
-            memory_id = self.memory_system.memory_graph.add_memory(
-                content=content,
-                details=details,
-                emotion=emotion,
-                strength=base_strength,
-                allow_forget=resolved_allow_forget,
-                group_id=group_id,
-            )
-
-            element_linked = False
-
-            if elements:
-                try:
-                    import json
-
-                    elem_list = (
-                        json.loads(elements) if isinstance(elements, str) else elements
-                    )
-                    if isinstance(elem_list, list):
-                        for elem in elem_list:
-                            if isinstance(elem, dict):
-                                name = str(elem.get("name", "")).strip()
-                                category = str(elem.get("category", "trait")).strip()
-                                role = str(elem.get("role", "")).strip()
-                                if name:
-                                    from .core.models import CATEGORIES
-
-                                    if category not in CATEGORIES:
-                                        category = "trait"
-                                    eid = self.memory_system.memory_graph.get_or_create_element(
-                                        name, category, group_id
-                                    )
-                                    self.memory_system.memory_graph.link_memory(
-                                        eid, memory_id, role
-                                    )
-                                    element_linked = True
-                        if element_linked:
-                            self.memory_system.memory_graph.auto_connect_cooccurring_elements(
-                                memory_id
-                            )
-                except Exception:
-                    pass
-
-            if not element_linked:
-                actual_theme = theme or ""
-                fallback_parts = []
-                if participants:
-                    fallback_parts.extend(
-                        p.strip()
-                        for p in participants.replace("，", ",").split(",")
-                        if p.strip()
-                    )
-                if location:
-                    fallback_parts.extend(
-                        l.strip()
-                        for l in location.replace("，", ",").split(",")
-                        if l.strip()
-                    )
-                if tags:
-                    fallback_parts.extend(
-                        t.strip()
-                        for t in tags.replace("，", ",").split(",")
-                        if t.strip()
-                    )
-                if actual_theme:
-                    fallback_parts.extend(
-                        k.strip()
-                        for k in actual_theme.replace("，", ",").split(",")
-                        if k.strip()
-                    )
-
-                for kw in fallback_parts:
-                    eid = self.memory_system.memory_graph.get_or_create_element(
-                        kw, "trait", group_id
-                    )
-                    self.memory_system.memory_graph.link_memory(eid, memory_id, "")
-                if fallback_parts:
-                    self.memory_system.memory_graph.auto_connect_cooccurring_elements(
-                        memory_id
-                    )
-
-            await self.memory_system._queue_save_memory_state(group_id)
-
-            logger.info(f"LLM工具创建记忆：{content[:30]} (置信度: {confidence})")
-
+            confidence_float = max(0.0, min(1.0, float(confidence)))
+        except (ValueError, TypeError):
+            confidence_float = 0.7
+        memory_id = await self.add_memory_api(
+            content=content.strip(),
+            theme=theme or "",
+            group_id=scope,
+            details=details,
+            participants=participants,
+            location=location,
+            emotion=emotion,
+            tags=tags,
+            elements=elements,
+        )
+        if memory_id:
+            self.repo.update_memory_fields(memory_id, strength=confidence_float)
             return f"记忆创建成功,内容为:{content}"
-
-        except Exception as e:
-            logger.error(f"LLM工具创建记忆失败：{e}")
-            await event.send(MessageChain().message("记忆创建失败"))
-            return "记忆创建失败"
+        return "记忆创建失败"
 
     @filter.llm_tool(name="recall_memory")
     async def recall_memory_tool(
@@ -927,26 +513,23 @@ class MemoraConnectPlugin(Star):
         Args:
             keyword(string): 要查询的关键词或内容
         """
+        if not keyword or not keyword.strip():
+            return "没有相关记忆"
+        scope = self.resolve_scope(event)
         try:
-            group_id = self._load_group_context_for_event(event)
-            enhanced_recall = EnhancedMemoryRecall(self.memory_system)
-            results = await enhanced_recall.recall_all_relevant_memories(
-                query=keyword, max_memories=8, group_id=group_id
-            )
-
-            if results:
-                # 生成增强的上下文
-                formatted_memories = enhanced_recall.format_memories_for_llm(
-                    results, include_ids=True
-                )
-                return f"记忆召回结果:{formatted_memories}\n提示：如果记忆已过时允许删除记忆"
-            else:
-                return "没有相关记忆"
-
+            fused = await self.recall.recall(scope, keyword.strip(), time.time())
         except Exception as e:
-            logger.error(f"增强记忆召回工具失败：{e}")
-            await event.send(MessageChain().message("记忆召回失败"))
+            logger.error(f"记忆召回工具失败：{e}")
             return "记忆召回失败"
+        if not fused:
+            return "没有相关记忆"
+        lines = ["记忆召回结果:"]
+        for i, cand in enumerate(fused, 1):
+            m = cand.memory
+            date = time.strftime("%Y-%m-%d", time.localtime(m.created_at))
+            lines.append(f"{i}. [ID:{m.id}] ({date}) {m.content}")
+        lines.append("提示：如果记忆已过时允许删除记忆")
+        return "\n".join(lines)
 
     @filter.llm_tool(name="delete_memory")
     async def delete_memory_tool(
@@ -958,22 +541,13 @@ class MemoraConnectPlugin(Star):
             memory_id(string): 需要删除的记忆ID
             reason(string): 删除原因或说明
         """
-        try:
-            if not self.memory_system.config_manager.is_memory_system_enabled():
-                return "记忆系统已禁用，无法删除记忆"
-
-            group_id = self._load_group_context_for_event(event)
-            success = await self.memory_system.delete_memory_by_id(memory_id, group_id)
-            if success:
-                await self.memory_system._queue_save_memory_state(group_id)
-                logger.info(f"LLM工具删除记忆：{memory_id} 原因:{reason}")
-                return f"记忆已删除: {memory_id}"
-
+        scope = self.resolve_scope(event)
+        mem = self.repo.get_memory(memory_id.strip())
+        if mem is None or mem.scope_id != scope:
             return f"未找到记忆: {memory_id}"
-        except Exception as e:
-            logger.error(f"LLM工具删除记忆失败：{e}")
-            await event.send(MessageChain().message("删除记忆失败"))
-            return "删除记忆失败"
+        self.repo.delete_memory(mem.id)
+        logger.info(f"LLM工具删除记忆：{mem.id} 原因:{reason}")
+        return f"记忆已删除: {mem.id}"
 
     @filter.llm_tool(name="adjust_impression")
     async def adjust_impression_tool(
@@ -987,40 +561,17 @@ class MemoraConnectPlugin(Star):
             reason(string): 调整原因和详细信息
         """
         try:
-            # 获取群组ID
-            group_id = self._load_group_context_for_event(event)
-
-            # 调整印象分数 - 将字符串转换为浮点数
-            try:
-                delta_float = float(delta)
-            except (ValueError, TypeError):
-                logger.warning(f"无法将delta '{delta}' 转换为浮点数，使用默认值0.0")
-                delta_float = 0.0
-
-            new_score = self.memory_system.adjust_impression_score(
-                group_id, person_name, delta_float
+            delta_float = float(delta)
+        except (ValueError, TypeError):
+            return "调整印象失败：delta 参数无效"
+        scope = self.resolve_scope(event)
+        new_score = self.repo.adjust_impression(scope, person_name.strip(), delta_float, time.time())
+        if reason:
+            self.repo.upsert_impression(
+                scope, person_name.strip(), new_score,
+                f"调整对{person_name}的印象：{reason}", time.time()
             )
-            await self.memory_system._queue_save_memory_state(group_id)
-
-            # 记录调整原因
-            if reason:
-                summary = (
-                    f"调整对{person_name}的印象：{reason}，当前好感度：{new_score:.2f}"
-                )
-                self.memory_system.record_person_impression(
-                    group_id, person_name, summary, new_score, reason
-                )
-
-            logger.info(
-                f"LLM工具调整印象：{person_name} 调整量:{delta} 新分数:{new_score:.2f}"
-            )
-
-            return f"调整印象成功，{person_name} 的好感度为 {new_score:.2f}"
-
-        except Exception as e:
-            logger.error(f"LLM工具调整印象失败：{e}")
-            await event.send(MessageChain().message("调整印象失败"))
-            return "调整印象失败"
+        return f"调整印象成功，{person_name} 的好感度为 {new_score:.2f}"
 
     @filter.llm_tool(name="record_impression")
     async def record_impression_tool(
@@ -1039,36 +590,22 @@ class MemoraConnectPlugin(Star):
             score(number): 好感度分数 (0-1)，可选
             details(string): 详细信息和背景
         """
-        try:
-            # 获取群组ID
-            group_id = self._load_group_context_for_event(event)
-
-            # 验证分数范围 - 将字符串转换为浮点数
-            score_float = None
-            if score is not None:
-                try:
-                    score_float = max(0.0, min(1.0, float(score)))
-                except (ValueError, TypeError):
-                    logger.warning(f"无法将score '{score}' 转换为浮点数，使用默认值")
-                    score_float = None
-
-            # 记录印象
-            memory_id = self.memory_system.record_person_impression(
-                group_id, person_name, summary, score_float, details
-            )
-            await self.memory_system._queue_save_memory_state(group_id)
-
-            if memory_id:
-                current_score = self.memory_system.get_impression_score(
-                    group_id, person_name
-                )
-                logger.info(
-                    f"LLM工具记录印象：{person_name} 分数:{current_score:.2f} 摘要:{summary[:50]}..."
-                )
-
-            return f"记录印象成功，{person_name} 的好感度为 {current_score:.2f}"
-
-        except Exception as e:
-            logger.error(f"LLM工具记录印象失败：{e}")
-            await event.send(MessageChain().message("记录印象失败"))
-            return "记录印象失败"
+        if not person_name.strip() or not summary.strip():
+            return "记录印象失败：参数不完整"
+        scope = self.resolve_scope(event)
+        score_float = None
+        if score is not None:
+            try:
+                score_float = max(0.0, min(1.0, float(score)))
+            except (ValueError, TypeError):
+                score_float = None
+        current = self.repo.get_impression(scope, person_name.strip())
+        final_score = score_float if score_float is not None else (
+            current.score if current else 0.5
+        )
+        text = summary.strip()
+        if details.strip():
+            text = f"{text}（{details.strip()}）"
+        self.repo.upsert_impression(scope, person_name.strip(), final_score, text, time.time())
+        self.repo.get_or_create_element(scope, person_name.strip(), "person", time.time())
+        return f"记录印象成功，{person_name} 的好感度为 {final_score:.2f}"

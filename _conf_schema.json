@@ -1,106 +1,124 @@
 {
   "enable_memory_system": {
-    "description": "启用印象系统",
+    "description": "启用记忆系统",
     "type": "bool",
-    "hint": "是否启用印象记忆系统，关闭后将停止所有记忆相关的功能",
+    "hint": "总开关，关闭后插件停止整理与召回",
     "default": true,
     "obvious_hint": true
   },
   "enable_group_isolation": {
-    "description": "启用群聊隔离",
+    "description": "群聊/私聊隔离",
     "type": "bool",
-    "hint": "是否启用群聊记忆隔离，防止不同群之间的记忆互相泄露",
+    "hint": "开启后每个群、每个私聊各有独立记忆库；关闭则全部共用一个",
     "default": true
   },
-  "recall_mode": {
-    "description": "主要工作模式",
+  "group_chat_memory_mode": {
+    "description": "群聊消息收集",
     "type": "string",
-    "hint": "选择主要的工作模式，simple：最方便，无需配置，效果最差, llm：允许使用llm工作, embedding：embedding和llm配合工作",
-    "options": ["simple", "llm", "embedding"],
-    "default": "simple"
-  },
-  "enable_associative_recall": {
-    "description": "启用联想回忆",
-    "type": "bool",
-    "hint": "是否在llm和embedding模式下启用基于知识图谱的联想回忆功能，会智能补充相关记忆",
-    "default": true
-  },
-  "llm_provider": {
-    "description": "LLM服务提供商",
-    "type": "string",
-    "hint": "选择用于记忆形成的LLM服务提供商，将使用AstrBot配置的对应提供商",
-    "default": "openai"
-  },
-  "embedding_provider": {
-    "description": "嵌入模型服务提供商",
-    "type": "string",
-    "hint": "选择嵌入模型的服务提供商，将使用AstrBot配置的对应提供商",
-    "default": "openai"
-  },
-  "forget_threshold_days": {
-    "description": "遗忘阈值天数",
-    "type": "int",
-    "hint": "多少天后开始遗忘不活跃的记忆",
-    "default": 30
-  },
-  "consolidation_interval_hours": {
-    "description": "记忆整理间隔小时",
-    "type": "int",
-    "hint": "多久进行一次记忆整理和合并",
-    "default": 24
-  },
-  "max_injected_memories": {
-    "description": "最大注入记忆数",
-    "type": "int",
-    "hint": "每次对话中最多注入多少条相关记忆到LLM上下文",
-    "default": 5
-  },
-  "enable_enhanced_memory": {
-    "description": "启用增强记忆功能",
-    "type": "bool",
-    "hint": "是否启用增强记忆功能，包括增强召回和自动注入相关记忆到LLM上下文",
-    "default": true
-  },
-  "memory_injection_threshold": {
-    "description": "记忆注入阈值",
-    "type": "float",
-    "hint": "记忆相关性阈值，低于此值的记忆不会被注入(0-1)",
-    "default": 0.3
-  },
-  "conversation_history_count": {
-    "description": "对话历史条数",
-    "type": "int",
-    "hint": "获取对话历史时的最大条数，影响记忆提取的上下文范围",
-    "default": 24
-  },
-  "topic_message_threshold": {
-    "description": "话题分析消息阈值",
-    "type": "int",
-    "hint": "积累到此数量的消息后触发话题分析",
-    "default": 20
-  },
-  "recent_completed_sessions_count": {
-    "description": "保留的已完成会话数量",
-    "type": "int",
-    "hint": "用于构建LLM上下文的最近已完成会话摘要数量",
-    "default": 5
+    "hint": "at_only：仅 @机器人 的群消息进入记忆；all：群聊全部消息进入记忆",
+    "default": "at_only",
+    "options": ["at_only", "all"]
   },
   "enable_persona_injection_in_memory_generation": {
-    "description": "启用记忆生成人格注入",
+    "description": "整理记忆时参考人格",
     "type": "bool",
-    "hint": "是否在话题分析/记忆生成阶段注入当前会话人格设定",
+    "hint": "让记忆整理模型知道当前人格设定，以便正确理解\"我\"是谁",
     "default": true
   },
-  "max_session_rounds": {
-    "description": "会话强制总结轮次",
+  "enable_embedding_recall": {
+    "description": "语义召回",
+    "type": "bool",
+    "hint": "按语义相似度召回记忆；需配置嵌入提供商，未配置时自动跳过",
+    "default": false
+  },
+  "recall_weight_keyword": {
+    "description": "召回权重：关键词",
+    "type": "float",
+    "hint": "三个召回权重自动归一化，按比例调整即可",
+    "default": 0.2
+  },
+  "recall_weight_semantic": {
+    "description": "召回权重：语义",
+    "type": "float",
+    "hint": "仅在开启语义召回后生效",
+    "default": 0.6
+  },
+  "recall_weight_graph": {
+    "description": "召回权重：图谱",
+    "type": "float",
+    "hint": "提到相关人物地点时，顺带召回关联记忆；置 0 关闭联想",
+    "default": 0.2
+  },
+  "memory_injection_threshold": {
+    "description": "注入阀门",
+    "type": "float",
+    "hint": "记忆达到该相关度才会注入（0~1），调高则注入更少",
+    "default": 0.3
+  },
+  "max_injected_memories": {
+    "description": "每次注入条数",
     "type": "int",
-    "hint": "会话经历多少轮分析后强制完成（防止模型一直标ongoing不总结），0=不限制",
+    "hint": "单次对话最多注入多少条记忆",
     "default": 5
   },
+  "recency_half_life_hours": {
+    "description": "记忆半衰期",
+    "type": "float",
+    "hint": "越大越偏爱旧记忆，单位小时",
+    "default": 72
+  },
+  "topic_message_threshold": {
+    "description": "记录触发条数",
+    "type": "int",
+    "hint": "累计这么多条消息后，让 AI 整理一次这批消息的记忆",
+    "default": 20
+  },
+  "formation_idle_flush_seconds": {
+    "description": "记录触发空闲（秒）",
+    "type": "int",
+    "hint": "对话沉默这么久后，让 AI 整理一次未收尾的话题记忆",
+    "default": 60
+  },
+  "max_session_rounds": {
+    "description": "话题最大轮次",
+    "type": "int",
+    "hint": "同一话题超过该轮次后强制完结并生成记忆",
+    "default": 5
+  },
+  "recent_completed_sessions_count": {
+    "description": "已完结话题参考数",
+    "type": "int",
+    "hint": "整理时附带最近完结话题的摘要，帮助话题延续",
+    "default": 5
+  },
+  "conversation_history_count": {
+    "description": "单次分析消息上限",
+    "type": "int",
+    "hint": "单次整理最多送多少条消息给模型",
+    "default": 24
+  },
+  "open_topic_retention_days": {
+    "description": "未回应话题保留天数",
+    "type": "int",
+    "hint": "仅最近该天数内的话题会注入对话",
+    "default": 7
+  },
+  "llm_provider": {
+    "description": "整理记忆用 LLM",
+    "type": "string",
+    "hint": "填提供商 ID；留空使用当前默认提供商",
+    "default": ""
+  },
+  "embedding_provider": {
+    "description": "语义召回用嵌入",
+    "type": "string",
+    "hint": "填提供商 ID；留空使用当前默认提供商",
+    "default": ""
+  },
   "exclude_keywords": {
-    "description": "排除关键词列表",
+    "description": "排除关键词",
     "type": "list",
-    "hint": "如果消息以这些关键词开头，将被记忆系统忽略",
+    "hint": "命中这些词的消息会被跳过",
     "default": []
   }
 }

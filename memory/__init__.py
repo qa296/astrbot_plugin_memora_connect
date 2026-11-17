@@ -1,6 +1,1 @@
-"""记忆功能模块"""
-from .memory_display import EnhancedMemoryDisplay
-from .memory_recall import EnhancedMemoryRecall, MemoryRecallResult
-from .visualization import MemoryGraphVisualizer
-
-__all__ = ['EnhancedMemoryDisplay', 'EnhancedMemoryRecall', 'MemoryRecallResult', 'MemoryGraphVisualizer']
+"""记忆功能模块（v2）：可视化精简实现；真实导入在 main.py 完成。"""
