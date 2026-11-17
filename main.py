@@ -32,7 +32,7 @@ _COMMAND_PREFIXES = ("/", "!", "！")
     "astrbot_plugin_memora_connect",
     "qa296",
     "赋予AI模仿人类的记忆和印象能力。从对话自动沉淀记忆、人物与关系图谱，请求时按相关度召回注入，好感度独立追踪",
-    "0.6.0",
+    "0.7.0",
     "https://github.com/qa296/astrbot_plugin_memora_connect",
 )
 class MemoraConnectPlugin(Star):

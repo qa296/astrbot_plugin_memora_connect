@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-v0.6.0-green?style=for-the-badge) ![AstrBot](https://img.shields.io/badge/AstrBot-plugin-blue?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-v0.7.0-green?style=for-the-badge) ![AstrBot](https://img.shields.io/badge/AstrBot-plugin-blue?style=for-the-badge)
 
 **模仿海马体的 AI 记忆插件 — 让聊天机器人拥有持久记忆**
 
