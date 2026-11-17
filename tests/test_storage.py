@@ -61,6 +61,20 @@ class TestMemoryCrud:
         finally:
             repo.close()
 
+    def test_delete_memory_without_fts5(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(repo_mod.schema, "_try_create_fts", lambda conn: False)
+        monkeypatch.setattr(repo_mod.schema, "has_fts", lambda conn: False)
+        repo = repo_mod.MemoryRepository(str(tmp_path / "t.db"))
+        try:
+            assert repo.fts_enabled is False
+            repo.upsert_memory(_memory("m1", content="没有FTS5也能删"))
+            assert repo.get_memory("m1") is not None
+            assert repo.delete_memory("m1") is True
+            assert repo.get_memory("m1") is None
+            assert repo.delete_memory("m1") is False
+        finally:
+            repo.close()
+
     def test_scope_isolation(self, tmp_path):
         repo = repo_mod.MemoryRepository(str(tmp_path / "t.db"))
         try:

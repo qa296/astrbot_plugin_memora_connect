@@ -12,6 +12,13 @@
     "hint": "开启后每个群、每个私聊各有独立记忆库；关闭则全部共用一个",
     "default": true
   },
+  "group_chat_memory_mode": {
+    "description": "群聊消息收集",
+    "type": "string",
+    "hint": "at_only：仅 @机器人 的群消息进入记忆；all：群聊全部消息进入记忆",
+    "default": "at_only",
+    "options": ["at_only", "all"]
+  },
   "enable_persona_injection_in_memory_generation": {
     "description": "整理记忆时参考人格",
     "type": "bool",

@@ -151,6 +151,13 @@ class MemoraConnectPlugin(Star):
             return "default"
         return f"u:{event.get_sender_id() or ''}"
 
+    def _memorable(self, event: AstrMessageEvent) -> bool:
+        if event.is_private_chat():
+            return True
+        if str(self.cfg.get("group_chat_memory_mode", "at_only") or "at_only").strip().lower() == "all":
+            return True
+        return bool(getattr(event, "is_at_or_wake_command", False))
+
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
         self._background_tasks = [t for t in self._background_tasks if not t.done()]
@@ -192,9 +199,7 @@ class MemoraConnectPlugin(Star):
     async def on_message(self, event: AstrMessageEvent):
         if not self.cfg.get("enable_memory_system", True):
             return
-        if not event.is_private_chat() and not getattr(
-            event, "is_at_or_wake_command", False
-        ):
+        if not self._memorable(event):
             return
         message = (event.message_str or "").strip()
         if not message or message.startswith(_COMMAND_PREFIXES):
@@ -219,9 +224,7 @@ class MemoraConnectPlugin(Star):
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         if not self.cfg.get("enable_memory_system", True):
             return
-        if not event.is_private_chat() and not getattr(
-            event, "is_at_or_wake_command", False
-        ):
+        if not self._memorable(event):
             return
         query = (event.message_str or "").strip()
         if not query:

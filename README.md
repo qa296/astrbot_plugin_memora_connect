@@ -45,6 +45,7 @@ LLM 也会自动调用 `create_memory`、`recall_memory`、`delete_memory`、`ad
 ## 配置要点
 
 - `recall_weight_keyword / semantic / graph`：召回权重，可调、自动归一。
+- `group_chat_memory_mode`：群聊记忆收集范围（at_only 仅 @机器人 的消息；all 收全部群消息）。
 - `enable_embedding_recall`：开启语义召回（需 AstrBot 可用的 embedding provider）。
 - `formation_idle_flush_seconds` / `topic_message_threshold`：会话分析触发时机。
 - `memory_injection_threshold`：注入上下文的最低相关度。

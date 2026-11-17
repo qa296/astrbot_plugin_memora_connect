@@ -153,7 +153,8 @@ class MemoryRepository:
     def delete_memory(self, memory_id: str) -> bool:
         cur = self._execute("DELETE FROM memories WHERE id = ?", (memory_id,))
         self._execute("DELETE FROM memory_elements WHERE memory_id = ?", (memory_id,))
-        self._execute("DELETE FROM memories_fts WHERE mem_id = ?", (memory_id,))
+        if self.fts_enabled:
+            self._execute("DELETE FROM memories_fts WHERE mem_id = ?", (memory_id,))
         return cur.rowcount > 0
 
     def get_memory(self, memory_id: str) -> Memory | None:

@@ -128,6 +128,35 @@ def test_scope_resolution(tmp_path):
     asyncio.run(run())
 
 
+def test_group_message_gate_at_only(tmp_path):
+    async def run():
+        plugin, _ = _build(tmp_path)
+        try:
+            await plugin.on_message(FakeEvent("群聊闲聊", at=False))
+            assert plugin.repo.count_raw("g1") == 0
+            await plugin.on_message(FakeEvent("群聊@了", at=True))
+            assert plugin.repo.count_raw("g1") == 1
+            await plugin.on_message(FakeEvent("私聊消息", group_id="", private=True,
+                                              at=False))
+            assert plugin.repo.count_raw("u:u1") == 1
+        finally:
+            await plugin.terminate()
+
+    asyncio.run(run())
+
+
+def test_group_message_gate_all_mode(tmp_path):
+    async def run():
+        plugin, _ = _build(tmp_path, group_chat_memory_mode="all")
+        try:
+            await plugin.on_message(FakeEvent("群聊闲聊", at=False))
+            assert plugin.repo.count_raw("g1") == 1
+        finally:
+            await plugin.terminate()
+
+    asyncio.run(run())
+
+
 def test_message_to_memory_pipeline(tmp_path):
     reply = json.dumps(
         {
